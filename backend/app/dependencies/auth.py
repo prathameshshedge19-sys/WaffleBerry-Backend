@@ -1,7 +1,7 @@
 """Authentication dependencies for protected API endpoints."""
 
 from fastapi import Depends, HTTPException, status
-from fastapi.security import OAuth2PasswordBearer
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
 
 from app.crud.user import UserCRUD
@@ -10,10 +10,7 @@ from app.models.user import User
 from app.services.token_service import TokenValidationError, decode_access_token
 
 
-oauth2_scheme = OAuth2PasswordBearer(
-    tokenUrl="/api/v1/login",
-    auto_error=False,
-)
+bearer_scheme = HTTPBearer(auto_error=False)
 
 
 def _credentials_exception() -> HTTPException:
@@ -26,12 +23,14 @@ def _credentials_exception() -> HTTPException:
 
 
 def get_current_user(
-    token: str | None = Depends(oauth2_scheme),
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
     db: Session = Depends(get_db),
 ) -> User:
     """Return the database user identified by a valid Bearer token."""
-    if not token:
+    if not credentials:
         raise _credentials_exception()
+
+    token = credentials.credentials
 
     try:
         user_id = decode_access_token(token)

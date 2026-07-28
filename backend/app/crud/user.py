@@ -149,11 +149,15 @@ class ConversationCRUD:
     """CRUD operations for conversations."""
     
     @staticmethod
-    def create_conversation(db: Session, user_id: int, voice_profile_id: int) -> Conversation:
-        """Create a new conversation."""
+    def create_conversation(
+        db: Session,
+        user_id: int,
+        title: str = "New Chat"
+    ) -> Conversation:
+        """Create a conversation belonging to a user."""
         db_conversation = Conversation(
             user_id=user_id,
-            voice_profile_id=voice_profile_id
+            title=title
         )
         db.add(db_conversation)
         db.commit()
@@ -161,14 +165,66 @@ class ConversationCRUD:
         return db_conversation
     
     @staticmethod
-    def get_conversation(db: Session, conversation_id: int) -> Conversation | None:
+    def get_conversation(
+        db: Session,
+        conversation_id: int
+    ) -> Conversation | None:
         """Get a conversation by ID."""
-        return db.query(Conversation).filter(Conversation.conversation_id == conversation_id).first()
+        return (
+            db.query(Conversation)
+            .filter(Conversation.conversation_id == conversation_id)
+            .first()
+        )
+
+    @staticmethod
+    def get_user_conversation(
+        db: Session,
+        conversation_id: int,
+        user_id: int
+    ) -> Conversation | None:
+        """Get a conversation only when it belongs to the user."""
+        return (
+            db.query(Conversation)
+            .filter(
+                Conversation.conversation_id == conversation_id,
+                Conversation.user_id == user_id
+            )
+            .first()
+        )
     
     @staticmethod
-    def get_user_conversations(db: Session, user_id: int, skip: int = 0, limit: int = 10) -> list[Conversation]:
-        """Get all conversations for a user."""
-        return db.query(Conversation).filter(Conversation.user_id == user_id).offset(skip).limit(limit).all()
+    def get_user_conversations(
+        db: Session,
+        user_id: int
+    ) -> list[Conversation]:
+        """Get a user's conversations ordered by recent activity."""
+        return (
+            db.query(Conversation)
+            .filter(Conversation.user_id == user_id)
+            .order_by(Conversation.updated_at.desc())
+            .all()
+        )
+
+    @staticmethod
+    def update_conversation_title(
+        db: Session,
+        conversation: Conversation,
+        title: str
+    ) -> Conversation:
+        """Update a conversation title."""
+        conversation.title = title
+        db.commit()
+        db.refresh(conversation)
+        return conversation
+
+    @staticmethod
+    def delete_conversation(
+        db: Session,
+        conversation: Conversation
+    ) -> None:
+        """Delete a conversation and its related messages."""
+        db.delete(conversation)
+        db.commit()
 
 
 class MessageCRUD:

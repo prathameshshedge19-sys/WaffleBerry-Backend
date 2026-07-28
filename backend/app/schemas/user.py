@@ -1,6 +1,6 @@
 """Pydantic schemas for Voice Profiles."""
 
-from pydantic import BaseModel, Field, EmailStr
+from pydantic import BaseModel, ConfigDict, Field, EmailStr, field_validator
 from datetime import datetime
 from typing import Literal, Optional
 
@@ -105,19 +105,49 @@ class VoiceSampleResponse(VoiceSampleBase):
 
 class ConversationCreate(BaseModel):
     """Schema for creating a conversation."""
-    voice_profile_id: int
+    title: Optional[str] = Field(None, max_length=255)
+
+    @field_validator("title", mode="before")
+    @classmethod
+    def validate_title(cls, value):
+        """Trim a supplied title and reject blank values."""
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            return value
+
+        title = value.strip()
+        if not title:
+            raise ValueError("Title must not be blank.")
+        return title
+
+
+class ConversationUpdate(BaseModel):
+    """Schema for updating a conversation title."""
+    title: str = Field(..., min_length=1, max_length=255)
+
+    @field_validator("title", mode="before")
+    @classmethod
+    def validate_title(cls, value):
+        """Trim the title and reject blank values."""
+        if not isinstance(value, str):
+            return value
+
+        title = value.strip()
+        if not title:
+            raise ValueError("Title must not be blank.")
+        return title
 
 
 class ConversationResponse(BaseModel):
-    """Schema for conversation response."""
+    """Schema for conversation metadata returned by the API."""
     conversation_id: int
     user_id: int
-    voice_profile_id: int
-    started_at: datetime
+    title: str
+    created_at: datetime
     updated_at: datetime
     
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 # ==================== MESSAGE SCHEMAS ====================

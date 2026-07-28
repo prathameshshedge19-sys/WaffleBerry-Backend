@@ -1,6 +1,6 @@
 """API routes for voice profiles and related endpoints."""
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy.orm import Session
 from app.db import get_db
 from app.dependencies.auth import get_current_user
@@ -8,7 +8,7 @@ from app.models.user import User
 from app.schemas.user import (
     UserCreate, UserLogin, UserResponse, LoginResponse, VoiceProfileCreate, VoiceProfileResponse, 
     VoiceProfileUpdate, VoiceSampleCreate, VoiceSampleResponse,
-    ConversationCreate, ConversationResponse, MessageCreate, MessageResponse
+    ConversationCreate, ConversationUpdate, ConversationResponse, MessageCreate, MessageResponse
 )
 from app.crud.user import (
     UserCRUD, VoiceProfileCRUD, VoiceSampleCRUD, ConversationCRUD, MessageCRUD
@@ -244,77 +244,120 @@ async def delete_voice_sample(sample_id: int, db: Session = Depends(get_db)):
 
 # ==================== CONVERSATION ENDPOINTS ====================
 
-@router.post("/conversations", response_model=ConversationResponse, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/conversations",
+    response_model=ConversationResponse,
+    status_code=status.HTTP_201_CREATED
+)
 async def create_conversation(
-    user_id: int,
-    conversation: ConversationCreate,
+    conversation: ConversationCreate | None = None,
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Start a new conversation with a cloned voice.
-    
-    This is STEP 3 in using the cloned voice:
-    1. User starts a conversation with a trained voice
-    2. User sends messages
-    3. AI responds in the cloned voice
-    
-    - **user_id**: User starting the conversation
-    - **voice_profile_id**: Which cloned voice to use
-    """
-    # Verify user exists
-    user = UserCRUD.get_user(db, user_id)
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"User with id {user_id} not found"
-        )
-    
-    # Verify voice profile exists and belongs to user
-    voice_profile = VoiceProfileCRUD.get_voice_profile(db, conversation.voice_profile_id)
-    if not voice_profile:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Voice profile with id {conversation.voice_profile_id} not found"
-        )
-    
-    if voice_profile.user_id != user_id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Voice profile does not belong to this user"
-        )
-    
-    db_conversation = ConversationCRUD.create_conversation(db, user_id, conversation.voice_profile_id)
-    return db_conversation
+    """Create a conversation for the authenticated user."""
+    title = (
+        conversation.title
+        if conversation and conversation.title is not None
+        else "New Chat"
+    )
+
+    return ConversationCRUD.create_conversation(
+        db,
+        current_user.user_id,
+        title
+    )
 
 
-@router.get("/conversations/{conversation_id}", response_model=ConversationResponse)
-async def get_conversation(conversation_id: int, db: Session = Depends(get_db)):
-    """Get a conversation."""
-    conversation = ConversationCRUD.get_conversation(db, conversation_id)
+@router.get(
+    "/conversations",
+    response_model=list[ConversationResponse]
+)
+async def get_user_conversations(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Return the authenticated user's conversations."""
+    return ConversationCRUD.get_user_conversations(
+        db,
+        current_user.user_id
+    )
+
+
+@router.get(
+    "/conversations/{conversation_id}",
+    response_model=ConversationResponse
+)
+async def get_conversation(
+    conversation_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Return conversation metadata when owned by the current user."""
+    conversation = ConversationCRUD.get_user_conversation(
+        db,
+        conversation_id,
+        current_user.user_id
+    )
     if not conversation:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Conversation with id {conversation_id} not found"
+            detail="Conversation not found."
         )
     return conversation
 
 
-@router.get("/users/{user_id}/conversations", response_model=list[ConversationResponse])
-async def get_user_conversations(
-    user_id: int,
-    skip: int = 0,
-    limit: int = 10,
+@router.patch(
+    "/conversations/{conversation_id}",
+    response_model=ConversationResponse
+)
+async def update_conversation(
+    conversation_id: int,
+    conversation_update: ConversationUpdate,
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Get all conversations for a user."""
-    user = UserCRUD.get_user(db, user_id)
-    if not user:
+    """Rename a conversation owned by the authenticated user."""
+    conversation = ConversationCRUD.get_user_conversation(
+        db,
+        conversation_id,
+        current_user.user_id
+    )
+    if not conversation:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"User with id {user_id} not found"
+            detail="Conversation not found."
         )
-    
-    conversations = ConversationCRUD.get_user_conversations(db, user_id, skip, limit)
-    return conversations
+
+    return ConversationCRUD.update_conversation_title(
+        db,
+        conversation,
+        conversation_update.title
+    )
+
+
+@router.delete(
+    "/conversations/{conversation_id}",
+    status_code=status.HTTP_204_NO_CONTENT
+)
+async def delete_conversation(
+    conversation_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Delete a conversation owned by the authenticated user."""
+    conversation = ConversationCRUD.get_user_conversation(
+        db,
+        conversation_id,
+        current_user.user_id
+    )
+    if not conversation:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Conversation not found."
+        )
+
+    ConversationCRUD.delete_conversation(db, conversation)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 # ==================== MESSAGE ENDPOINTS ====================
