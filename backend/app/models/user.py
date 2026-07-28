@@ -1,8 +1,8 @@
 """SQLAlchemy ORM models for Waffle Berry."""
 
-from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, Enum
+from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, CheckConstraint, Enum, ForeignKey
 from sqlalchemy.sql import func
-from datetime import datetime
+from sqlalchemy.orm import relationship, validates
 from app.db import Base
 import enum
 
@@ -17,6 +17,12 @@ class User(Base):
     email = Column(String(255), unique=True, nullable=False, index=True)
     password_hash = Column(String(255), nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    conversations = relationship(
+        "Conversation",
+        back_populates="user",
+        cascade="all, delete-orphan"
+    )
     
     def __repr__(self):
         return f"<User(user_id={self.user_id}, email={self.email})>"
@@ -67,16 +73,34 @@ class VoiceSample(Base):
         return f"<VoiceSample(sample_id={self.sample_id}, voice_profile_id={self.voice_profile_id})>"
 
 
+class MessageRole(str, enum.Enum):
+    """Valid roles for a conversation message."""
+    USER = "user"
+    ASSISTANT = "assistant"
+    SYSTEM = "system"
+
+
 class Conversation(Base):
-    """Conversation model - chat sessions with cloned voices."""
+    """Conversation model - chat sessions between users and Berry."""
     
     __tablename__ = "conversations"
     
     conversation_id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, nullable=False, index=True)
-    voice_profile_id = Column(Integer, nullable=False, index=True)
-    started_at = Column(DateTime(timezone=True), server_default=func.now())
+    user_id = Column(
+        ForeignKey("users.user_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True
+    )
+    title = Column(String(255), nullable=False, default="New Chat")
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    user = relationship("User", back_populates="conversations")
+    messages = relationship(
+        "Message",
+        back_populates="conversation",
+        cascade="all, delete-orphan"
+    )
     
     def __repr__(self):
         return f"<Conversation(conversation_id={self.conversation_id})>"
@@ -86,16 +110,56 @@ class Message(Base):
     """Message model - individual messages in conversations."""
     
     __tablename__ = "messages"
+    __table_args__ = (
+        CheckConstraint(
+            "length(trim(content)) > 0",
+            name="ck_messages_content_not_blank"
+        ),
+    )
     
     message_id = Column(Integer, primary_key=True, index=True)
-    conversation_id = Column(Integer, nullable=False, index=True)
-    sender = Column(String(50), nullable=False)  # "user" or "ai"
-    message_text = Column(Text, nullable=False)
+    conversation_id = Column(
+        ForeignKey("conversations.conversation_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True
+    )
+    role = Column(
+        Enum(
+            MessageRole,
+            values_callable=lambda role_enum: [
+                role.value for role in role_enum
+            ],
+            native_enum=False,
+            validate_strings=True,
+            name="message_role"
+        ),
+        nullable=False
+    )
+    content = Column(Text, nullable=False)
     audio_path = Column(String(500), nullable=True)  # For AI-generated audio
-    sent_at = Column(DateTime(timezone=True), server_default=func.now())
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    conversation = relationship("Conversation", back_populates="messages")
+
+    @validates("role")
+    def validate_role(self, key, value):
+        """Reject roles outside user, assistant and system."""
+        try:
+            return MessageRole(value)
+        except (TypeError, ValueError):
+            raise ValueError(
+                "Message role must be user, assistant or system."
+            ) from None
+
+    @validates("content")
+    def validate_content(self, key, value):
+        """Reject empty or whitespace-only message content."""
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("Message content must not be empty.")
+        return value
     
     def __repr__(self):
-        return f"<Message(message_id={self.message_id}, sender={self.sender})>"
+        return f"<Message(message_id={self.message_id}, role={self.role})>"
 
 
 class Consent(Base):
