@@ -1,7 +1,9 @@
 """CRUD operations for User and Voice Profile models."""
 
+from datetime import datetime, timezone
+
 from sqlalchemy.orm import Session
-from app.models.user import User, VoiceProfile, VoiceSample, Conversation, Message
+from app.models.user import User, VoiceProfile, VoiceSample, Conversation, Message, MessageRole
 from app.schemas.user import UserCreate, VoiceProfileCreate, VoiceProfileUpdate, VoiceSampleCreate
 import hashlib
 import hmac
@@ -229,22 +231,53 @@ class ConversationCRUD:
 
 class MessageCRUD:
     """CRUD operations for messages."""
+
+    TEMPORARY_ASSISTANT_RESPONSE = "This is a temporary response."
     
     @staticmethod
-    def create_message(db: Session, conversation_id: int, sender: str, message_text: str, audio_path: str = None) -> Message:
-        """Create a new message."""
-        db_message = Message(
-            conversation_id=conversation_id,
-            sender=sender,
-            message_text=message_text,
-            audio_path=audio_path
+    def create_message_pair(
+        db: Session,
+        conversation: Conversation,
+        content: str
+    ) -> tuple[Message, Message]:
+        """Store a user message and temporary assistant response atomically."""
+        timestamp = datetime.now(timezone.utc)
+        user_message = Message(
+            conversation_id=conversation.conversation_id,
+            role=MessageRole.USER,
+            content=content
         )
-        db.add(db_message)
-        db.commit()
-        db.refresh(db_message)
-        return db_message
+        assistant_message = Message(
+            conversation_id=conversation.conversation_id,
+            role=MessageRole.ASSISTANT,
+            content=MessageCRUD.TEMPORARY_ASSISTANT_RESPONSE
+        )
+
+        try:
+            db.add_all([user_message, assistant_message])
+            conversation.updated_at = timestamp
+            db.flush()
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+
+        db.refresh(user_message)
+        db.refresh(assistant_message)
+        return user_message, assistant_message
     
     @staticmethod
-    def get_conversation_messages(db: Session, conversation_id: int, skip: int = 0, limit: int = 50) -> list[Message]:
-        """Get all messages in a conversation."""
-        return db.query(Message).filter(Message.conversation_id == conversation_id).offset(skip).limit(limit).all()
+    def get_conversation_messages(
+        db: Session,
+        conversation_id: int
+    ) -> list[Message]:
+        """Return all conversation messages in stable chronological order."""
+        return (
+            db.query(Message)
+            .filter(Message.conversation_id == conversation_id)
+            .order_by(
+                Message.created_at.asc(),
+                Message.message_id.asc()
+            )
+            .all()
+        )

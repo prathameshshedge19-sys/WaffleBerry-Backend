@@ -4,6 +4,8 @@ from pydantic import BaseModel, ConfigDict, Field, EmailStr, field_validator
 from datetime import datetime
 from typing import Literal, Optional
 
+from app.models.user import MessageRole
+
 
 # ==================== USER SCHEMAS ====================
 
@@ -153,21 +155,38 @@ class ConversationResponse(BaseModel):
 # ==================== MESSAGE SCHEMAS ====================
 
 class MessageCreate(BaseModel):
-    """Schema for creating a message."""
-    message_text: str = Field(..., min_length=1, description="Message cannot be empty")
+    """Schema for creating a user message."""
+    content: str = Field(..., min_length=1)
+
+    @field_validator("content", mode="before")
+    @classmethod
+    def validate_content(cls, value):
+        """Trim message content and reject blank values."""
+        if not isinstance(value, str):
+            return value
+
+        content = value.strip()
+        if not content:
+            raise ValueError("Message content must not be blank.")
+        return content
 
 
 class MessageResponse(BaseModel):
-    """Schema for message response."""
+    """Schema for stored message metadata."""
     message_id: int
     conversation_id: int
-    sender: str
-    message_text: str
+    role: MessageRole
+    content: str
     audio_path: Optional[str]
-    sent_at: datetime
-    
-    class Config:
-        from_attributes = True
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class MessagePairResponse(BaseModel):
+    """Schema containing the saved user and assistant messages."""
+    user_message: MessageResponse
+    assistant_message: MessageResponse
 
 
 # ==================== CONSENT SCHEMAS ====================

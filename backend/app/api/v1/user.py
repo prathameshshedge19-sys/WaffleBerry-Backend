@@ -8,7 +8,8 @@ from app.models.user import User
 from app.schemas.user import (
     UserCreate, UserLogin, UserResponse, LoginResponse, VoiceProfileCreate, VoiceProfileResponse, 
     VoiceProfileUpdate, VoiceSampleCreate, VoiceSampleResponse,
-    ConversationCreate, ConversationUpdate, ConversationResponse, MessageCreate, MessageResponse
+    ConversationCreate, ConversationUpdate, ConversationResponse,
+    MessageCreate, MessagePairResponse, MessageResponse
 )
 from app.crud.user import (
     UserCRUD, VoiceProfileCRUD, VoiceSampleCRUD, ConversationCRUD, MessageCRUD
@@ -362,42 +363,62 @@ async def delete_conversation(
 
 # ==================== MESSAGE ENDPOINTS ====================
 
-@router.post("/conversations/{conversation_id}/messages", response_model=MessageResponse, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/conversations/{conversation_id}/messages",
+    response_model=MessagePairResponse,
+    status_code=status.HTTP_201_CREATED
+)
 async def create_message(
     conversation_id: int,
     message: MessageCreate,
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Send a message in a conversation.
-    
-    - **message_text**: The user's message to the AI
-    """
-    # Verify conversation exists
-    conversation = ConversationCRUD.get_conversation(db, conversation_id)
+    """Store a user message and temporary assistant response."""
+    conversation = ConversationCRUD.get_user_conversation(
+        db,
+        conversation_id,
+        current_user.user_id
+    )
     if not conversation:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Conversation with id {conversation_id} not found"
+            detail="Conversation not found."
         )
-    
-    db_message = MessageCRUD.create_message(db, conversation_id, "user", message.message_text)
-    return db_message
+
+    user_message, assistant_message = MessageCRUD.create_message_pair(
+        db,
+        conversation,
+        message.content
+    )
+    return MessagePairResponse(
+        user_message=user_message,
+        assistant_message=assistant_message
+    )
 
 
-@router.get("/conversations/{conversation_id}/messages", response_model=list[MessageResponse])
+@router.get(
+    "/conversations/{conversation_id}/messages",
+    response_model=list[MessageResponse]
+)
 async def get_messages(
     conversation_id: int,
-    skip: int = 0,
-    limit: int = 50,
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Get all messages in a conversation."""
-    conversation = ConversationCRUD.get_conversation(db, conversation_id)
+    """Return complete message history for an owned conversation."""
+    conversation = ConversationCRUD.get_user_conversation(
+        db,
+        conversation_id,
+        current_user.user_id
+    )
     if not conversation:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Conversation with id {conversation_id} not found"
+            detail="Conversation not found."
         )
-    
-    messages = MessageCRUD.get_conversation_messages(db, conversation_id, skip, limit)
-    return messages
+
+    return MessageCRUD.get_conversation_messages(
+        db,
+        conversation_id
+    )
