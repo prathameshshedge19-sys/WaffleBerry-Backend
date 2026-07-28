@@ -187,6 +187,7 @@ class MessagePairResponse(BaseModel):
     """Schema containing the saved user and assistant messages."""
     user_message: MessageResponse
     assistant_message: MessageResponse
+    conversation: ConversationResponse
 
 
 # ==================== CONSENT SCHEMAS ====================

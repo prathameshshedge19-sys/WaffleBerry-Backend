@@ -233,14 +233,62 @@ class MessageCRUD:
     """CRUD operations for messages."""
 
     TEMPORARY_ASSISTANT_RESPONSE = "This is a temporary response."
+    DEFAULT_CONVERSATION_TITLE = "New Chat"
+    AUTO_TITLE_MAX_LENGTH = 45
+
+    @staticmethod
+    def generate_conversation_title(content: str) -> str:
+        """Create a short deterministic title from a user's first message."""
+        normalized_content = " ".join(content.split())
+        if not normalized_content:
+            return MessageCRUD.DEFAULT_CONVERSATION_TITLE
+
+        trailing_characters = " \t\r\n.,!?;:—–-…"
+        if len(normalized_content) <= MessageCRUD.AUTO_TITLE_MAX_LENGTH:
+            title = normalized_content.rstrip(trailing_characters)
+            return title or MessageCRUD.DEFAULT_CONVERSATION_TITLE
+
+        title_limit = MessageCRUD.AUTO_TITLE_MAX_LENGTH - 1
+        title = normalized_content[:title_limit]
+
+        if (
+            len(normalized_content) > title_limit
+            and not normalized_content[title_limit].isspace()
+            and " " in title
+        ):
+            title = title.rsplit(" ", 1)[0]
+
+        title = title.rstrip(trailing_characters)
+        if not title:
+            return MessageCRUD.DEFAULT_CONVERSATION_TITLE
+
+        return f"{title}…"
     
     @staticmethod
     def create_message_pair(
         db: Session,
         conversation: Conversation,
         content: str
-    ) -> tuple[Message, Message]:
+    ) -> tuple[Message, Message, Conversation]:
         """Store a user message and temporary assistant response atomically."""
+        conversation = (
+            db.query(Conversation)
+            .filter(
+                Conversation.conversation_id == conversation.conversation_id
+            )
+            .populate_existing()
+            .with_for_update()
+            .one()
+        )
+        is_first_user_message = (
+            db.query(Message.message_id)
+            .filter(
+                Message.conversation_id == conversation.conversation_id,
+                Message.role == MessageRole.USER
+            )
+            .first()
+            is None
+        )
         timestamp = datetime.now(timezone.utc)
         user_message = Message(
             conversation_id=conversation.conversation_id,
@@ -256,15 +304,23 @@ class MessageCRUD:
         try:
             db.add_all([user_message, assistant_message])
             conversation.updated_at = timestamp
+            if (
+                conversation.title == MessageCRUD.DEFAULT_CONVERSATION_TITLE
+                and is_first_user_message
+            ):
+                conversation.title = MessageCRUD.generate_conversation_title(
+                    content
+                )
             db.flush()
+            db.refresh(user_message)
+            db.refresh(assistant_message)
+            db.refresh(conversation)
             db.commit()
         except Exception:
             db.rollback()
             raise
 
-        db.refresh(user_message)
-        db.refresh(assistant_message)
-        return user_message, assistant_message
+        return user_message, assistant_message, conversation
     
     @staticmethod
     def get_conversation_messages(

@@ -386,14 +386,15 @@ async def create_message(
             detail="Conversation not found."
         )
 
-    user_message, assistant_message = MessageCRUD.create_message_pair(
+    user_message, assistant_message, conversation = MessageCRUD.create_message_pair(
         db,
         conversation,
         message.content
     )
     return MessagePairResponse(
         user_message=user_message,
-        assistant_message=assistant_message
+        assistant_message=assistant_message,
+        conversation=conversation
     )
 
 
