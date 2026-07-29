@@ -24,6 +24,8 @@ class Settings(BaseSettings):
     ai_provider: str = "openai"
     ai_model: str = ""
     openai_api_key: str | None = None
+    ai_connect_timeout_seconds: float = 10.0
+    ai_read_timeout_seconds: float = 90.0
     
     class Config:
         env_file = ".env"

@@ -26,9 +26,10 @@ from app.services.ai.exceptions import (
     AIAuthenticationError,
     AIConfigurationError,
     AIConnectionError,
-    AIProviderError,
+    AIInvalidResponseError,
+    AIProviderUnavailableError,
+    AIQuotaExceededError,
     AIRateLimitError,
-    AIResponseError,
     AIServiceError,
     AITimeoutError,
 )
@@ -45,41 +46,68 @@ def _sse_event(event: str, payload: dict) -> str:
     return f"event: {event}\ndata: {data}\n\n"
 
 
-def _stream_error(exc: AIServiceError) -> tuple[str, str]:
-    """Map internal AI failures to safe stream error data."""
+def _safe_ai_error(exc: AIServiceError) -> tuple[int, str, str]:
+    """Map an internal AI failure to HTTP status, safe code, and message."""
+    if isinstance(exc, AIQuotaExceededError):
+        return (
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            exc.code,
+            "Berry is temporarily unavailable because the AI usage balance "
+            "has been exhausted.",
+        )
     if isinstance(exc, AIRateLimitError):
         return (
-            "rate_limit",
-            "Berry is temporarily unavailable because the AI usage limit has been reached.",
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            exc.code,
+            "Berry is receiving too many requests right now. "
+            "Please try again shortly.",
         )
-    if isinstance(exc, AIAuthenticationError):
+    if isinstance(exc, (AIAuthenticationError, AIConfigurationError)):
         return (
-            "provider_authentication",
-            "Berry's AI service is not configured correctly.",
-        )
-    if isinstance(exc, AIConfigurationError):
-        return (
-            "provider_configuration",
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            exc.code,
             "Berry's AI service is not configured correctly.",
         )
     if isinstance(exc, AITimeoutError):
         return (
-            "provider_timeout",
+            status.HTTP_504_GATEWAY_TIMEOUT,
+            exc.code,
             "Berry took too long to respond. Please try again.",
         )
     if isinstance(exc, AIConnectionError):
         return (
-            "provider_connection",
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            exc.code,
             "Berry could not reach the AI service. Please try again.",
         )
-    if isinstance(exc, AIResponseError):
+    if isinstance(exc, AIProviderUnavailableError):
         return (
-            "invalid_response",
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            exc.code,
+            "Berry's AI service is temporarily unavailable. "
+            "Please try again shortly.",
+        )
+    if isinstance(exc, AIInvalidResponseError):
+        return (
+            status.HTTP_502_BAD_GATEWAY,
+            exc.code,
             "Berry's response was interrupted. Please try again.",
         )
     return (
-        "ai_service_error",
+        status.HTTP_503_SERVICE_UNAVAILABLE,
+        getattr(exc, "code", "ai_service_error"),
         "I couldn't generate a response just now. Please try again.",
+    )
+
+
+def _ai_http_exception(exc: AIServiceError) -> HTTPException:
+    http_status, code, safe_message = _safe_ai_error(exc)
+    return HTTPException(
+        status_code=http_status,
+        detail={
+            "code": code,
+            "message": safe_message,
+        },
     )
 
 
@@ -454,26 +482,14 @@ async def create_message(
             conversation,
             message.content
         )
-    except AIConfigurationError:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="AI service is not configured."
-        ) from None
-    except AIProviderError:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="AI service is temporarily unavailable."
-        ) from None
-    except AIResponseError:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="AI service returned an invalid response."
-        ) from None
-    except AIServiceError:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="AI service could not complete the request."
-        ) from None
+    except AIServiceError as exc:
+        logger.exception(
+            "AI generation failed (category=%s, operation=non_streaming, "
+            "conversation_id=%d).",
+            getattr(exc, "code", "ai_service_error"),
+            conversation_id,
+        )
+        raise _ai_http_exception(exc) from None
 
     user_message, assistant_message, conversation = MessageCRUD.create_message_pair(
         db,
@@ -516,16 +532,13 @@ async def create_message_stream(
             conversation,
             message.content,
         )
-    except AIConfigurationError:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="AI service is not configured.",
-        ) from None
-    except AIServiceError:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="AI service is temporarily unavailable.",
-        ) from None
+    except AIServiceError as exc:
+        logger.exception(
+            "AI stream setup failed (category=%s, conversation_id=%d).",
+            getattr(exc, "code", "ai_service_error"),
+            conversation_id,
+        )
+        raise _ai_http_exception(exc) from None
 
     user_message, conversation = MessageCRUD.create_user_message(
         db,
@@ -560,7 +573,7 @@ async def create_message_stream(
 
             assistant_content = "".join(chunks).strip()
             if not assistant_content:
-                raise AIResponseError(
+                raise AIInvalidResponseError(
                     "AI provider returned an empty response."
                 )
 
@@ -583,13 +596,24 @@ async def create_message_stream(
                 },
             )
         except asyncio.CancelledError:
-            logger.info("AI response stream was cancelled.")
+            logger.info(
+                "AI response stream cancelled (conversation_id=%d, "
+                "delta_emitted=%s).",
+                conversation_id,
+                bool(chunks),
+            )
             raise
         except AIServiceError as exc:
-            logger.exception("AI response stream failed.")
+            logger.exception(
+                "AI response stream failed (category=%s, "
+                "conversation_id=%d, delta_emitted=%s).",
+                getattr(exc, "code", "ai_service_error"),
+                conversation_id,
+                bool(chunks),
+            )
             db.rollback()
             if not await request.is_disconnected():
-                code, safe_message = _stream_error(exc)
+                _, code, safe_message = _safe_ai_error(exc)
                 yield _sse_event(
                     "error",
                     {
@@ -598,7 +622,12 @@ async def create_message_stream(
                     },
                 )
         except Exception:
-            logger.exception("Unexpected AI response stream failure.")
+            logger.exception(
+                "Unexpected AI response stream failure "
+                "(conversation_id=%d, delta_emitted=%s).",
+                conversation_id,
+                bool(chunks),
+            )
             db.rollback()
             if not await request.is_disconnected():
                 yield _sse_event(
