@@ -8,11 +8,14 @@ from app.services.ai.context_builder import ContextBuilder
 from app.services.ai.provider_registry import create_ai_provider
 from app.services.ai.retry import AIRetryPolicy
 from app.services.chat_service import ChatService
+from app.services.memory.extractor import MemoryExtractionService
+from app.services.memory.storage_pipeline import MemoryStoragePipeline
+from app.services.memory.validation import MemoryValidationService
 
 
 @lru_cache()
-def get_chat_service() -> ChatService:
-    """Return the configured application-wide chat service."""
+def get_ai_service() -> AIService:
+    """Return one shared provider-backed AI service for all AI modes."""
     settings = get_settings()
     provider = create_ai_provider(settings)
     retry_policy = AIRetryPolicy(
@@ -21,8 +24,29 @@ def get_chat_service() -> ChatService:
         max_delay_seconds=settings.ai_retry_max_delay_seconds,
         jitter_seconds=settings.ai_retry_jitter_seconds,
     )
-    ai_service = AIService(provider, retry_policy=retry_policy)
+    return AIService(provider, retry_policy=retry_policy)
+
+
+@lru_cache()
+def get_chat_service() -> ChatService:
+    """Return the configured application-wide chat service."""
+    settings = get_settings()
     context_builder = ContextBuilder(
         max_context_messages=settings.ai_max_context_messages
     )
-    return ChatService(ai_service, context_builder)
+    return ChatService(get_ai_service(), context_builder)
+
+
+@lru_cache()
+def get_memory_extraction_service() -> MemoryExtractionService:
+    """Return extraction orchestration using the shared provider client."""
+    return MemoryExtractionService(get_ai_service())
+
+
+@lru_cache()
+def get_memory_storage_pipeline() -> MemoryStoragePipeline:
+    """Return the internal extraction/validation/persistence coordinator."""
+    return MemoryStoragePipeline(
+        get_memory_extraction_service(),
+        MemoryValidationService(),
+    )

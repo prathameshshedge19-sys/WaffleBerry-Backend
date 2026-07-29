@@ -23,6 +23,11 @@ class User(Base):
         back_populates="user",
         cascade="all, delete-orphan"
     )
+    legacies = relationship(
+        "Legacy",
+        back_populates="owner",
+        cascade="all, delete-orphan",
+    )
     
     def __repr__(self):
         return f"<User(user_id={self.user_id}, email={self.email})>"
@@ -91,11 +96,17 @@ class Conversation(Base):
         nullable=False,
         index=True
     )
+    legacy_id = Column(
+        ForeignKey("legacies.legacy_id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     title = Column(String(255), nullable=False, default="New Chat")
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
     user = relationship("User", back_populates="conversations")
+    legacy = relationship("Legacy", back_populates="conversations")
     messages = relationship(
         "Message",
         back_populates="conversation",

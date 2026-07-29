@@ -190,6 +190,20 @@ class MessagePairResponse(BaseModel):
     conversation: ConversationResponse
 
 
+class StoryGuideMessage(BaseModel):
+    """One temporary provider-neutral Story Guide history item."""
+    role: Literal["user", "assistant"]
+    content: str = Field(..., min_length=1, max_length=12000)
+
+
+class StoryGuideRequest(BaseModel):
+    """Frontend-owned Story Guide context for one streamed response."""
+    current_chapter: str = Field(..., min_length=1, max_length=120)
+    relationship: str = Field(..., min_length=1, max_length=100)
+    display_name: str = Field(..., min_length=1, max_length=80)
+    history: list[StoryGuideMessage] = Field(default_factory=list, max_length=50)
+
+
 # ==================== CONSENT SCHEMAS ====================
 
 class ConsentCreate(BaseModel):

@@ -15,7 +15,7 @@ from app.schemas.user import (
     UserCreate, UserLogin, UserResponse, LoginResponse, VoiceProfileCreate, VoiceProfileResponse, 
     VoiceProfileUpdate, VoiceSampleCreate, VoiceSampleResponse,
     ConversationCreate, ConversationUpdate, ConversationResponse,
-    MessageCreate, MessagePairResponse, MessageResponse
+    MessageCreate, MessagePairResponse, MessageResponse, StoryGuideRequest
 )
 from app.crud.user import (
     UserCRUD, VoiceProfileCRUD, VoiceSampleCRUD, ConversationCRUD, MessageCRUD
@@ -44,6 +44,78 @@ def _sse_event(event: str, payload: dict) -> str:
     """Serialize one safely framed server-sent event."""
     data = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     return f"event: {event}\ndata: {data}\n\n"
+
+
+@router.post("/stories/stream")
+async def stream_story_guide(
+    story: StoryGuideRequest,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+):
+    """Stream one temporary Story Guide response without persistence."""
+    del current_user
+    try:
+        response_stream = get_chat_service().stream_story_response(
+            story.history,
+            chapter=story.current_chapter,
+            relationship=story.relationship,
+            display_name=story.display_name,
+        )
+    except AIServiceError as exc:
+        raise _ai_http_exception(exc) from None
+
+    async def event_stream():
+        chunks: list[str] = []
+        try:
+            yield _sse_event("start", {})
+            async for delta in response_stream:
+                if await request.is_disconnected():
+                    return
+                chunks.append(delta)
+                yield _sse_event("delta", {"text": delta})
+
+            assistant_content = "".join(chunks).strip()
+            if not assistant_content:
+                raise AIInvalidResponseError(
+                    "AI provider returned an empty Story Guide response."
+                )
+            yield _sse_event("complete", {"text": assistant_content})
+        except asyncio.CancelledError:
+            raise
+        except AIServiceError as exc:
+            if not await request.is_disconnected():
+                _, code, safe_message = _safe_ai_error(exc)
+                yield _sse_event(
+                    "error",
+                    {"code": code, "message": safe_message},
+                )
+        except Exception:
+            logger.exception("Unexpected Story Guide stream failure.")
+            if not await request.is_disconnected():
+                yield _sse_event(
+                    "error",
+                    {
+                        "code": "stream_interrupted",
+                        "message": (
+                            "Berry's response was interrupted. "
+                            "Please try again."
+                        ),
+                    },
+                )
+        finally:
+            close_stream = getattr(response_stream, "aclose", None)
+            if close_stream is not None:
+                await close_stream()
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 def _safe_ai_error(exc: AIServiceError) -> tuple[int, str, str]:

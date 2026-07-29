@@ -1,12 +1,12 @@
 """Chat orchestration prepared for future AI response generation."""
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterable
 
 from sqlalchemy.orm import Session
 
 from app.models.user import Conversation, Message
 from app.services.ai.ai_service import AIService
-from app.services.ai.context_builder import ContextBuilder
+from app.services.ai.context_builder import ContextBuilder, ConversationMessage
 from app.services.ai.provider import AIMessage
 
 
@@ -62,4 +62,21 @@ class ChatService:
     ) -> AsyncIterator[str]:
         """Prepare ordered context and return a provider-neutral text stream."""
         messages = self.prepare_ai_input(db, conversation, user_message)
+        return self._ai_service.stream_response(messages)
+
+    def stream_story_response(
+        self,
+        history: Iterable[ConversationMessage],
+        *,
+        chapter: str,
+        relationship: str,
+        display_name: str,
+    ) -> AsyncIterator[str]:
+        """Stream Story Guide text through the shared AI service."""
+        messages = self._context_builder.build_story_messages(
+            history,
+            chapter=chapter,
+            relationship=relationship,
+            display_name=display_name,
+        )
         return self._ai_service.stream_response(messages)

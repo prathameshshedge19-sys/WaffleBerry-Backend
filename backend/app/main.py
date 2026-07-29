@@ -6,15 +6,13 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.v1.project import router as project_router
 from app.api.v1.user import router as user_router
+from app.api.v1.memory import router as memory_router
+from app.api.v1.story_memory import router as story_memory_router
 from app.config import get_settings
-from app.db import Base, engine
 from app.services.ai.provider_registry import validate_ai_configuration
 
 settings = get_settings()
 validate_ai_configuration(settings)
-
-# Create database tables
-Base.metadata.create_all(bind=engine)
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -37,6 +35,16 @@ app.include_router(
     user_router,
     prefix=settings.api_v1_prefix,
     tags=["users", "voice-profiles", "conversations"]
+)
+app.include_router(
+    story_memory_router,
+    prefix=settings.api_v1_prefix,
+    tags=["legacies", "guided-stories"],
+)
+app.include_router(
+    memory_router,
+    prefix=settings.api_v1_prefix,
+    tags=["memory-review"],
 )
 app.include_router(
     project_router,

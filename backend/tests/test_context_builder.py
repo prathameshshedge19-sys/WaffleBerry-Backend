@@ -27,6 +27,92 @@ class CapturingAIService:
 
 
 class ContextBuilderTests(unittest.IsolatedAsyncioTestCase):
+    def test_story_context_uses_dedicated_prompt_and_ordered_history(self):
+        messages = ContextBuilder(6).build_story_messages(
+            [
+                SimpleNamespace(
+                    role="user",
+                    content="We lived near the mountains.",
+                ),
+                SimpleNamespace(
+                    role="assistant",
+                    content="What felt most like home?",
+                ),
+            ],
+            chapter="Childhood",
+            relationship="Father",
+            display_name="Dad",
+        )
+
+        self.assertEqual(
+            [message.role for message in messages],
+            ["system", "user", "assistant"],
+        )
+        self.assertIn("story guide", messages[0].content.lower())
+        self.assertIn("Chapter: Childhood", messages[0].content)
+        self.assertIn("Relationship: Father", messages[0].content)
+        self.assertIn("Display name: Dad", messages[0].content)
+        prompt = messages[0].content.lower()
+        self.assertIn("memory archivist", prompt)
+        self.assertIn("one main story prompt at a time", prompt)
+        self.assertIn("not the companion or legacy person", prompt)
+        self.assertIn("never roleplay", prompt)
+        self.assertIn("something sensitive", prompt)
+        self.assertIn("ask to stop", prompt)
+
+    def test_new_story_session_requests_a_warm_chapter_opening(self):
+        messages = ContextBuilder(6).build_story_messages(
+            [],
+            chapter="Childhood",
+            relationship="Father",
+            display_name="Dad",
+        )
+
+        self.assertEqual(
+            [message.role for message in messages],
+            ["system", "user"],
+        )
+        self.assertIn(
+            "Open this chapter naturally",
+            messages[-1].content,
+        )
+        self.assertIn(
+            "Do not begin with a cold direct prompt",
+            messages[-1].content,
+        )
+
+    async def test_story_stream_reuses_chat_and_ai_services(self):
+        ai_service = CapturingAIService()
+        service = ChatService(
+            ai_service,
+            ContextBuilder(8),
+        )
+
+        deltas = [
+            delta
+            async for delta in service.stream_story_response(
+                [
+                    SimpleNamespace(
+                        role="user",
+                        content="We lived near the mountains.",
+                    )
+                ],
+                chapter="Childhood",
+                relationship="Father",
+                display_name="Dad",
+            )
+        ]
+
+        self.assertEqual(deltas, ["streamed"])
+        self.assertIn(
+            "story guide",
+            ai_service.streamed_messages[0].content.lower(),
+        )
+        self.assertEqual(
+            ai_service.streamed_messages[-1].content,
+            "We lived near the mountains.",
+        )
+
     def test_empty_conversation_contains_prompt_and_latest_user(self):
         messages = ContextBuilder(6).build_chat_messages([], "Hello")
 

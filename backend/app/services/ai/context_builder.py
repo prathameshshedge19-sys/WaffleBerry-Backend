@@ -126,3 +126,44 @@ class ContextBuilder:
             )
         messages = self.build_messages(history, latest_user_message)
         return messages
+
+    def build_story_messages(
+        self,
+        history: Iterable[ConversationMessage],
+        *,
+        chapter: str,
+        relationship: str,
+        display_name: str,
+    ) -> list[AIMessage]:
+        """Build bounded Story Guide context without database persistence."""
+        system_message = AIMessage(
+            role="system",
+            content=self._prompt_builder.build_story_guide_system_prompt(
+                chapter=chapter,
+                relationship=relationship,
+                display_name=display_name,
+            ),
+        )
+        valid_history = [
+            normalized
+            for message in history
+            if (
+                normalized := self._normalize_stored_message(message)
+            ) is not None
+        ]
+        selected = self._select_recent_history(
+            valid_history,
+            self.max_context_messages - 1,
+        )
+        if not selected:
+            selected = [
+                AIMessage(
+                    role="user",
+                    content=(
+                        "Open this chapter naturally with a brief, warm "
+                        "introduction, then invite the person to share one "
+                        "memory. Do not begin with a cold direct prompt."
+                    ),
+                )
+            ]
+        return [system_message, *selected]
