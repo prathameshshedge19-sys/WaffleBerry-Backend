@@ -74,6 +74,10 @@ class AIConfigurationTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValidationError):
             settings_for_test(ai_connect_timeout_seconds=0)
 
+    def test_invalid_context_limit_fails_settings_validation(self):
+        with self.assertRaises(ValidationError):
+            settings_for_test(ai_max_context_messages=1)
+
     def test_invalid_retry_delay_relationship_fails_validation(self):
         settings = settings_for_test(
             ai_retry_base_delay_seconds=3,

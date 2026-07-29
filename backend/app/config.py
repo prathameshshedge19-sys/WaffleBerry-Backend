@@ -43,6 +43,7 @@ class Settings(BaseSettings):
     ai_retry_base_delay_seconds: float = Field(default=0.25, ge=0)
     ai_retry_max_delay_seconds: float = Field(default=2.0, gt=0)
     ai_retry_jitter_seconds: float = Field(default=0.15, ge=0)
+    ai_max_context_messages: int = Field(default=24, ge=2)
 
 
 @lru_cache()

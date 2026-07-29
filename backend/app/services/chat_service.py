@@ -6,14 +6,20 @@ from sqlalchemy.orm import Session
 
 from app.models.user import Conversation, Message
 from app.services.ai.ai_service import AIService
+from app.services.ai.context_builder import ContextBuilder
 from app.services.ai.provider import AIMessage
 
 
 class ChatService:
     """Load conversation context and prepare provider-neutral AI input."""
 
-    def __init__(self, ai_service: AIService) -> None:
+    def __init__(
+        self,
+        ai_service: AIService,
+        context_builder: ContextBuilder,
+    ) -> None:
         self._ai_service = ai_service
+        self._context_builder = context_builder
 
     def prepare_ai_input(
         self,
@@ -26,12 +32,17 @@ class ChatService:
             db.query(Message)
             .filter(Message.conversation_id == conversation.conversation_id)
             .order_by(
-                Message.created_at.asc(),
-                Message.message_id.asc(),
+                Message.created_at.desc(),
+                Message.message_id.desc(),
             )
+            .limit(self._context_builder.history_query_limit)
             .all()
         )
-        return self._ai_service.build_messages(history, user_message)
+        history.reverse()
+        return self._context_builder.build_chat_messages(
+            history,
+            user_message,
+        )
 
     async def generate_response(
         self,

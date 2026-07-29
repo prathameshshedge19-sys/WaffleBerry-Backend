@@ -5,6 +5,7 @@ from collections.abc import AsyncIterator, Sequence
 from types import SimpleNamespace
 
 from app.services.ai.ai_service import AIService
+from app.services.ai.context_builder import ContextBuilder
 from app.services.ai.openai_provider import OpenAIProvider
 from app.services.ai.provider import AIMessage, AIProvider
 
@@ -61,7 +62,7 @@ class FakeOpenAIEventStream:
 class AIStreamingTests(unittest.IsolatedAsyncioTestCase):
     async def test_prompt_history_and_latest_message_order(self):
         service = AIService(FakeStreamingProvider())
-        messages = service.build_messages(
+        messages = ContextBuilder(10).build_chat_messages(
             [
                 SimpleNamespace(
                     role="user",
@@ -83,7 +84,7 @@ class AIStreamingTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_stream_deltas_remain_in_provider_order(self):
         service = AIService(FakeStreamingProvider())
-        messages = service.build_messages([], "Hello")
+        messages = ContextBuilder(10).build_chat_messages([], "Hello")
 
         deltas = [
             delta

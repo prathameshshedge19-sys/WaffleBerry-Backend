@@ -1,6 +1,7 @@
 """Provider-independent AI infrastructure."""
 
 from app.services.ai.ai_service import AIService
+from app.services.ai.context_builder import ContextBuilder
 from app.services.ai.exceptions import (
     AIAuthenticationError,
     AIConfigurationError,
@@ -23,6 +24,7 @@ from app.services.ai.provider_registry import (
 
 __all__ = [
     "AIConfigurationError",
+    "ContextBuilder",
     "AIConnectionError",
     "AIMessage",
     "AIInvalidResponseError",
