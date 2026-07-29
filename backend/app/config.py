@@ -10,7 +10,7 @@ class Settings(BaseSettings):
     debug: bool = True
     
     # Database settings
-    database_url: str = "postgresql://user:password@localhost/waffle_berry"
+    database_url: str = "sqlite:///./waffle_berry.db"
     
     # API settings
     api_v1_prefix: str = "/api/v1"
@@ -19,6 +19,11 @@ class Settings(BaseSettings):
     jwt_secret_key: str
     jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = 30
+
+    # AI settings
+    ai_provider: str = "openai"
+    ai_model: str = ""
+    openai_api_key: str | None = None
     
     class Config:
         env_file = ".env"

@@ -232,7 +232,6 @@ class ConversationCRUD:
 class MessageCRUD:
     """CRUD operations for messages."""
 
-    TEMPORARY_ASSISTANT_RESPONSE = "This is a temporary response."
     DEFAULT_CONVERSATION_TITLE = "New Chat"
     AUTO_TITLE_MAX_LENGTH = 45
 
@@ -268,9 +267,10 @@ class MessageCRUD:
     def create_message_pair(
         db: Session,
         conversation: Conversation,
-        content: str
+        content: str,
+        assistant_content: str
     ) -> tuple[Message, Message, Conversation]:
-        """Store a user message and temporary assistant response atomically."""
+        """Store a user message and generated assistant response atomically."""
         conversation = (
             db.query(Conversation)
             .filter(
@@ -298,7 +298,7 @@ class MessageCRUD:
         assistant_message = Message(
             conversation_id=conversation.conversation_id,
             role=MessageRole.ASSISTANT,
-            content=MessageCRUD.TEMPORARY_ASSISTANT_RESPONSE
+            content=assistant_content
         )
 
         try:
@@ -321,6 +321,92 @@ class MessageCRUD:
             raise
 
         return user_message, assistant_message, conversation
+
+    @staticmethod
+    def create_user_message(
+        db: Session,
+        conversation: Conversation,
+        content: str,
+    ) -> tuple[Message, Conversation]:
+        """Store one streaming user message and update its conversation."""
+        conversation = (
+            db.query(Conversation)
+            .filter(
+                Conversation.conversation_id == conversation.conversation_id
+            )
+            .populate_existing()
+            .with_for_update()
+            .one()
+        )
+        is_first_user_message = (
+            db.query(Message.message_id)
+            .filter(
+                Message.conversation_id == conversation.conversation_id,
+                Message.role == MessageRole.USER,
+            )
+            .first()
+            is None
+        )
+        user_message = Message(
+            conversation_id=conversation.conversation_id,
+            role=MessageRole.USER,
+            content=content,
+        )
+
+        try:
+            db.add(user_message)
+            conversation.updated_at = datetime.now(timezone.utc)
+            if (
+                conversation.title == MessageCRUD.DEFAULT_CONVERSATION_TITLE
+                and is_first_user_message
+            ):
+                conversation.title = MessageCRUD.generate_conversation_title(
+                    content
+                )
+            db.flush()
+            db.refresh(user_message)
+            db.refresh(conversation)
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+
+        return user_message, conversation
+
+    @staticmethod
+    def create_assistant_message(
+        db: Session,
+        conversation: Conversation,
+        content: str,
+    ) -> tuple[Message, Conversation]:
+        """Store one completed streaming assistant message."""
+        conversation = (
+            db.query(Conversation)
+            .filter(
+                Conversation.conversation_id == conversation.conversation_id
+            )
+            .populate_existing()
+            .with_for_update()
+            .one()
+        )
+        assistant_message = Message(
+            conversation_id=conversation.conversation_id,
+            role=MessageRole.ASSISTANT,
+            content=content,
+        )
+
+        try:
+            db.add(assistant_message)
+            conversation.updated_at = datetime.now(timezone.utc)
+            db.flush()
+            db.refresh(assistant_message)
+            db.refresh(conversation)
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+
+        return assistant_message, conversation
     
     @staticmethod
     def get_conversation_messages(

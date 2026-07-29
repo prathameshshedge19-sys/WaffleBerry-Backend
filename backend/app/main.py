@@ -6,7 +6,10 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.v1.project import router as project_router
 from app.api.v1.user import router as user_router
+from app.config import get_settings
 from app.db import Base, engine
+
+settings = get_settings()
 
 # Create database tables
 Base.metadata.create_all(bind=engine)
@@ -28,8 +31,16 @@ app.add_middleware(
 )
 
 # Include routers
-app.include_router(user_router, prefix="/api/v1", tags=["users", "voice-profiles", "conversations"])
-app.include_router(project_router, prefix="/api/v1", tags=["projects"])
+app.include_router(
+    user_router,
+    prefix=settings.api_v1_prefix,
+    tags=["users", "voice-profiles", "conversations"]
+)
+app.include_router(
+    project_router,
+    prefix=settings.api_v1_prefix,
+    tags=["projects"]
+)
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -48,7 +59,7 @@ async def health_check():
     }
 
 
-@app.get("/api/v1/health")
+@app.get(f"{settings.api_v1_prefix}/health")
 async def api_health_check():
     """API health check endpoint."""
     return {

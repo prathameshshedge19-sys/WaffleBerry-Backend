@@ -1,272 +1,118 @@
-# Waffle Berry Backend - FastAPI Implementation Guide
+# WaffleBerry Backend Setup
 
-## Backend Architecture Overview
+The backend is a FastAPI service that provides authentication, conversation,
+and message APIs. The separate `WaffleBerry_website` repository provides the
+browser frontend.
 
-The backend is an API-only FastAPI service. It owns API routes, validation, business/data-access logic, and database persistence. It does not contain or serve the browser frontend, HTML templates, CSS, or JavaScript.
+## Requirements
 
-The frontend lives in the separate `WaffleBerry_website` project and calls this service over HTTP (for local development, the API base URL is `http://127.0.0.1:8000`). CORS middleware permits those cross-origin requests.
+- Python 3.10 or newer
+- SQLite for local development, or a running PostgreSQL server
+- A terminal opened in this repository
 
-### Folder Structure
-```
-backend/
-├── app/
-│   ├── __init__.py
-│   ├── main.py              # FastAPI app initialization
-│   ├── config.py            # Configuration & settings
-│   ├── db.py                # Database connection & session
-│   ├── api/
-│   │   ├── v1/
-│   │   │   └── project.py   # API routes/endpoints
-│   ├── models/
-│   │   └── project.py       # SQLAlchemy ORM models
-│   ├── schemas/
-│   │   └── project.py       # Pydantic validation schemas
-│   ├── crud/
-│   │   └── project.py       # Database operations
-│   └── service/             # Business logic layer
-├── tests/
-├── requirements.txt         # Python dependencies
-├── run.py                   # Application entry point
-└── .env.example             # Environment variables template
-```
+## Local setup
 
----
+Create and activate a virtual environment:
 
-## File-by-File Breakdown
-
-### 1. **requirements.txt** - Dependencies
-```
-Defines all Python packages needed:
-- fastapi: Web framework
-- uvicorn: ASGI server
-- sqlalchemy: ORM for database
-- pydantic: Data validation
-- python-dotenv: Environment variable management
-```
-
-### 2. **config.py** - Configuration Management
-```
-Settings class with:
-- Environment variables loading
-- Database URL configuration
-- App name and debug mode
-- Reusable across the application
-```
-
-### 3. **db.py** - Database Setup
-```
-Provides:
-- Database engine (SQLite for dev, PostgreSQL for prod)
-- Session factory for DB connections
-- Base class for ORM models
-- get_db() dependency function for API routes
-```
-
-### 4. **models/project.py** - Database Schema (ORM)
-```
-Project model defines:
-- id: Primary key
-- name: Project name (indexed)
-- description: Project details
-- created_at: Timestamp (auto)
-- updated_at: Timestamp (auto-updated)
-- Represents actual database table structure
-```
-
-### 5. **schemas/project.py** - Request/Response Validation
-```
-Pydantic models for:
-- ProjectCreate: Validates POST request data
-- ProjectUpdate: Validates PUT request data
-- ProjectResponse: Serializes database models to JSON
-
-Config: from_attributes=True allows ORM → Pydantic conversion
-```
-
-### 6. **crud/project.py** - Database Operations
-```
-ProjectCRUD class with methods:
-- get_project(id)              # Fetch single project
-- get_projects(skip, limit)    # Fetch all with pagination
-- create_project(data)         # Insert new project
-- update_project(id, data)     # Update existing project
-- delete_project(id)           # Remove project
-
-Direct SQLAlchemy queries against database
-```
-
-### 7. **api/v1/project.py** - API Endpoints
-```
-RESTful API routes:
-- GET    /api/v1/projects              → List all projects
-- GET    /api/v1/projects/{id}         → Get single project
-- POST   /api/v1/projects              → Create project
-- PUT    /api/v1/projects/{id}         → Update project
-- DELETE /api/v1/projects/{id}         → Delete project
-
-Uses dependency injection for database session
-```
-
-### 8. **main.py** - Application Entry Point
-```
-Initializes FastAPI with:
-- Database table creation
-- CORS middleware configuration
-- User and project router registration under `/api/v1`
-- A simple root status response (not a frontend page)
-- Health check endpoints
-```
-
-### 9. **run.py** - Server Launcher
-```
-Starts the application:
-python run.py
-- Runs on http://localhost:8000
-- Auto-reload on code changes
-- Uvicorn ASGI server
-```
-
----
-
-## Request Flow Diagram
-
-```
-User Request (e.g., POST /api/v1/projects)
-        ↓
-main.py: FastAPI app receives request
-        ↓
-api/v1/project.py: Route handler (@router.post)
-        ↓
-schemas/project.py: Pydantic validates request body
-        ↓
-crud/project.py: ProjectCRUD.create_project() called
-        ↓
-db.py: get_db() provides SQLAlchemy session
-        ↓
-models/project.py: Project ORM model instance created
-        ↓
-Database: SQL INSERT executed
-        ↓
-schemas/project.py: Response serialized with ProjectResponse
-        ↓
-Client: JSON response returned (201 Created)
-```
-
----
-
-## How to Use
-
-### 1. Install Dependencies
-```bash
+```powershell
 cd backend
-pip install -r requirements.txt
+py -m venv .venv
+.\.venv\Scripts\Activate.ps1
 ```
 
-### 2. Run the Application
+On macOS or Linux, activate it with:
+
+```bash
+source .venv/bin/activate
+```
+
+Install the dependencies:
+
+```bash
+python -m pip install -r requirements.txt
+```
+
+Copy `.env.example` to `.env`, then replace `JWT_SECRET_KEY` with a long,
+random secret. The populated `.env` file is ignored by Git and must not be
+committed.
+
+```powershell
+Copy-Item .env.example .env
+```
+
+The default development database is:
+
+```env
+DATABASE_URL=sqlite:///./waffle_berry.db
+```
+
+Start the development server:
+
 ```bash
 python run.py
 ```
 
-The server will start at `http://localhost:8000`
+The API is available at `http://127.0.0.1:8000`. Useful pages:
 
-This address is the API server only. Open or serve the separate `WaffleBerry_website` project independently; the backend does not host it.
+- Health check: `http://127.0.0.1:8000/health`
+- Swagger UI: `http://127.0.0.1:8000/docs`
+- ReDoc: `http://127.0.0.1:8000/redoc`
 
-### 3. Access API Documentation
-- **Swagger UI**: http://localhost:8000/docs
-- **ReDoc**: http://localhost:8000/redoc
-- **Health Check**: http://localhost:8000/health
+`run.py` enables automatic reload and is intended for local development.
 
-### 4. API Endpoints Example
+## PostgreSQL
 
-**Create a Project:**
-```bash
-curl -X POST http://localhost:8000/api/v1/projects \
-  -H "Content-Type: application/json" \
-  -d '{"name": "My Project", "description": "Project details"}'
+PostgreSQL must be installed and running before the backend starts. Create a
+database and user, grant that user access to the database, and set the complete
+connection URL in `.env`:
+
+```env
+DATABASE_URL=postgresql://waffleberry:your-password@localhost:5432/waffleberry
 ```
 
-**Get All Projects:**
+`psycopg2-binary` is included in `requirements.txt` as the PostgreSQL driver.
+Do not place production credentials in source files or `.env.example`.
+
+For a deployed environment, provide all environment variables through the
+hosting platform and start the app without development reload:
+
 ```bash
-curl http://localhost:8000/api/v1/projects
+uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
-**Get Single Project:**
-```bash
-curl http://localhost:8000/api/v1/projects/1
+Run that command from the `backend` directory. If the platform provides a
+`PORT` value, substitute it for `8000`.
+
+## Environment variables
+
+| Variable | Purpose | Development value |
+| --- | --- | --- |
+| `APP_NAME` | Application display name | `Waffle Berry Backend` |
+| `DEBUG` | Development debug flag | `true` |
+| `DATABASE_URL` | SQLAlchemy database connection URL | `sqlite:///./waffle_berry.db` |
+| `API_V1_PREFIX` | Documented API prefix | `/api/v1` |
+| `JWT_SECRET_KEY` | Secret used to sign access tokens | Required; replace the placeholder |
+| `JWT_ALGORITHM` | JWT signing algorithm | `HS256` |
+| `ACCESS_TOKEN_EXPIRE_MINUTES` | Token lifetime | `30` |
+
+## Database notes
+
+The application creates missing tables on startup. SQLAlchemy's
+`create_all()` does not migrate existing tables when models change. Future
+schema changes therefore require an explicit migration process; do not delete
+or recreate a database as a deployment strategy.
+
+SQLite database files are ignored by Git. PostgreSQL is recommended for a
+shared or production deployment.
+
+## Frontend connection
+
+Serve the separate `WaffleBerry_website` project over HTTP. Its development API
+address defaults to:
+
+```text
+http://127.0.0.1:8000/api/v1
 ```
 
-**Update Project:**
-```bash
-curl -X PUT http://localhost:8000/api/v1/projects/1 \
-  -H "Content-Type: application/json" \
-  -d '{"name": "Updated Name"}'
-```
-
-**Delete Project:**
-```bash
-curl -X DELETE http://localhost:8000/api/v1/projects/1
-```
-
----
-
-## Key Concepts
-
-### 1. **Dependency Injection**
-- FastAPI uses `Depends()` to inject dependencies
-- `get_db()` automatically provides database sessions
-- Routes automatically close sessions after completion
-
-### 2. **Pydantic Validation**
-- Automatic request data validation
-- Type checking and error messages
-- Automatic OpenAPI documentation generation
-
-### 3. **SQLAlchemy ORM**
-- Object-Relational Mapping
-- Models represent database tables
-- Automatic SQL generation
-- Connection pooling
-
-### 4. **REST Conventions**
-- GET: Retrieve data
-- POST: Create data (201 status)
-- PUT: Update entire resource
-- PATCH: Partial update
-- DELETE: Remove data (204 status)
-
----
-
-## Status Codes Used
-
-| Code | Meaning |
-|------|---------|
-| 200 | OK - Request succeeded |
-| 201 | Created - Resource created successfully |
-| 204 | No Content - Successful delete |
-| 400 | Bad Request - Invalid input |
-| 404 | Not Found - Resource doesn't exist |
-| 500 | Server Error - Unexpected error |
-
----
-
-## Database Notes
-
-**Current Setup:** SQLite (development)
-- File-based database: `waffle_berry.db`
-- Auto-creates on first run
-- Perfect for development
-
-**For Production:** PostgreSQL
-- Update `DATABASE_URL` in `.env`
-- Install: `pip install psycopg2-binary`
-- More robust and scalable
-
----
-
-## Next Steps
-
-1. Update `.env` with your configuration
-2. Run `python run.py` to start the server
-3. Test endpoints via Swagger UI (/docs)
-4. Add authentication/authorization as needed
-5. Deploy to production with PostgreSQL
+See that repository's README for local serving and production API URL
+configuration.

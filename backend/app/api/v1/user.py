@@ -1,9 +1,15 @@
 """API routes for voice profiles and related endpoints."""
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+import asyncio
+import json
+import logging
+
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 from app.db import get_db
 from app.dependencies.auth import get_current_user
+from app.dependencies.ai import get_chat_service
 from app.models.user import User
 from app.schemas.user import (
     UserCreate, UserLogin, UserResponse, LoginResponse, VoiceProfileCreate, VoiceProfileResponse, 
@@ -16,9 +22,65 @@ from app.crud.user import (
 )
 
 from app.services.token_service import create_access_token
+from app.services.ai.exceptions import (
+    AIAuthenticationError,
+    AIConfigurationError,
+    AIConnectionError,
+    AIProviderError,
+    AIRateLimitError,
+    AIResponseError,
+    AIServiceError,
+    AITimeoutError,
+)
+
+logger = logging.getLogger(__name__)
 
 
 router = APIRouter()
+
+
+def _sse_event(event: str, payload: dict) -> str:
+    """Serialize one safely framed server-sent event."""
+    data = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    return f"event: {event}\ndata: {data}\n\n"
+
+
+def _stream_error(exc: AIServiceError) -> tuple[str, str]:
+    """Map internal AI failures to safe stream error data."""
+    if isinstance(exc, AIRateLimitError):
+        return (
+            "rate_limit",
+            "Berry is temporarily unavailable because the AI usage limit has been reached.",
+        )
+    if isinstance(exc, AIAuthenticationError):
+        return (
+            "provider_authentication",
+            "Berry's AI service is not configured correctly.",
+        )
+    if isinstance(exc, AIConfigurationError):
+        return (
+            "provider_configuration",
+            "Berry's AI service is not configured correctly.",
+        )
+    if isinstance(exc, AITimeoutError):
+        return (
+            "provider_timeout",
+            "Berry took too long to respond. Please try again.",
+        )
+    if isinstance(exc, AIConnectionError):
+        return (
+            "provider_connection",
+            "Berry could not reach the AI service. Please try again.",
+        )
+    if isinstance(exc, AIResponseError):
+        return (
+            "invalid_response",
+            "Berry's response was interrupted. Please try again.",
+        )
+    return (
+        "ai_service_error",
+        "I couldn't generate a response just now. Please try again.",
+    )
 
 
 # ==================== USER ENDPOINTS ====================
@@ -374,7 +436,7 @@ async def create_message(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Store a user message and temporary assistant response."""
+    """Generate and atomically store a user/assistant message pair."""
     conversation = ConversationCRUD.get_user_conversation(
         db,
         conversation_id,
@@ -386,15 +448,179 @@ async def create_message(
             detail="Conversation not found."
         )
 
+    try:
+        assistant_content = await get_chat_service().generate_response(
+            db,
+            conversation,
+            message.content
+        )
+    except AIConfigurationError:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="AI service is not configured."
+        ) from None
+    except AIProviderError:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="AI service is temporarily unavailable."
+        ) from None
+    except AIResponseError:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="AI service returned an invalid response."
+        ) from None
+    except AIServiceError:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="AI service could not complete the request."
+        ) from None
+
     user_message, assistant_message, conversation = MessageCRUD.create_message_pair(
         db,
         conversation,
-        message.content
+        message.content,
+        assistant_content
     )
     return MessagePairResponse(
         user_message=user_message,
         assistant_message=assistant_message,
         conversation=conversation
+    )
+
+
+@router.post(
+    "/conversations/{conversation_id}/messages/stream",
+)
+async def create_message_stream(
+    conversation_id: int,
+    message: MessageCreate,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Stream Berry text and persist only a completed assistant response."""
+    conversation = ConversationCRUD.get_user_conversation(
+        db,
+        conversation_id,
+        current_user.user_id,
+    )
+    if not conversation:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Conversation not found.",
+        )
+
+    try:
+        response_stream = get_chat_service().stream_response(
+            db,
+            conversation,
+            message.content,
+        )
+    except AIConfigurationError:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="AI service is not configured.",
+        ) from None
+    except AIServiceError:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="AI service is temporarily unavailable.",
+        ) from None
+
+    user_message, conversation = MessageCRUD.create_user_message(
+        db,
+        conversation,
+        message.content,
+    )
+    start_payload = {
+        "conversation_id": conversation_id,
+        "user_message": MessageResponse.model_validate(
+            user_message
+        ).model_dump(mode="json"),
+        "conversation": ConversationResponse.model_validate(
+            conversation
+        ).model_dump(mode="json"),
+    }
+
+    async def event_stream():
+        chunks: list[str] = []
+
+        try:
+            yield _sse_event("start", start_payload)
+
+            async for delta in response_stream:
+                if await request.is_disconnected():
+                    return
+
+                chunks.append(delta)
+                yield _sse_event("delta", {"text": delta})
+
+            if await request.is_disconnected():
+                return
+
+            assistant_content = "".join(chunks).strip()
+            if not assistant_content:
+                raise AIResponseError(
+                    "AI provider returned an empty response."
+                )
+
+            assistant_message, updated_conversation = (
+                MessageCRUD.create_assistant_message(
+                    db,
+                    conversation,
+                    assistant_content,
+                )
+            )
+            yield _sse_event(
+                "complete",
+                {
+                    "message": MessageResponse.model_validate(
+                        assistant_message
+                    ).model_dump(mode="json"),
+                    "conversation": ConversationResponse.model_validate(
+                        updated_conversation
+                    ).model_dump(mode="json"),
+                },
+            )
+        except asyncio.CancelledError:
+            logger.info("AI response stream was cancelled.")
+            raise
+        except AIServiceError as exc:
+            logger.exception("AI response stream failed.")
+            db.rollback()
+            if not await request.is_disconnected():
+                code, safe_message = _stream_error(exc)
+                yield _sse_event(
+                    "error",
+                    {
+                        "code": code,
+                        "message": safe_message,
+                    },
+                )
+        except Exception:
+            logger.exception("Unexpected AI response stream failure.")
+            db.rollback()
+            if not await request.is_disconnected():
+                yield _sse_event(
+                    "error",
+                    {
+                        "code": "stream_interrupted",
+                        "message": "Berry's response was interrupted. Please try again.",
+                    },
+                )
+        finally:
+            close_stream = getattr(response_stream, "aclose", None)
+            if close_stream is not None:
+                await close_stream()
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
     )
 
 
