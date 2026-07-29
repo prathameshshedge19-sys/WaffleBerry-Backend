@@ -1,9 +1,22 @@
-from pydantic_settings import BaseSettings
 from functools import lru_cache
+from pathlib import Path
+
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+BACKEND_DIRECTORY = Path(__file__).resolve().parents[1]
+ENV_FILE = BACKEND_DIRECTORY / ".env"
 
 
 class Settings(BaseSettings):
     """Application settings and configuration."""
+
+    model_config = SettingsConfigDict(
+        env_file=ENV_FILE,
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
     
     # App settings
     app_name: str = "Waffle Berry Backend"
@@ -24,11 +37,12 @@ class Settings(BaseSettings):
     ai_provider: str = "openai"
     ai_model: str = ""
     openai_api_key: str | None = None
-    ai_connect_timeout_seconds: float = 10.0
-    ai_read_timeout_seconds: float = 90.0
-    
-    class Config:
-        env_file = ".env"
+    ai_connect_timeout_seconds: float = Field(default=10.0, gt=0)
+    ai_read_timeout_seconds: float = Field(default=90.0, gt=0)
+    ai_retry_max_retries: int = Field(default=2, ge=0)
+    ai_retry_base_delay_seconds: float = Field(default=0.25, ge=0)
+    ai_retry_max_delay_seconds: float = Field(default=2.0, gt=0)
+    ai_retry_jitter_seconds: float = Field(default=0.15, ge=0)
 
 
 @lru_cache()

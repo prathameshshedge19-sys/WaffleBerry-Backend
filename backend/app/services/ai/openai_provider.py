@@ -42,7 +42,7 @@ class OpenAIProvider(AIProvider):
 
     def __init__(self, settings: Settings | None = None) -> None:
         self._settings = settings or get_settings()
-        self._validate_configuration()
+        self.validate_configuration(self._settings)
 
         try:
             timeout = httpx.Timeout(
@@ -170,17 +170,14 @@ class OpenAIProvider(AIProvider):
         if not completed:
             raise AIProviderError("OpenAI stream ended before completion.")
 
-    def _validate_configuration(self) -> None:
-        provider = self._settings.ai_provider.strip().lower()
-        if provider != "openai":
-            raise AIConfigurationError(
-                f"Unsupported AI provider: {provider or '<empty>'}."
-            )
-        if not self._settings.ai_model.strip():
+    @staticmethod
+    def validate_configuration(settings: Settings) -> None:
+        """Validate OpenAI-specific settings without making a network call."""
+        if not isinstance(settings.ai_model, str) or not settings.ai_model.strip():
             raise AIConfigurationError("AI_MODEL must be configured.")
         if (
-            not isinstance(self._settings.openai_api_key, str)
-            or not self._settings.openai_api_key.strip()
+            not isinstance(settings.openai_api_key, str)
+            or not settings.openai_api_key.strip()
         ):
             raise AIConfigurationError("OPENAI_API_KEY must be configured.")
 

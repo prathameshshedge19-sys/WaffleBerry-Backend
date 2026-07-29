@@ -31,7 +31,7 @@ class AIService:
     ) -> None:
         self._provider = provider
         self._prompt_builder = prompt_builder or PromptBuilder()
-        self._retry_policy = retry_policy or AIRetryPolicy()
+        self._retry_policy = retry_policy or AIRetryPolicy.no_retries()
 
     def build_messages(
         self,

@@ -2,14 +2,23 @@
 
 from functools import lru_cache
 
+from app.config import get_settings
 from app.services.ai.ai_service import AIService
-from app.services.ai.openai_provider import OpenAIProvider
+from app.services.ai.provider_registry import create_ai_provider
+from app.services.ai.retry import AIRetryPolicy
 from app.services.chat_service import ChatService
 
 
 @lru_cache()
 def get_chat_service() -> ChatService:
     """Return the configured application-wide chat service."""
-    provider = OpenAIProvider()
-    ai_service = AIService(provider)
+    settings = get_settings()
+    provider = create_ai_provider(settings)
+    retry_policy = AIRetryPolicy(
+        max_retries=settings.ai_retry_max_retries,
+        base_delay_seconds=settings.ai_retry_base_delay_seconds,
+        max_delay_seconds=settings.ai_retry_max_delay_seconds,
+        jitter_seconds=settings.ai_retry_jitter_seconds,
+    )
+    ai_service = AIService(provider, retry_policy=retry_policy)
     return ChatService(ai_service)

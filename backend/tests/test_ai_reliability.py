@@ -57,6 +57,9 @@ class AIReliabilityTests(unittest.IsolatedAsyncioTestCase):
             provider,
             retry_policy=AIRetryPolicy(
                 max_retries=2,
+                base_delay_seconds=0,
+                max_delay_seconds=0,
+                jitter_seconds=0,
                 sleep=no_wait,
             ),
         )

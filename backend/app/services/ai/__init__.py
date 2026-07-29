@@ -16,6 +16,10 @@ from app.services.ai.exceptions import (
 )
 from app.services.ai.openai_provider import OpenAIProvider
 from app.services.ai.provider import AIMessage, AIProvider
+from app.services.ai.provider_registry import (
+    create_ai_provider,
+    validate_ai_configuration,
+)
 
 __all__ = [
     "AIConfigurationError",
@@ -32,5 +36,7 @@ __all__ = [
     "AIServiceError",
     "AIAuthenticationError",
     "AITimeoutError",
+    "create_ai_provider",
     "OpenAIProvider",
+    "validate_ai_configuration",
 ]
