@@ -101,6 +101,50 @@ class LegacyResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class LegacyStorySummary(BaseModel):
+    total_sessions: int = Field(..., ge=0)
+    distinct_chapters: int = Field(..., ge=0)
+    in_progress_sessions: int = Field(..., ge=0)
+    paused_sessions: int = Field(..., ge=0)
+    completed_sessions: int = Field(..., ge=0)
+    total_messages: int = Field(..., ge=0)
+    contributed_messages: int = Field(..., ge=0)
+
+
+class LegacyMemorySummary(BaseModel):
+    total: int = Field(..., ge=0)
+    candidate: int = Field(..., ge=0)
+    approved: int = Field(..., ge=0)
+    rejected: int = Field(..., ge=0)
+    superseded: int = Field(..., ge=0)
+    atomic: int = Field(..., ge=0)
+    narrative: int = Field(..., ge=0)
+
+
+class LegacyExtractionSummary(BaseModel):
+    total_runs: int = Field(..., ge=0)
+    pending_runs: int = Field(..., ge=0)
+    running_runs: int = Field(..., ge=0)
+    completed_runs: int = Field(..., ge=0)
+    failed_runs: int = Field(..., ge=0)
+
+
+class LegacyDashboardResponse(BaseModel):
+    """Owner-scoped summary assembled from existing Legacy data."""
+
+    legacy_id: int
+    title: str
+    relationship: str
+    status: LegacyStatus
+    created_at: datetime
+    updated_at: datetime
+    stories: LegacyStorySummary
+    memories: LegacyMemorySummary
+    extraction: LegacyExtractionSummary
+    linked_conversations: int = Field(..., ge=0)
+    has_approved_memories: bool
+
+
 class StorySessionResponse(BaseModel):
     story_session_id: int
     legacy_id: int

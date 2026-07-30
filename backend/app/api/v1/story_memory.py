@@ -32,6 +32,7 @@ from app.models.user import User
 from app.schemas.memory import (
     ExtractionRunResponse,
     LegacyCreate,
+    LegacyDashboardResponse,
     LegacyResponse,
     PersistedStoryStreamRequest,
     StoryMessageCreate,
@@ -47,6 +48,10 @@ from app.services.memory.background_extraction import (
     StoryExtractionNotFoundError,
     StoryExtractionService,
     execute_story_extraction,
+)
+from app.services.legacy_dashboard import (
+    LegacyDashboardNotFoundError,
+    LegacyDashboardService,
 )
 
 
@@ -91,6 +96,29 @@ def get_legacy(
     if legacy is None:
         raise HTTPException(status_code=404, detail="Legacy was not found.")
     return legacy
+
+
+@router.get(
+    "/legacies/{legacy_id}/dashboard",
+    response_model=LegacyDashboardResponse,
+)
+def get_legacy_dashboard(
+    legacy_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Return an owner-scoped summary derived from persisted Legacy data."""
+    try:
+        return LegacyDashboardService().get_summary(
+            db,
+            user_id=current_user.user_id,
+            legacy_id=legacy_id,
+        )
+    except LegacyDashboardNotFoundError:
+        raise HTTPException(
+            status_code=404,
+            detail="Legacy was not found.",
+        ) from None
 
 
 @router.post(
