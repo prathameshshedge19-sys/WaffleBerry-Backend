@@ -16,7 +16,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
 )
-from sqlalchemy.orm import relationship, validates
+from sqlalchemy.orm import relationship as orm_relationship, validates
 from sqlalchemy.sql import func
 
 from app.db import Base
@@ -127,30 +127,30 @@ class Legacy(Base):
         onupdate=func.now(),
     )
 
-    owner = relationship("User", back_populates="legacies")
-    conversations = relationship("Conversation", back_populates="legacy")
-    story_sessions = relationship(
+    owner = orm_relationship("User", back_populates="legacies")
+    conversations = orm_relationship("Conversation", back_populates="legacy")
+    story_sessions = orm_relationship(
         "StorySession",
         back_populates="legacy",
         cascade="all, delete-orphan",
     )
-    memories = relationship(
+    memories = orm_relationship(
         "Memory",
         back_populates="legacy",
         cascade="all, delete-orphan",
         foreign_keys="Memory.legacy_id",
     )
-    contradiction_groups = relationship(
+    contradiction_groups = orm_relationship(
         "MemoryContradictionGroup",
         back_populates="legacy",
         cascade="all, delete-orphan",
     )
-    tags = relationship(
+    tags = orm_relationship(
         "Tag",
         back_populates="legacy",
         cascade="all, delete-orphan",
     )
-    extraction_runs = relationship(
+    extraction_runs = orm_relationship(
         "MemoryExtractionRun",
         back_populates="legacy",
         cascade="all, delete-orphan",
@@ -206,15 +206,15 @@ class StorySession(Base):
     )
     completed_at = Column(DateTime(timezone=True), nullable=True)
 
-    legacy = relationship("Legacy", back_populates="story_sessions")
-    created_by = relationship("User")
-    messages = relationship(
+    legacy = orm_relationship("Legacy", back_populates="story_sessions")
+    created_by = orm_relationship("User")
+    messages = orm_relationship(
         "StoryMessage",
         back_populates="story_session",
         cascade="all, delete-orphan",
         order_by="StoryMessage.sequence",
     )
-    extraction_runs = relationship(
+    extraction_runs = orm_relationship(
         "MemoryExtractionRun",
         back_populates="story_session",
         cascade="all, delete-orphan",
@@ -270,7 +270,7 @@ class StoryMessage(Base):
         server_default=func.now(),
     )
 
-    story_session = relationship("StorySession", back_populates="messages")
+    story_session = orm_relationship("StorySession", back_populates="messages")
 
     @validates("content")
     def validate_content(self, key, value):
@@ -342,8 +342,8 @@ class MemoryExtractionRun(Base):
         onupdate=func.now(),
     )
 
-    legacy = relationship("Legacy", back_populates="extraction_runs")
-    story_session = relationship(
+    legacy = orm_relationship("Legacy", back_populates="extraction_runs")
+    story_session = orm_relationship(
         "StorySession", back_populates="extraction_runs"
     )
 
@@ -384,13 +384,13 @@ class MemoryContradictionGroup(Base):
     )
     resolved_at = Column(DateTime(timezone=True), nullable=True)
 
-    legacy = relationship("Legacy", back_populates="contradiction_groups")
-    memories = relationship(
+    legacy = orm_relationship("Legacy", back_populates="contradiction_groups")
+    memories = orm_relationship(
         "Memory",
         back_populates="contradiction_group",
         foreign_keys="Memory.contradiction_group_id",
     )
-    resolved_by = relationship("User")
+    resolved_by = orm_relationship("User")
 
 
 class Memory(Base):
@@ -499,56 +499,56 @@ class Memory(Base):
         nullable=True,
     )
 
-    legacy = relationship(
+    legacy = orm_relationship(
         "Legacy",
         back_populates="memories",
         foreign_keys=[legacy_id],
     )
-    contradiction_group = relationship(
+    contradiction_group = orm_relationship(
         "MemoryContradictionGroup",
         back_populates="memories",
         foreign_keys=[contradiction_group_id],
     )
-    superseded_by = relationship(
+    superseded_by = orm_relationship(
         "Memory",
         remote_side=[memory_id],
         foreign_keys=[superseded_by_memory_id],
         back_populates="supersedes",
     )
-    supersedes = relationship(
+    supersedes = orm_relationship(
         "Memory",
         foreign_keys=[superseded_by_memory_id],
         back_populates="superseded_by",
     )
-    reviewed_by = relationship("User")
-    provenance = relationship(
+    reviewed_by = orm_relationship("User")
+    provenance = orm_relationship(
         "MemoryProvenance",
         back_populates="memory",
         cascade="all, delete-orphan",
     )
-    revisions = relationship(
+    revisions = orm_relationship(
         "MemoryRevision",
         back_populates="memory",
         cascade="all, delete-orphan",
         order_by="MemoryRevision.revision_number",
     )
-    participants = relationship(
+    participants = orm_relationship(
         "MemoryParticipant",
         back_populates="memory",
         cascade="all, delete-orphan",
     )
-    tag_links = relationship(
+    tag_links = orm_relationship(
         "MemoryTag",
         back_populates="memory",
         cascade="all, delete-orphan",
     )
-    outgoing_links = relationship(
+    outgoing_links = orm_relationship(
         "MemoryLink",
         foreign_keys="MemoryLink.source_memory_id",
         back_populates="source_memory",
         cascade="all, delete-orphan",
     )
-    incoming_links = relationship(
+    incoming_links = orm_relationship(
         "MemoryLink",
         foreign_keys="MemoryLink.target_memory_id",
         back_populates="target_memory",
@@ -619,11 +619,11 @@ class MemoryProvenance(Base):
     )
     extractor_version = Column(String(100), nullable=True)
 
-    memory = relationship("Memory", back_populates="provenance")
-    conversation = relationship("Conversation")
-    message = relationship("Message")
-    story_session = relationship("StorySession")
-    story_message = relationship("StoryMessage")
+    memory = orm_relationship("Memory", back_populates="provenance")
+    conversation = orm_relationship("Conversation")
+    message = orm_relationship("Message")
+    story_session = orm_relationship("StorySession")
+    story_message = orm_relationship("StoryMessage")
 
 
 class MemoryRevision(Base):
@@ -661,8 +661,8 @@ class MemoryRevision(Base):
         server_default=func.now(),
     )
 
-    memory = relationship("Memory", back_populates="revisions")
-    edited_by = relationship("User")
+    memory = orm_relationship("Memory", back_populates="revisions")
+    edited_by = orm_relationship("User")
 
 
 class MemoryParticipant(Base):
@@ -686,7 +686,7 @@ class MemoryParticipant(Base):
     relationship = Column(String(100), nullable=True)
     role = Column(String(40), nullable=True)
 
-    memory = relationship("Memory", back_populates="participants")
+    memory = orm_relationship("Memory", back_populates="participants")
 
 
 class Tag(Base):
@@ -718,8 +718,8 @@ class Tag(Base):
     name = Column(String(80), nullable=False)
     normalized_name = Column(String(80), nullable=False)
 
-    legacy = relationship("Legacy", back_populates="tags")
-    memory_links = relationship(
+    legacy = orm_relationship("Legacy", back_populates="tags")
+    memory_links = orm_relationship(
         "MemoryTag",
         back_populates="tag",
         cascade="all, delete-orphan",
@@ -740,8 +740,8 @@ class MemoryTag(Base):
         primary_key=True,
     )
 
-    memory = relationship("Memory", back_populates="tag_links")
-    tag = relationship("Tag", back_populates="memory_links")
+    memory = orm_relationship("Memory", back_populates="tag_links")
+    tag = orm_relationship("Tag", back_populates="memory_links")
 
 
 class MemoryLink(Base):
@@ -789,14 +789,14 @@ class MemoryLink(Base):
         server_default=func.now(),
     )
 
-    source_memory = relationship(
+    source_memory = orm_relationship(
         "Memory",
         foreign_keys=[source_memory_id],
         back_populates="outgoing_links",
     )
-    target_memory = relationship(
+    target_memory = orm_relationship(
         "Memory",
         foreign_keys=[target_memory_id],
         back_populates="incoming_links",
     )
-    legacy = relationship("Legacy")
+    legacy = orm_relationship("Legacy")
