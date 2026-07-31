@@ -125,17 +125,49 @@ class ContextBuilder:
         latest_user_message: str,
         *,
         grounding_context: str | None = None,
+        persona_display_name: str | None = None,
+        persona_relationship: str | None = None,
+        retrieval_available: bool = True,
+        persona_style_profile: dict[str, list[str]] | None = None,
+        persona_fidelity_guidance: str | None = None,
     ) -> list[AIMessage]:
         """Build chat context and require a valid latest user message."""
         if self._normalize_content(latest_user_message) is None:
             raise AIInvalidResponseError(
                 "Latest user message must not be blank."
             )
-        messages = self.build_messages(
-            history,
-            latest_user_message,
-            grounding_context=grounding_context,
-        )
+        if persona_display_name and persona_relationship:
+            system_prompt = self._prompt_builder.build_legacy_persona_system_prompt(
+                display_name=persona_display_name,
+                relationship=persona_relationship,
+                retrieval_available=retrieval_available,
+                style_profile=persona_style_profile,
+                fidelity_guidance=persona_fidelity_guidance,
+            )
+            if grounding_context:
+                system_prompt = f"{system_prompt}\n\n{grounding_context}"
+            latest = self._normalize_content(latest_user_message)
+            valid_history = [
+                normalized
+                for message in history
+                if (normalized := self._normalize_stored_message(message))
+                is not None
+            ]
+            selected = self._select_recent_history(
+                valid_history,
+                self.max_context_messages - 2,
+            )
+            messages = [
+                AIMessage(role="system", content=system_prompt),
+                *selected,
+                AIMessage(role="user", content=latest),
+            ]
+        else:
+            messages = self.build_messages(
+                history,
+                latest_user_message,
+                grounding_context=grounding_context,
+            )
         return messages
 
     def build_story_messages(

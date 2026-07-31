@@ -171,6 +171,11 @@ class MemoryBudgetTests(unittest.IsolatedAsyncioTestCase):
             conversation_id=4,
             user_id=7,
             legacy_id=12,
+            legacy=SimpleNamespace(
+                owner_user_id=7,
+                display_name="Mom",
+                relationship="Mother",
+            ),
         )
         generated = await service.generate_response_with_provenance(
             fake_db(), conversation, "memory"

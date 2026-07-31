@@ -105,6 +105,15 @@ class CompanionMemoryGroundingTests(unittest.IsolatedAsyncioTestCase):
             conversation_id=4,
             user_id=user_id,
             legacy_id=legacy_id,
+            legacy=(
+                SimpleNamespace(
+                    owner_user_id=user_id,
+                    display_name="Mom",
+                    relationship="Mother",
+                )
+                if legacy_id is not None
+                else None
+            ),
         )
 
     def test_relevant_approved_memory_is_retrieved_and_framed(self):
@@ -166,7 +175,7 @@ class CompanionMemoryGroundingTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn("<BEGIN_APPROVED_LEGACY_MEMORY_DATA>", prompt)
         self.assertTrue(prompt.endswith("<END_APPROVED_LEGACY_MEMORY_DATA>"))
-        self.assertIn("never speak as, impersonate, or claim to be", prompt)
+        self.assertIn("Use supported facts naturally in the first person", prompt)
 
     async def test_streaming_and_non_streaming_receive_identical_grounding(self):
         retrieval = FakeRetrievalService([ranked_memory()])
@@ -197,19 +206,27 @@ class CompanionMemoryGroundingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([part async for part in stream], ["grounded response"])
         self.assertEqual(events, ["retrieve", "stream"])
 
-    def test_retrieval_security_and_database_failures_fail_closed(self):
-        errors = [
-            MemoryRetrievalNotFoundError("not found"),
-            OperationalError("select", {}, Exception("db unavailable")),
-        ]
-        for error in errors:
-            with self.subTest(error=type(error).__name__):
-                with self.assertRaises(MemoryGroundingError):
-                    self.service(
-                        FakeRetrievalService(error=error)
-                    ).prepare_ai_input(
-                        fake_db(), self.conversation(), "mother name"
-                    )
+    def test_security_failure_blocks_and_database_failure_uses_uncertainty(self):
+        with self.assertRaises(MemoryGroundingError):
+            self.service(
+                FakeRetrievalService(
+                    error=MemoryRetrievalNotFoundError("not found")
+                )
+            ).prepare_ai_input(
+                fake_db(), self.conversation(), "mother name"
+            )
+
+        messages = self.service(
+            FakeRetrievalService(
+                error=OperationalError(
+                    "select", {}, Exception("db unavailable")
+                )
+            )
+        ).prepare_ai_input(
+            fake_db(), self.conversation(), "mother name"
+        )
+        self.assertIn("retrieval is unavailable", messages[0].content)
+        self.assertIn("natural uncertainty", messages[0].content)
 
     def test_story_guide_prompt_is_not_grounded(self):
         messages = ContextBuilder(8).build_story_messages(
