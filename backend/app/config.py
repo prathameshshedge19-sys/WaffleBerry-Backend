@@ -27,6 +27,22 @@ class Settings(BaseSettings):
     
     # API settings
     api_v1_prefix: str = "/api/v1"
+    cors_origins: str = (
+        "http://127.0.0.1:4173,http://localhost:4173,"
+        "http://127.0.0.1:5500,http://localhost:5500"
+    )
+
+    @property
+    def allowed_cors_origins(self) -> list[str]:
+        """Return explicit browser origins configured for CORS."""
+        origins = [
+            origin.strip().rstrip("/")
+            for origin in self.cors_origins.split(",")
+            if origin.strip()
+        ]
+        if "*" in origins:
+            raise ValueError("CORS_ORIGINS must contain explicit origins, not '*'.")
+        return origins
 
     # JWT settings
     jwt_secret_key: str

@@ -24,7 +24,7 @@ app = FastAPI(
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=settings.allowed_cors_origins,
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -63,11 +63,7 @@ async def read_root():
 @app.get("/health")
 async def health_check():
     """Health check endpoint."""
-    return {
-        "status": "ok",
-        "message": "Waffle Berry backend is running",
-        "version": "1.0.0"
-    }
+    return {"status": "ok"}
 
 
 @app.get(f"{settings.api_v1_prefix}/health")
