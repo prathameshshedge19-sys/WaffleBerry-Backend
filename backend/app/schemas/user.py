@@ -25,6 +25,12 @@ class UserLogin(BaseModel):
     email: EmailStr
     password: str
 
+class VerifyEmailRequest(BaseModel):
+    """Request body for email verification."""
+
+    email: EmailStr
+    otp: str
+
 
 class UserResponse(UserBase):
     """Schema for user response."""

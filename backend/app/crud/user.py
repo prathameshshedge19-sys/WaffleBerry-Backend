@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 from app.models.user import User, VoiceProfile, VoiceSample, Conversation, Message, MessageRole
 from app.schemas.user import UserCreate, VoiceProfileCreate, VoiceProfileUpdate, VoiceSampleCreate
+import app.services.email_verification_service as evs
 import hashlib
 import hmac
 
@@ -30,6 +31,18 @@ class UserCRUD:
         db.add(db_user)
         db.commit()
         db.refresh(db_user)
+        print("Imported from:", evs.__file__)
+        print("Methods:", dir(evs.EmailVerificationService))
+        print(open(evs.__file__, "r").read())
+        otp = evs.EmailVerificationService.generate_otp()
+        otp_hash = evs.EmailVerificationService.hash_otp(otp)
+        print(f"Generated OTP: {otp}")
+
+        evs.EmailVerificationService.create_verification(
+            db=db,
+            user_id=db_user.user_id,
+            otp_hash=otp_hash
+        )
         return db_user
     
     @staticmethod
