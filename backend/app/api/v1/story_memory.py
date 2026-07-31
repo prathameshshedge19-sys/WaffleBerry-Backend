@@ -34,6 +34,8 @@ from app.schemas.memory import (
     LegacyCreate,
     LegacyDashboardResponse,
     LegacyResponse,
+    LegacySettingsResponse,
+    LegacySettingsUpdate,
     PersistedStoryStreamRequest,
     StoryMessageCreate,
     StorySessionCompletionResponse,
@@ -52,6 +54,11 @@ from app.services.memory.background_extraction import (
 from app.services.legacy_dashboard import (
     LegacyDashboardNotFoundError,
     LegacyDashboardService,
+)
+from app.services.legacy_settings import (
+    LegacySettingsConflictError,
+    LegacySettingsNotFoundError,
+    LegacySettingsService,
 )
 
 
@@ -96,6 +103,42 @@ def get_legacy(
     if legacy is None:
         raise HTTPException(status_code=404, detail="Legacy was not found.")
     return legacy
+
+
+@router.patch(
+    "/legacies/{legacy_id}",
+    response_model=LegacySettingsResponse,
+)
+def update_legacy_settings(
+    legacy_id: int,
+    changes: LegacySettingsUpdate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Update owner-scoped Legacy identity fields only."""
+    try:
+        return LegacySettingsService().update(
+            db,
+            user_id=current_user.user_id,
+            legacy_id=legacy_id,
+            changes=changes,
+        )
+    except LegacySettingsConflictError:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "legacy_changed",
+                "message": (
+                    "This Legacy changed elsewhere. "
+                    "Refresh and try again."
+                ),
+            },
+        ) from None
+    except LegacySettingsNotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Legacy was not found.",
+        ) from None
 
 
 @router.get(

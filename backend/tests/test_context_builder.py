@@ -52,7 +52,7 @@ class ContextBuilderTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Chapter: Childhood", messages[0].content)
         self.assertIn("Relationship: Father", messages[0].content)
         self.assertIn("Display name: Dad", messages[0].content)
-        prompt = messages[0].content.lower()
+        prompt = " ".join(messages[0].content.lower().split())
         self.assertIn("memory archivist", prompt)
         self.assertIn("one main story prompt at a time", prompt)
         self.assertIn("not the companion or legacy person", prompt)

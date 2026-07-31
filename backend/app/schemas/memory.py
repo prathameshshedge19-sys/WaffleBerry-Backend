@@ -101,6 +101,53 @@ class LegacyResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class LegacySettingsUpdate(BaseModel):
+    """Explicitly permitted non-destructive Legacy identity edits."""
+
+    expected_updated_at: datetime
+    display_name: str | None = Field(
+        default=None, min_length=1, max_length=255
+    )
+    relationship: str | None = Field(
+        default=None, min_length=1, max_length=100
+    )
+
+    model_config = ConfigDict(extra="forbid")
+
+    _normalize_display_name = field_validator(
+        "display_name",
+        mode="before",
+    )(_strip_required)
+    _normalize_relationship = field_validator(
+        "relationship",
+        mode="before",
+    )(_strip_required)
+
+    @model_validator(mode="after")
+    def require_an_edit(self):
+        editable = self.model_fields_set.intersection(
+            {"display_name", "relationship"}
+        )
+        if not editable:
+            raise ValueError("At least one editable field is required.")
+        if any(getattr(self, field) is None for field in editable):
+            raise ValueError("Editable fields cannot be null.")
+        return self
+
+
+class LegacySettingsResponse(BaseModel):
+    """Safe user-facing Legacy settings projection."""
+
+    legacy_id: int
+    display_name: str
+    relationship: str
+    status: LegacyStatus
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 class LegacyStorySummary(BaseModel):
     total_sessions: int = Field(..., ge=0)
     distinct_chapters: int = Field(..., ge=0)

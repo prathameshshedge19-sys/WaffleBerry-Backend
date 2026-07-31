@@ -122,6 +122,36 @@ class LegacyCRUD:
             .all()
         )
 
+    @staticmethod
+    def get_user_legacy_for_update(
+        db: Session,
+        legacy_id: int,
+        user_id: int,
+    ) -> Legacy | None:
+        """Lock and return one owner-scoped Legacy where supported."""
+        return (
+            db.query(Legacy)
+            .filter(
+                Legacy.legacy_id == legacy_id,
+                Legacy.owner_user_id == user_id,
+            )
+            .with_for_update()
+            .first()
+        )
+
+    @staticmethod
+    def apply_identity_changes(
+        legacy: Legacy,
+        *,
+        display_name: str | None = None,
+        relationship: str | None = None,
+    ) -> None:
+        """Apply validated identity values without committing."""
+        if display_name is not None:
+            legacy.display_name = display_name
+        if relationship is not None:
+            legacy.relationship = relationship
+
 
 class StorySessionCRUD:
     """Owner- and legacy-scoped Guided Story persistence."""

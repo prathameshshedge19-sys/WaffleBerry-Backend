@@ -317,7 +317,9 @@ class MemoryExtractionTests(unittest.IsolatedAsyncioTestCase):
             [message.role for message in ai_service.messages],
             ["system", "user"],
         )
-        prompt = ai_service.messages[0].content.lower()
+        prompt = " ".join(
+            ai_service.messages[0].content.lower().split()
+        )
         self.assertIn("not chatting", prompt)
         self.assertIn("not a conversation summary", prompt)
         self.assertIn("never cite assistant messages", prompt)
