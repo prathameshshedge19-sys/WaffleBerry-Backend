@@ -14,6 +14,7 @@ from app.services.ai.provider import AIMessage
 from app.services.ai.exceptions import MemoryGroundingError
 from app.services.memory.grounding import CompanionMemoryGrounding
 from app.services.memory.retrieval import (
+    MemoryRetrievalArchivedError,
     MemoryRetrievalNotFoundError,
     MemoryRetrievalService,
 )
@@ -102,7 +103,11 @@ class ChatService:
                     legacy_id=legacy_id,
                     query=user_message,
                 )
-            except (MemoryRetrievalNotFoundError, SQLAlchemyError) as exc:
+            except (
+                MemoryRetrievalNotFoundError,
+                MemoryRetrievalArchivedError,
+                SQLAlchemyError,
+            ) as exc:
                 db.rollback()
                 raise MemoryGroundingError(
                     "Approved Legacy memories could not be prepared."

@@ -148,6 +148,26 @@ class LegacySettingsResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class LegacyLifecycleResponse(BaseModel):
+    """Safe projection returned by archive and restore operations."""
+
+    legacy_id: int
+    status: LegacyStatus
+    display_name: str
+    relationship: str
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class LegacyDeletionRequest(BaseModel):
+    """Explicit identity confirmation required for permanent deletion."""
+
+    confirmation_text: str = Field(..., max_length=255)
+
+    model_config = ConfigDict(extra="forbid")
+
+
 class LegacyStorySummary(BaseModel):
     total_sessions: int = Field(..., ge=0)
     distinct_chapters: int = Field(..., ge=0)

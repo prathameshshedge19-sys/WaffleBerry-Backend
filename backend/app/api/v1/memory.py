@@ -22,6 +22,7 @@ from app.services.memory.retrieval import (
     MemoryRetrievalService,
 )
 from app.services.memory.review import (
+    MemoryReviewArchivedError,
     MemoryReviewConflictError,
     MemoryReviewDuplicateError,
     MemoryReviewNotFoundError,
@@ -60,6 +61,7 @@ def retrieve_approved_memories(
             db,
             user_id=current_user.user_id,
             legacy_id=legacy_id,
+            allow_archived=True,
         )
     except MemoryRetrievalNotFoundError:
         raise HTTPException(
@@ -88,6 +90,7 @@ def search_approved_memories(
             user_id=current_user.user_id,
             legacy_id=legacy_id,
             query=request.query,
+            allow_archived=True,
         )
     except MemoryRetrievalNotFoundError:
         raise HTTPException(
@@ -97,6 +100,14 @@ def search_approved_memories(
 
 
 def _safe_review_error(exc: Exception) -> HTTPException:
+    if isinstance(exc, MemoryReviewArchivedError):
+        return HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "legacy_archived",
+                "message": "Restore this Legacy before continuing.",
+            },
+        )
     if isinstance(exc, MemoryReviewDuplicateError):
         return HTTPException(
             status_code=status.HTTP_409_CONFLICT,

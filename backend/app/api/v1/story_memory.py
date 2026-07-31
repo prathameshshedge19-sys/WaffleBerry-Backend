@@ -10,6 +10,8 @@ from fastapi import (
     Depends,
     HTTPException,
     Request,
+    Query,
+    Response,
     status,
 )
 from fastapi.responses import StreamingResponse
@@ -24,6 +26,7 @@ from app.db import get_db
 from app.dependencies.ai import get_chat_service
 from app.dependencies.auth import get_current_user
 from app.models.memory import (
+    LegacyStatus,
     StoryMessage,
     StoryMessageRole,
     StorySessionStatus,
@@ -32,8 +35,10 @@ from app.models.user import User
 from app.schemas.memory import (
     ExtractionRunResponse,
     LegacyCreate,
+    LegacyDeletionRequest,
     LegacyDashboardResponse,
     LegacyResponse,
+    LegacyLifecycleResponse,
     LegacySettingsResponse,
     LegacySettingsUpdate,
     PersistedStoryStreamRequest,
@@ -55,15 +60,36 @@ from app.services.legacy_dashboard import (
     LegacyDashboardNotFoundError,
     LegacyDashboardService,
 )
+from app.services.legacy_export import (
+    LegacyExportNotFoundError,
+    LegacyExportService,
+)
 from app.services.legacy_settings import (
+    LegacySettingsArchivedError,
     LegacySettingsConflictError,
     LegacySettingsNotFoundError,
     LegacySettingsService,
+)
+from app.services.legacy_lifecycle import (
+    LegacyArchivedError,
+    LegacyDeletionConfirmationError,
+    LegacyLifecycleNotFoundError,
+    LegacyLifecycleService,
 )
 
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+
+def _archived_conflict() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail={
+            "code": "legacy_archived",
+            "message": "Restore this Legacy before continuing.",
+        },
+    )
 
 
 def _event(event: str, payload: dict) -> str:
@@ -85,10 +111,123 @@ def synchronize_legacy(
 
 @router.get("/legacies", response_model=list[LegacyResponse])
 def list_legacies(
+    legacy_status: LegacyStatus = Query(
+        default=LegacyStatus.ACTIVE,
+        alias="status",
+    ),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    return LegacyCRUD.get_user_legacies(db, current_user.user_id)
+    return LegacyCRUD.get_user_legacies(
+        db,
+        current_user.user_id,
+        legacy_status,
+    )
+
+
+@router.post(
+    "/legacies/{legacy_id}/archive",
+    response_model=LegacyLifecycleResponse,
+)
+def archive_legacy(
+    legacy_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    try:
+        return LegacyLifecycleService().archive(
+            db,
+            user_id=current_user.user_id,
+            legacy_id=legacy_id,
+        )
+    except LegacyLifecycleNotFoundError:
+        raise HTTPException(
+            status_code=404,
+            detail="Legacy was not found.",
+        ) from None
+
+
+@router.post(
+    "/legacies/{legacy_id}/restore",
+    response_model=LegacyLifecycleResponse,
+)
+def restore_legacy(
+    legacy_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    try:
+        return LegacyLifecycleService().restore(
+            db,
+            user_id=current_user.user_id,
+            legacy_id=legacy_id,
+        )
+    except LegacyLifecycleNotFoundError:
+        raise HTTPException(
+            status_code=404,
+            detail="Legacy was not found.",
+        ) from None
+
+
+@router.delete(
+    "/legacies/{legacy_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+def delete_legacy(
+    legacy_id: int,
+    deletion: LegacyDeletionRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Permanently delete an owned Legacy after explicit confirmation."""
+    try:
+        LegacyLifecycleService().delete(
+            db,
+            user_id=current_user.user_id,
+            legacy_id=legacy_id,
+            confirmation_text=deletion.confirmation_text,
+        )
+    except LegacyLifecycleNotFoundError:
+        raise HTTPException(
+            status_code=404,
+            detail="Legacy was not found.",
+        ) from None
+    except LegacyDeletionConfirmationError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc),
+        ) from None
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.get("/legacies/{legacy_id}/export")
+def export_legacy(
+    legacy_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Download a complete, owner-scoped Legacy snapshot as UTF-8 JSON."""
+    service = LegacyExportService()
+    try:
+        snapshot = service.build(
+            db,
+            user_id=current_user.user_id,
+            legacy_id=legacy_id,
+        )
+    except LegacyExportNotFoundError:
+        raise HTTPException(
+            status_code=404,
+            detail="Legacy was not found.",
+        ) from None
+    return Response(
+        content=service.serialize(snapshot),
+        media_type="application/json; charset=utf-8",
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="{service.filename(snapshot)}"'
+            )
+        },
+    )
 
 
 @router.get("/legacies/{legacy_id}", response_model=LegacyResponse)
@@ -134,6 +273,8 @@ def update_legacy_settings(
                 ),
             },
         ) from None
+    except LegacySettingsArchivedError:
+        raise _archived_conflict() from None
     except LegacySettingsNotFoundError:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -174,10 +315,20 @@ def create_or_resume_story_session(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    legacy = LegacyCRUD.get_user_legacy(
+        db, legacy_id, current_user.user_id
+    )
+    if legacy is None:
+        raise HTTPException(
+            status_code=404, detail="Legacy was not found."
+        )
     try:
+        LegacyLifecycleService().require_active(legacy)
         return StorySessionCRUD.get_or_create_active_story_session(
             db, legacy_id, current_user.user_id, story
         )
+    except LegacyArchivedError:
+        raise _archived_conflict() from None
     except MemoryPersistenceError:
         raise HTTPException(
             status_code=404, detail="Legacy was not found."
@@ -226,6 +377,10 @@ async def stream_persisted_story(
     )
     if legacy is None or story is None:
         raise HTTPException(status_code=404, detail="Story was not found.")
+    try:
+        LegacyLifecycleService().require_active(legacy)
+    except LegacyArchivedError:
+        raise _archived_conflict() from None
     user_key = f"user:{payload.client_message_id}"
     assistant_key = f"assistant:{payload.client_message_id}"
     existing_assistant = (
@@ -353,6 +508,15 @@ def complete_story_session(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    legacy = LegacyCRUD.get_user_legacy(
+        db, legacy_id, current_user.user_id
+    )
+    if legacy is None:
+        raise HTTPException(status_code=404, detail="Story was not found.")
+    try:
+        LegacyLifecycleService().require_active(legacy)
+    except LegacyArchivedError:
+        raise _archived_conflict() from None
     service = StoryExtractionService()
     try:
         story, run = service.complete(

@@ -20,6 +20,8 @@ from app.schemas.user import (
 from app.crud.user import (
     UserCRUD, VoiceProfileCRUD, VoiceSampleCRUD, ConversationCRUD, MessageCRUD
 )
+from app.crud.memory import LegacyCRUD
+from app.models.memory import LegacyStatus
 
 from app.services.token_service import create_access_token
 from app.services.ai.exceptions import (
@@ -38,6 +40,34 @@ logger = logging.getLogger(__name__)
 
 
 router = APIRouter()
+
+
+def _require_active_conversation_legacy(
+    db: Session,
+    conversation,
+    user_id: int,
+) -> None:
+    """Block new Companion messages for archived linked Legacies."""
+    if conversation.legacy_id is None:
+        return
+    legacy = LegacyCRUD.get_user_legacy(
+        db,
+        conversation.legacy_id,
+        user_id,
+    )
+    if legacy is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Conversation not found.",
+        )
+    if legacy.status == LegacyStatus.ARCHIVED:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "legacy_archived",
+                "message": "Restore this Legacy before continuing.",
+            },
+        )
 
 
 def _sse_event(event: str, payload: dict) -> str:
@@ -548,6 +578,10 @@ async def create_message(
             detail="Conversation not found."
         )
 
+    _require_active_conversation_legacy(
+        db, conversation, current_user.user_id
+    )
+
     try:
         generation = await get_chat_service().generate_response_with_provenance(
             db,
@@ -599,6 +633,10 @@ async def create_message_stream(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Conversation not found.",
         )
+
+    _require_active_conversation_legacy(
+        db, conversation, current_user.user_id
+    )
 
     try:
         stream_plan = get_chat_service().stream_response_with_provenance(

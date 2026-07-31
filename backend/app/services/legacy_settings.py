@@ -9,6 +9,7 @@ from app.schemas.memory import (
     LegacySettingsResponse,
     LegacySettingsUpdate,
 )
+from app.models.memory import LegacyStatus
 
 
 class LegacySettingsNotFoundError(Exception):
@@ -17,6 +18,10 @@ class LegacySettingsNotFoundError(Exception):
 
 class LegacySettingsConflictError(Exception):
     """Raised when a settings form is based on stale Legacy data."""
+
+
+class LegacySettingsArchivedError(Exception):
+    """Raised when an archived Legacy receives a settings mutation."""
 
 
 class LegacySettingsService:
@@ -36,6 +41,10 @@ class LegacySettingsService:
         if legacy is None:
             raise LegacySettingsNotFoundError(
                 "Legacy was not found."
+            )
+        if legacy.status == LegacyStatus.ARCHIVED:
+            raise LegacySettingsArchivedError(
+                "Restore this Legacy before continuing."
             )
         self._require_fresh(legacy.updated_at, changes.expected_updated_at)
 

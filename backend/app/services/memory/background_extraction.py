@@ -13,6 +13,7 @@ from app.dependencies.ai import get_memory_storage_pipeline
 from app.models.memory import (
     MemoryExtractionRun,
     MemoryExtractionRunStatus,
+    LegacyStatus,
     StoryMessage,
     StorySessionStatus,
 )
@@ -44,8 +45,13 @@ class StoryExtractionService:
         legacy_id: int,
         story_session_id: int,
     ) -> tuple[object, MemoryExtractionRun]:
-        if LegacyCRUD.get_user_legacy(db, legacy_id, user_id) is None:
+        legacy = LegacyCRUD.get_user_legacy(db, legacy_id, user_id)
+        if legacy is None:
             raise StoryExtractionNotFoundError("Legacy was not found.")
+        if legacy.status == LegacyStatus.ARCHIVED:
+            raise StoryExtractionConflictError(
+                "Restore this Legacy before continuing."
+            )
         story = StorySessionCRUD.get_legacy_story_session(
             db, story_session_id, legacy_id
         )
@@ -131,6 +137,15 @@ class StoryExtractionService:
 
     def prepare_retry(self, db: Session, **scope) -> MemoryExtractionRun:
         run = self.get_run(db, **scope)
+        legacy = LegacyCRUD.get_user_legacy(
+            db,
+            scope["legacy_id"],
+            scope["user_id"],
+        )
+        if legacy.status == LegacyStatus.ARCHIVED:
+            raise StoryExtractionConflictError(
+                "Restore this Legacy before continuing."
+            )
         if run.status in {
             MemoryExtractionRunStatus.RUNNING,
             MemoryExtractionRunStatus.COMPLETED,
@@ -168,9 +183,16 @@ async def execute_story_extraction(
         )
         if run is None or run.status != MemoryExtractionRunStatus.PENDING:
             return
-        if LegacyCRUD.get_user_legacy(db, legacy_id, user_id) is None:
+        legacy = LegacyCRUD.get_user_legacy(db, legacy_id, user_id)
+        if legacy is None:
             run.status = MemoryExtractionRunStatus.FAILED
             run.last_error_code = "ownership_mismatch"
+            run.completed_at = datetime.now(timezone.utc)
+            db.commit()
+            return
+        if legacy.status == LegacyStatus.ARCHIVED:
+            run.status = MemoryExtractionRunStatus.FAILED
+            run.last_error_code = "legacy_archived"
             run.completed_at = datetime.now(timezone.utc)
             db.commit()
             return

@@ -2,14 +2,17 @@
 
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models.memory import (
+    CompanionMemoryProvenance,
     Legacy,
+    LegacyStatus,
     Memory,
     MemoryContradictionGroup,
+    MemoryExtractionRun,
     MemoryLink,
     MemoryParticipant,
     MemoryProvenance,
@@ -113,14 +116,35 @@ class LegacyCRUD:
         )
 
     @staticmethod
-    def get_user_legacies(db: Session, user_id: int) -> list[Legacy]:
-        """List one user's legacies in stable creation order."""
+    def get_user_legacies(
+        db: Session,
+        user_id: int,
+        status: LegacyStatus = LegacyStatus.ACTIVE,
+    ) -> list[Legacy]:
+        """List one user's Legacies in one explicit lifecycle state."""
         return (
             db.query(Legacy)
-            .filter(Legacy.owner_user_id == user_id)
+            .filter(
+                Legacy.owner_user_id == user_id,
+                Legacy.status == status,
+            )
             .order_by(Legacy.created_at.asc(), Legacy.legacy_id.asc())
             .all()
         )
+
+    @staticmethod
+    def apply_status_transition(
+        db: Session,
+        legacy: Legacy,
+        *,
+        target: LegacyStatus,
+        updated_at: datetime,
+    ) -> Legacy:
+        """Stage one focused lifecycle change without committing it."""
+        legacy.status = target
+        legacy.updated_at = updated_at
+        db.flush()
+        return legacy
 
     @staticmethod
     def get_user_legacy_for_update(
@@ -138,6 +162,75 @@ class LegacyCRUD:
             .with_for_update()
             .first()
         )
+
+    @staticmethod
+    def delete_legacy_graph(db: Session, legacy: Legacy) -> None:
+        """Stage deletion of one complete Legacy graph without committing."""
+        legacy_id = legacy.legacy_id
+        memory_ids = db.query(Memory.memory_id).filter(
+            Memory.legacy_id == legacy_id
+        )
+        story_session_ids = db.query(StorySession.story_session_id).filter(
+            StorySession.legacy_id == legacy_id
+        )
+        conversation_ids = db.query(Conversation.conversation_id).filter(
+            Conversation.legacy_id == legacy_id
+        )
+        message_ids = db.query(Message.message_id).filter(
+            Message.conversation_id.in_(conversation_ids)
+        )
+
+        db.query(CompanionMemoryProvenance).filter(
+            or_(
+                CompanionMemoryProvenance.memory_id.in_(memory_ids),
+                CompanionMemoryProvenance.assistant_message_id.in_(message_ids),
+            )
+        ).delete(synchronize_session=False)
+        db.query(MemoryLink).filter(
+            or_(
+                MemoryLink.legacy_id == legacy_id,
+                MemoryLink.source_memory_id.in_(memory_ids),
+                MemoryLink.target_memory_id.in_(memory_ids),
+            )
+        ).delete(synchronize_session=False)
+        for model in (
+            MemoryTag,
+            MemoryParticipant,
+            MemoryRevision,
+            MemoryProvenance,
+        ):
+            db.query(model).filter(
+                model.memory_id.in_(memory_ids)
+            ).delete(synchronize_session=False)
+        db.query(Memory).filter(Memory.legacy_id == legacy_id).delete(
+            synchronize_session=False
+        )
+        db.query(Tag).filter(Tag.legacy_id == legacy_id).delete(
+            synchronize_session=False
+        )
+        db.query(MemoryContradictionGroup).filter(
+            MemoryContradictionGroup.legacy_id == legacy_id
+        ).delete(synchronize_session=False)
+        db.query(MemoryExtractionRun).filter(
+            MemoryExtractionRun.legacy_id == legacy_id
+        ).delete(synchronize_session=False)
+        db.query(StoryMessage).filter(
+            StoryMessage.story_session_id.in_(story_session_ids)
+        ).delete(synchronize_session=False)
+        db.query(StorySession).filter(
+            StorySession.legacy_id == legacy_id
+        ).delete(synchronize_session=False)
+        db.query(Message).filter(
+            Message.conversation_id.in_(conversation_ids)
+        ).delete(synchronize_session=False)
+        db.query(Conversation).filter(
+            Conversation.legacy_id == legacy_id
+        ).delete(synchronize_session=False)
+        db.query(Legacy).filter(
+            Legacy.legacy_id == legacy_id,
+            Legacy.owner_user_id == legacy.owner_user_id,
+        ).delete(synchronize_session=False)
+        db.flush()
 
     @staticmethod
     def apply_identity_changes_if_current(

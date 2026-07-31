@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session, joinedload
 
 from app.crud.memory import LegacyCRUD
 from app.models.memory import (
+    LegacyStatus,
     Memory,
     MemoryLink,
     MemoryParticipant,
@@ -43,6 +44,10 @@ class MemoryReviewConflictError(MemoryReviewError):
 
 class MemoryReviewDuplicateError(MemoryReviewConflictError):
     pass
+
+
+class MemoryReviewArchivedError(MemoryReviewConflictError):
+    """Raised when archived Legacy memory content would be mutated."""
 
 
 class MemoryReviewService:
@@ -176,7 +181,7 @@ class MemoryReviewService:
         memory_id: int,
         edit: MemoryReviewEditRequest,
     ) -> MemoryReviewResponse:
-        self._require_legacy(db, legacy_id, user_id)
+        self._require_legacy(db, legacy_id, user_id, require_active=True)
         memory = self._locked_candidate(db, legacy_id, memory_id)
         self._require_fresh(memory, edit.expected_updated_at)
         snapshot = self._editable_snapshot(memory)
@@ -273,7 +278,7 @@ class MemoryReviewService:
         expected_updated_at: datetime,
         target: MemoryReviewStatus,
     ) -> MemoryReviewResponse:
-        self._require_legacy(db, legacy_id, user_id)
+        self._require_legacy(db, legacy_id, user_id, require_active=True)
         memory = self._locked_candidate(db, legacy_id, memory_id)
         self._require_fresh(memory, expected_updated_at)
         memory.review_status = target
@@ -285,10 +290,20 @@ class MemoryReviewService:
         return self._to_response(db, memory, legacy_id)
 
     @staticmethod
-    def _require_legacy(db: Session, legacy_id: int, user_id: int) -> None:
-        if LegacyCRUD.get_user_legacy(db, legacy_id, user_id) is None:
+    def _require_legacy(
+        db: Session,
+        legacy_id: int,
+        user_id: int,
+        require_active: bool = False,
+    ) -> None:
+        legacy = LegacyCRUD.get_user_legacy(db, legacy_id, user_id)
+        if legacy is None:
             raise MemoryReviewNotFoundError(
                 "Legacy or memory was not found."
+            )
+        if require_active and legacy.status == LegacyStatus.ARCHIVED:
+            raise MemoryReviewArchivedError(
+                "Restore this Legacy before continuing."
             )
 
     def _locked_candidate(

@@ -9,10 +9,15 @@ from app.schemas.memory import (
     ApprovedMemoryRetrievalResponse,
 )
 from app.services.memory.retrieval_ranking import MemoryRelevanceRanker
+from app.models.memory import LegacyStatus
 
 
 class MemoryRetrievalNotFoundError(Exception):
     """Raised for missing and non-owned Legacies alike."""
+
+
+class MemoryRetrievalArchivedError(Exception):
+    """Raised when active Companion grounding targets an archived Legacy."""
 
 
 class MemoryRetrievalService:
@@ -24,10 +29,16 @@ class MemoryRetrievalService:
         *,
         user_id: int,
         legacy_id: int,
+        allow_archived: bool = False,
     ) -> ApprovedMemoryRetrievalResponse:
-        if LegacyCRUD.get_user_legacy(db, legacy_id, user_id) is None:
+        legacy = LegacyCRUD.get_user_legacy(db, legacy_id, user_id)
+        if legacy is None:
             raise MemoryRetrievalNotFoundError(
                 "Legacy was not found."
+            )
+        if legacy.status == LegacyStatus.ARCHIVED and not allow_archived:
+            raise MemoryRetrievalArchivedError(
+                "Restore this Legacy before continuing."
             )
         memories = MemoryCRUD.list_approved_for_retrieval(db, legacy_id)
         items = [
@@ -47,12 +58,14 @@ class MemoryRetrievalService:
         user_id: int,
         legacy_id: int,
         query: str,
+        allow_archived: bool = False,
     ) -> ApprovedMemorySearchResponse:
         """Rank only approved memories after enforcing Legacy ownership."""
         retrieved = self.retrieve_approved(
             db,
             user_id=user_id,
             legacy_id=legacy_id,
+            allow_archived=allow_archived,
         )
         memories = MemoryRelevanceRanker().rank(retrieved.memories, query)
         return ApprovedMemorySearchResponse(
