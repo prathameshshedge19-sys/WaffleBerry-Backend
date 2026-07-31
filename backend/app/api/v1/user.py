@@ -453,11 +453,32 @@ async def create_conversation(
         if conversation and conversation.title is not None
         else "New Chat"
     )
+    legacy_id = conversation.legacy_id if conversation else None
+    if legacy_id is not None:
+        legacy = LegacyCRUD.get_user_legacy(
+            db,
+            legacy_id,
+            current_user.user_id,
+        )
+        if legacy is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Legacy not found.",
+            )
+        if legacy.status == LegacyStatus.ARCHIVED:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "legacy_archived",
+                    "message": "Restore this Legacy before continuing.",
+                },
+            )
 
     return ConversationCRUD.create_conversation(
         db,
         current_user.user_id,
-        title
+        title,
+        legacy_id,
     )
 
 

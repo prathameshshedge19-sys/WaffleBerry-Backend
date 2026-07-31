@@ -1,6 +1,7 @@
 """Phase 6.8.2 owner-scoped Legacy archive and restore tests."""
 
 import unittest
+import asyncio
 from datetime import datetime, timezone
 
 from fastapi import HTTPException
@@ -15,7 +16,10 @@ from app.api.v1.story_memory import (
     list_legacies,
     restore_legacy,
 )
-from app.api.v1.user import _require_active_conversation_legacy
+from app.api.v1.user import (
+    _require_active_conversation_legacy,
+    create_conversation,
+)
 from app.crud.memory import LegacyCRUD
 from app.db import Base
 from app.dependencies.auth import get_current_user
@@ -32,6 +36,7 @@ from app.models.memory import (
 )
 from app.models.user import Conversation, Message, MessageRole, User
 from app.schemas.memory import LegacySettingsUpdate, StorySessionCreate
+from app.schemas.user import ConversationCreate
 from app.services.legacy_dashboard import LegacyDashboardService
 from app.services.legacy_lifecycle import (
     LegacyLifecycleNotFoundError,
@@ -164,6 +169,38 @@ class LegacyArchiveRestoreTests(unittest.TestCase):
             set(restored.model_dump()),
             {"legacy_id", "status", "display_name", "relationship", "updated_at"},
         )
+
+    def test_conversation_creation_links_only_owned_active_legacy(self):
+        created = asyncio.run(
+            create_conversation(
+                ConversationCreate(legacy_id=self.legacy.legacy_id),
+                self.owner,
+                self.db,
+            )
+        )
+        self.assertEqual(created.user_id, self.owner.user_id)
+        self.assertEqual(created.legacy_id, self.legacy.legacy_id)
+
+        with self.assertRaises(HTTPException) as foreign:
+            asyncio.run(
+                create_conversation(
+                    ConversationCreate(legacy_id=self.other_legacy.legacy_id),
+                    self.owner,
+                    self.db,
+                )
+            )
+        self.assertEqual(foreign.exception.status_code, 404)
+
+        self.archive()
+        with self.assertRaises(HTTPException) as archived:
+            asyncio.run(
+                create_conversation(
+                    ConversationCreate(legacy_id=self.legacy.legacy_id),
+                    self.owner,
+                    self.db,
+                )
+            )
+        self.assertEqual(archived.exception.status_code, 409)
 
     def test_foreign_and_missing_transitions_use_neutral_not_found(self):
         for action in (self.service.archive, self.service.restore):

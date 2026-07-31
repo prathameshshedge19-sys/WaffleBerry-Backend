@@ -108,6 +108,7 @@ class VoiceSampleResponse(VoiceSampleBase):
 class ConversationCreate(BaseModel):
     """Schema for creating a conversation."""
     title: Optional[str] = Field(None, max_length=255)
+    legacy_id: Optional[int] = Field(None, gt=0)
 
     @field_validator("title", mode="before")
     @classmethod
@@ -145,6 +146,7 @@ class ConversationResponse(BaseModel):
     """Schema for conversation metadata returned by the API."""
     conversation_id: int
     user_id: int
+    legacy_id: Optional[int] = None
     title: str
     created_at: datetime
     updated_at: datetime

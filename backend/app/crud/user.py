@@ -160,12 +160,14 @@ class ConversationCRUD:
     def create_conversation(
         db: Session,
         user_id: int,
-        title: str = "New Chat"
+        title: str = "New Chat",
+        legacy_id: int | None = None,
     ) -> Conversation:
         """Create a conversation belonging to a user."""
         db_conversation = Conversation(
             user_id=user_id,
-            title=title
+            title=title,
+            legacy_id=legacy_id,
         )
         db.add(db_conversation)
         db.commit()
