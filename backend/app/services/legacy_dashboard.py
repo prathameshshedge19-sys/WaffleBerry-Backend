@@ -32,6 +32,14 @@ class LegacyDashboardService:
         extraction = LegacyDashboardCRUD.get_extraction_counts(
             db, legacy_id
         )
+        story_session_categories = [
+            self._build_story_session_category(category)
+            for category in (
+                LegacyDashboardCRUD.get_story_session_category_counts(
+                    db, legacy_id
+                )
+            )
+        ]
         return LegacyDashboardResponse(
             legacy_id=legacy.legacy_id,
             title=legacy.display_name,
@@ -42,6 +50,7 @@ class LegacyDashboardService:
             stories=stories,
             memories=memories,
             extraction=extraction,
+            story_session_categories=story_session_categories,
             linked_conversations=(
                 LegacyDashboardCRUD.count_linked_conversations(
                     db, legacy_id
@@ -49,3 +58,25 @@ class LegacyDashboardService:
             ),
             has_approved_memories=memories["approved"] > 0,
         )
+
+    @staticmethod
+    def _build_story_session_category(
+        category: dict[str, str | int | None],
+    ) -> dict[str, str | int]:
+        """Calculate factual session progress for one normalized chapter."""
+        total = int(category["total_sessions"] or 0)
+        completed = int(category["completed_sessions"] or 0)
+        category_id = str(category["id"])
+        title = category_id.replace("-", " ").replace("_", " ").title()
+        percentage = (
+            round((completed / total) * 100)
+            if total > 0
+            else 0
+        )
+        return {
+            "id": category_id,
+            "title": title,
+            "session_completion_percentage": percentage,
+            "completed_sessions": completed,
+            "total_sessions": total,
+        }

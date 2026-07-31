@@ -129,6 +129,16 @@ class LegacyExtractionSummary(BaseModel):
     failed_runs: int = Field(..., ge=0)
 
 
+class LegacyStorySessionCategorySummary(BaseModel):
+    """Completion of persisted sessions grouped by chapter key."""
+
+    id: str = Field(..., min_length=1, max_length=120)
+    title: str = Field(..., min_length=1, max_length=255)
+    session_completion_percentage: int = Field(..., ge=0, le=100)
+    completed_sessions: int = Field(..., ge=0)
+    total_sessions: int = Field(..., ge=0)
+
+
 class LegacyDashboardResponse(BaseModel):
     """Owner-scoped summary assembled from existing Legacy data."""
 
@@ -141,6 +151,9 @@ class LegacyDashboardResponse(BaseModel):
     stories: LegacyStorySummary
     memories: LegacyMemorySummary
     extraction: LegacyExtractionSummary
+    story_session_categories: list[
+        LegacyStorySessionCategorySummary
+    ] = Field(default_factory=list)
     linked_conversations: int = Field(..., ge=0)
     has_approved_memories: bool
 

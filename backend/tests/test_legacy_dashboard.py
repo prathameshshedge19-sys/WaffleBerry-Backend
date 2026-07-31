@@ -23,7 +23,7 @@ from app.models.memory import (
     StorySessionStatus,
 )
 from app.models.user import Conversation, User
-from app.schemas.memory import LegacyCreate
+from app.schemas.memory import LegacyCreate, LegacyDashboardResponse
 from app.services.legacy_dashboard import (
     LegacyDashboardNotFoundError,
     LegacyDashboardService,
@@ -183,6 +183,30 @@ class LegacyDashboardTests(unittest.TestCase):
         self.assertEqual(result.stories.paused_sessions, 1)
         self.assertEqual(result.stories.total_messages, 3)
         self.assertEqual(result.stories.contributed_messages, 2)
+        self.assertEqual(
+            [category.id for category in result.story_session_categories],
+            ["career", "childhood"],
+        )
+        self.assertEqual(
+            result.story_session_categories[0].title,
+            "Career",
+        )
+        self.assertEqual(
+            result.story_session_categories[0].session_completion_percentage,
+            0,
+        )
+        self.assertEqual(
+            result.story_session_categories[0].completed_sessions,
+            0,
+        )
+        self.assertEqual(
+            result.story_session_categories[0].total_sessions,
+            2,
+        )
+        self.assertEqual(
+            result.story_session_categories[1].session_completion_percentage,
+            100,
+        )
         self.assertEqual(result.memories.total, 3)
         self.assertEqual(result.memories.approved, 1)
         self.assertEqual(result.memories.candidate, 1)
@@ -205,6 +229,7 @@ class LegacyDashboardTests(unittest.TestCase):
         self.assertEqual(result.stories.total_sessions, 0)
         self.assertEqual(result.memories.total, 0)
         self.assertEqual(result.extraction.total_runs, 0)
+        self.assertEqual(result.story_session_categories, [])
         self.assertEqual(result.linked_conversations, 0)
         self.assertFalse(result.has_approved_memories)
 
@@ -225,6 +250,115 @@ class LegacyDashboardTests(unittest.TestCase):
             )
 
         self.assertEqual(context.exception.status_code, 404)
+
+    def test_story_session_percentage_uses_completed_over_total(self):
+        self.seed_dashboard_facts()
+        career = (
+            self.db.query(StorySession)
+            .filter(
+                StorySession.legacy_id == self.legacy.legacy_id,
+                StorySession.chapter_key == "career",
+                StorySession.status == StorySessionStatus.PAUSED,
+            )
+            .one()
+        )
+        career.status = StorySessionStatus.COMPLETED
+        self.db.commit()
+
+        result = LegacyDashboardService().get_summary(
+            self.db,
+            user_id=self.owner.user_id,
+            legacy_id=self.legacy.legacy_id,
+        )
+        category = next(
+            item
+            for item in result.story_session_categories
+            if item.id == "career"
+        )
+
+        self.assertEqual(category.completed_sessions, 1)
+        self.assertEqual(category.total_sessions, 2)
+        self.assertEqual(category.session_completion_percentage, 50)
+
+    def test_repeated_sessions_remain_explicit_in_session_counts(self):
+        self.seed_dashboard_facts()
+
+        result = LegacyDashboardService().get_summary(
+            self.db,
+            user_id=self.owner.user_id,
+            legacy_id=self.legacy.legacy_id,
+        )
+        career = next(
+            item
+            for item in result.story_session_categories
+            if item.id == "career"
+        )
+
+        self.assertEqual(career.total_sessions, 2)
+        self.assertEqual(career.completed_sessions, 0)
+
+    def test_category_key_case_variations_are_grouped(self):
+        self.seed_dashboard_facts()
+        self.db.add(
+            StorySession(
+                legacy_id=self.legacy.legacy_id,
+                chapter_key=" Career ",
+                title="A conflicting session title",
+                status=StorySessionStatus.COMPLETED,
+                created_by_user_id=self.owner.user_id,
+            )
+        )
+        self.db.commit()
+
+        result = LegacyDashboardService().get_summary(
+            self.db,
+            user_id=self.owner.user_id,
+            legacy_id=self.legacy.legacy_id,
+        )
+        career = next(
+            item
+            for item in result.story_session_categories
+            if item.id == "career"
+        )
+
+        self.assertEqual(career.total_sessions, 3)
+        self.assertEqual(career.completed_sessions, 1)
+        self.assertEqual(career.title, "Career")
+
+    def test_category_title_does_not_depend_on_session_titles(self):
+        self.seed_dashboard_facts()
+        for story in self.db.query(StorySession).filter(
+            StorySession.chapter_key == "career"
+        ):
+            story.title = "Different title"
+        self.db.commit()
+
+        result = LegacyDashboardService().get_summary(
+            self.db,
+            user_id=self.owner.user_id,
+            legacy_id=self.legacy.legacy_id,
+        )
+        career = next(
+            item
+            for item in result.story_session_categories
+            if item.id == "career"
+        )
+
+        self.assertEqual(career.title, "Career")
+
+    def test_story_session_categories_defaults_when_missing(self):
+        self.seed_dashboard_facts()
+        result = LegacyDashboardService().get_summary(
+            self.db,
+            user_id=self.owner.user_id,
+            legacy_id=self.legacy.legacy_id,
+        )
+        payload = result.model_dump()
+        payload.pop("story_session_categories")
+
+        restored = LegacyDashboardResponse.model_validate(payload)
+
+        self.assertEqual(restored.story_session_categories, [])
 
 
 if __name__ == "__main__":

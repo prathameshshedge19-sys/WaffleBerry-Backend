@@ -87,6 +87,41 @@ class LegacyDashboardCRUD:
         }
 
     @staticmethod
+    def get_story_session_category_counts(
+        db: Session,
+        legacy_id: int,
+    ) -> list[dict[str, str | int | None]]:
+        """Group existing sessions by a normalized persisted chapter key."""
+        normalized_key = func.lower(func.trim(StorySession.chapter_key))
+        rows = (
+            db.query(
+                normalized_key,
+                func.count(StorySession.story_session_id),
+                func.count(
+                    case(
+                        (
+                            StorySession.status
+                            == StorySessionStatus.COMPLETED,
+                            1,
+                        )
+                    )
+                ),
+            )
+            .filter(StorySession.legacy_id == legacy_id)
+            .group_by(normalized_key)
+            .order_by(normalized_key.asc())
+            .all()
+        )
+        return [
+            {
+                "id": row[0],
+                "total_sessions": row[1],
+                "completed_sessions": row[2],
+            }
+            for row in rows
+        ]
+
+    @staticmethod
     def get_memory_counts(db: Session, legacy_id: int) -> dict[str, int]:
         row = (
             db.query(
