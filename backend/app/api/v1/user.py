@@ -549,7 +549,7 @@ async def create_message(
         )
 
     try:
-        assistant_content = await get_chat_service().generate_response(
+        generation = await get_chat_service().generate_response_with_provenance(
             db,
             conversation,
             message.content
@@ -567,7 +567,9 @@ async def create_message(
         db,
         conversation,
         message.content,
-        assistant_content
+        generation.content,
+        grounded_memory_ids=generation.memory_ids,
+        memories_retrieved_at=generation.retrieved_at,
     )
     return MessagePairResponse(
         user_message=user_message,
@@ -599,11 +601,12 @@ async def create_message_stream(
         )
 
     try:
-        response_stream = get_chat_service().stream_response(
+        stream_plan = get_chat_service().stream_response_with_provenance(
             db,
             conversation,
             message.content,
         )
+        response_stream = stream_plan.stream
     except AIServiceError as exc:
         logger.exception(
             "AI stream setup failed (category=%s, conversation_id=%d).",
@@ -654,6 +657,8 @@ async def create_message_stream(
                     db,
                     conversation,
                     assistant_content,
+                    grounded_memory_ids=stream_plan.memory_ids,
+                    memories_retrieved_at=stream_plan.retrieved_at,
                 )
             )
             yield _sse_event(

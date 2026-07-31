@@ -17,6 +17,7 @@ from app.models.user import (
     VoiceSample,
 )
 from app.models.memory import (
+    CompanionMemoryProvenance,
     Legacy,
     LegacyStatus,
     Memory,
@@ -38,6 +39,7 @@ from app.models.memory import (
 )
 
 __all__ = [
+    "CompanionMemoryProvenance",
     "Consent",
     "Conversation",
     "Legacy",

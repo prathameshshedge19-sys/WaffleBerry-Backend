@@ -45,6 +45,14 @@ class Settings(BaseSettings):
     ai_retry_jitter_seconds: float = Field(default=0.15, ge=0)
     ai_max_context_messages: int = Field(default=24, ge=2)
 
+    # Companion approved-memory grounding budget
+    memory_grounding_max_memories: int = Field(default=8, ge=1, le=100)
+    memory_grounding_max_estimated_tokens: int = Field(
+        default=1500,
+        ge=1,
+    )
+    memory_grounding_max_characters: int = Field(default=6000, ge=1)
+
 
 @lru_cache()
 def get_settings() -> Settings:

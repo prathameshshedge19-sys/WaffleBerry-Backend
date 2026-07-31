@@ -386,6 +386,26 @@ class MemoryCRUD:
         )
 
     @staticmethod
+    def list_approved_for_retrieval(
+        db: Session,
+        legacy_id: int,
+    ) -> list[Memory]:
+        """Return approved memories in stable retrieval order."""
+        return (
+            db.query(Memory)
+            .filter(
+                Memory.legacy_id == legacy_id,
+                Memory.review_status == MemoryReviewStatus.APPROVED,
+            )
+            .order_by(
+                Memory.importance.desc().nullslast(),
+                Memory.updated_at.desc(),
+                Memory.memory_id.asc(),
+            )
+            .all()
+        )
+
+    @staticmethod
     def create_contradiction_group(
         db: Session,
         legacy_id: int,

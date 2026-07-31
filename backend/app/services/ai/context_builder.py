@@ -39,11 +39,16 @@ class ContextBuilder:
         self,
         history: Iterable[ConversationMessage],
         latest_user_message: str | None,
+        *,
+        grounding_context: str | None = None,
     ) -> list[AIMessage]:
         """Return one system prompt, recent history, and the latest user."""
+        system_prompt = self._prompt_builder.build_berry_system_prompt()
+        if grounding_context:
+            system_prompt = f"{system_prompt}\n\n{grounding_context}"
         system_message = AIMessage(
             role="system",
-            content=self._prompt_builder.build_berry_system_prompt(),
+            content=system_prompt,
         )
         latest = self._normalize_content(latest_user_message)
         history_budget = self.max_context_messages - 1 - bool(latest)
@@ -118,13 +123,19 @@ class ContextBuilder:
         self,
         history: Iterable[ConversationMessage],
         latest_user_message: str,
+        *,
+        grounding_context: str | None = None,
     ) -> list[AIMessage]:
         """Build chat context and require a valid latest user message."""
         if self._normalize_content(latest_user_message) is None:
             raise AIInvalidResponseError(
                 "Latest user message must not be blank."
             )
-        messages = self.build_messages(history, latest_user_message)
+        messages = self.build_messages(
+            history,
+            latest_user_message,
+            grounding_context=grounding_context,
+        )
         return messages
 
     def build_story_messages(

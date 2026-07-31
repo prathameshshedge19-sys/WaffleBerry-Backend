@@ -477,6 +477,57 @@ class MemoryResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class ApprovedMemoryRetrievalItem(BaseModel):
+    """Normalized approved-memory projection for retrieval infrastructure."""
+
+    memory_id: int
+    memory_type: MemoryType
+    category: str
+    title: str
+    summary: str
+    importance: int | None = Field(default=None, ge=1, le=5)
+    extraction_confidence: Decimal | None = Field(
+        default=None,
+        ge=Decimal("0"),
+        le=Decimal("1"),
+    )
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ApprovedMemoryRetrievalResponse(BaseModel):
+    legacy_id: int
+    approved_memory_count: int = Field(..., ge=0)
+    memories: list[ApprovedMemoryRetrievalItem] = Field(default_factory=list)
+
+
+class ApprovedMemorySearchRequest(BaseModel):
+    """Bounded lexical query for the development retrieval endpoint."""
+
+    query: str = Field(..., min_length=1, max_length=2000)
+
+    model_config = ConfigDict(extra="forbid")
+
+    _normalize_query = field_validator("query", mode="before")(
+        _strip_required
+    )
+
+
+class RankedApprovedMemoryItem(ApprovedMemoryRetrievalItem):
+    """Approved-memory projection with transparent ranking metadata."""
+
+    relevance_score: float = Field(..., ge=0, le=1)
+    matched_terms: list[str] = Field(default_factory=list)
+
+
+class ApprovedMemorySearchResponse(BaseModel):
+    legacy_id: int
+    matched_memory_count: int = Field(..., ge=0)
+    memories: list[RankedApprovedMemoryItem] = Field(default_factory=list)
+
+
 class MemoryReviewParticipant(BaseModel):
     name: str
     relationship: str | None = None

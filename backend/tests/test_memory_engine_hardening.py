@@ -159,8 +159,12 @@ class MemoryEngineHardeningTests(unittest.TestCase):
         )
         self.assertIn("if _attempt < 2", source)
 
-    def test_no_companion_memory_injection_was_added(self):
+    def test_companion_grounding_does_not_change_story_or_extraction(self):
         from app.services.chat_service import ChatService
         source = inspect.getsource(ChatService)
-        self.assertNotIn("Memory", source)
-        self.assertNotIn("memory", source)
+        self.assertIn("MemoryRetrievalService", source)
+        companion_source = source.split("prepare_ai_input")[1].split(
+            "stream_story_response"
+        )[0]
+        self.assertNotIn("build_story_messages", companion_source)
+        self.assertNotIn("MemoryExtractionService", source)

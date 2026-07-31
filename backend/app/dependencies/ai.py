@@ -11,6 +11,11 @@ from app.services.chat_service import ChatService
 from app.services.memory.extractor import MemoryExtractionService
 from app.services.memory.storage_pipeline import MemoryStoragePipeline
 from app.services.memory.validation import MemoryValidationService
+from app.services.memory.retrieval import MemoryRetrievalService
+from app.services.memory.grounding import (
+    CompanionMemoryGrounding,
+    MemoryGroundingBudget,
+)
 
 
 @lru_cache()
@@ -34,7 +39,22 @@ def get_chat_service() -> ChatService:
     context_builder = ContextBuilder(
         max_context_messages=settings.ai_max_context_messages
     )
-    return ChatService(get_ai_service(), context_builder)
+    return ChatService(
+        get_ai_service(),
+        context_builder,
+        MemoryRetrievalService(),
+        CompanionMemoryGrounding(
+            MemoryGroundingBudget(
+                max_memories=settings.memory_grounding_max_memories,
+                max_estimated_tokens=(
+                    settings.memory_grounding_max_estimated_tokens
+                ),
+                max_characters=(
+                    settings.memory_grounding_max_characters
+                ),
+            )
+        ),
+    )
 
 
 @lru_cache()

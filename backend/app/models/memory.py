@@ -556,6 +556,41 @@ class Memory(Base):
     )
 
 
+class CompanionMemoryProvenance(Base):
+    """Internal record of an approved memory supplied for one reply."""
+
+    __tablename__ = "companion_memory_provenance"
+    __table_args__ = (
+        UniqueConstraint(
+            "assistant_message_id",
+            "retrieval_order",
+            name="uq_companion_provenance_message_order",
+        ),
+        CheckConstraint(
+            "retrieval_order >= 0",
+            name="ck_companion_provenance_order_nonnegative",
+        ),
+        Index(
+            "ix_companion_memory_provenance_memory_id",
+            "memory_id",
+        ),
+    )
+
+    assistant_message_id = Column(
+        ForeignKey("messages.message_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    memory_id = Column(
+        ForeignKey("memories.memory_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    retrieval_order = Column(Integer, nullable=False)
+    retrieved_at = Column(DateTime(timezone=True), nullable=False)
+
+    assistant_message = orm_relationship("Message")
+    memory = orm_relationship("Memory")
+
+
 class MemoryProvenance(Base):
     """A minimal, traceable source excerpt supporting one memory."""
 

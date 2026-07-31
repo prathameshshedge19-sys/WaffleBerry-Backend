@@ -1,4 +1,4 @@
-"""Authenticated, owner-scoped Memory Review API."""
+"""Authenticated, owner-scoped Memory review and retrieval APIs."""
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
@@ -8,11 +8,18 @@ from app.dependencies.auth import get_current_user
 from app.models.memory import MemoryReviewStatus, MemoryType
 from app.models.user import User
 from app.schemas.memory import (
+    ApprovedMemoryRetrievalResponse,
+    ApprovedMemorySearchRequest,
+    ApprovedMemorySearchResponse,
     MEMORY_CATEGORIES,
     MemoryReviewActionRequest,
     MemoryReviewEditRequest,
     MemoryReviewListResponse,
     MemoryReviewResponse,
+)
+from app.services.memory.retrieval import (
+    MemoryRetrievalNotFoundError,
+    MemoryRetrievalService,
 )
 from app.services.memory.review import (
     MemoryReviewConflictError,
@@ -28,6 +35,65 @@ router = APIRouter()
 def get_memory_review_service() -> MemoryReviewService:
     """Create a request-safe stateless review coordinator."""
     return MemoryReviewService()
+
+
+def get_memory_retrieval_service() -> MemoryRetrievalService:
+    """Create a request-safe stateless retrieval coordinator."""
+    return MemoryRetrievalService()
+
+
+@router.get(
+    "/legacies/{legacy_id}/approved-memories",
+    response_model=ApprovedMemoryRetrievalResponse,
+)
+def retrieve_approved_memories(
+    legacy_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    service: MemoryRetrievalService = Depends(
+        get_memory_retrieval_service
+    ),
+):
+    """Return approved memories for one authenticated Legacy owner."""
+    try:
+        return service.retrieve_approved(
+            db,
+            user_id=current_user.user_id,
+            legacy_id=legacy_id,
+        )
+    except MemoryRetrievalNotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Legacy was not found.",
+        ) from None
+
+
+@router.post(
+    "/legacies/{legacy_id}/approved-memories/search",
+    response_model=ApprovedMemorySearchResponse,
+)
+def search_approved_memories(
+    legacy_id: int,
+    request: ApprovedMemorySearchRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    service: MemoryRetrievalService = Depends(
+        get_memory_retrieval_service
+    ),
+):
+    """Development endpoint for deterministic approved-memory ranking."""
+    try:
+        return service.search_approved(
+            db,
+            user_id=current_user.user_id,
+            legacy_id=legacy_id,
+            query=request.query,
+        )
+    except MemoryRetrievalNotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Legacy was not found.",
+        ) from None
 
 
 def _safe_review_error(exc: Exception) -> HTTPException:
