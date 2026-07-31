@@ -17,7 +17,9 @@ cannot be mass-assigned. Status remains read-only because the only alternative
 is `archived`, which belongs to Phase 6.8 lifecycle management.
 
 Missing and non-owned Legacies return the same neutral 404. A timestamp that
-does not match the current record returns `409 legacy_changed`. A no-op returns
+does not match the current record returns `409 legacy_changed`. Real changes
+use an atomic owner-and-timestamp-guarded update so a racing request cannot
+silently overwrite a newer value. A no-op returns
 the current projection without committing or advancing `updated_at`. A real
 change commits atomically and explicitly advances `updated_at`.
 

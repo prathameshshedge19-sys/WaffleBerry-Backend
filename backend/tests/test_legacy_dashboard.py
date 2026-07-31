@@ -324,6 +324,7 @@ class LegacyDashboardTests(unittest.TestCase):
         self.assertEqual(career.total_sessions, 3)
         self.assertEqual(career.completed_sessions, 1)
         self.assertEqual(career.title, "Career")
+        self.assertEqual(result.stories.distinct_chapters, 2)
 
     def test_category_title_does_not_depend_on_session_titles(self):
         self.seed_dashboard_facts()

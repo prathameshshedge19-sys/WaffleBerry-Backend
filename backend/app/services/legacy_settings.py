@@ -51,15 +51,30 @@ class LegacySettingsService:
         if not effective:
             return LegacySettingsResponse.model_validate(legacy)
 
-        LegacyCRUD.apply_identity_changes(legacy, **effective)
-        legacy.updated_at = datetime.now(timezone.utc)
+        updated_at = datetime.now(timezone.utc)
         try:
+            changed = LegacyCRUD.apply_identity_changes_if_current(
+                db,
+                legacy_id=legacy_id,
+                user_id=user_id,
+                expected_updated_at=legacy.updated_at,
+                updated_at=updated_at,
+                changes=effective,
+            )
+            if not changed:
+                db.rollback()
+                raise LegacySettingsConflictError(
+                    "This Legacy changed. Refresh and try again."
+                )
             db.commit()
-            db.refresh(legacy)
+            db.expire_all()
         except Exception:
             db.rollback()
             raise
-        return LegacySettingsResponse.model_validate(legacy)
+        refreshed = LegacyCRUD.get_user_legacy(db, legacy_id, user_id)
+        if refreshed is None:
+            raise LegacySettingsNotFoundError("Legacy was not found.")
+        return LegacySettingsResponse.model_validate(refreshed)
 
     @staticmethod
     def _require_fresh(actual: datetime | None, expected: datetime) -> None:
@@ -67,9 +82,15 @@ class LegacySettingsService:
             raise LegacySettingsConflictError(
                 "This Legacy changed. Refresh and try again."
             )
-        actual_value = actual.replace(tzinfo=None)
-        expected_value = expected.replace(tzinfo=None)
-        if abs((actual_value - expected_value).total_seconds()) > 0.001:
+        actual_value = LegacySettingsService._as_naive_utc(actual)
+        expected_value = LegacySettingsService._as_naive_utc(expected)
+        if actual_value != expected_value:
             raise LegacySettingsConflictError(
                 "This Legacy changed. Refresh and try again."
             )
+
+    @staticmethod
+    def _as_naive_utc(value: datetime) -> datetime:
+        if value.tzinfo is None:
+            return value
+        return value.astimezone(timezone.utc).replace(tzinfo=None)

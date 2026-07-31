@@ -22,10 +22,13 @@ class LegacyDashboardCRUD:
 
     @staticmethod
     def get_story_counts(db: Session, legacy_id: int) -> dict[str, int]:
+        normalized_chapter = func.lower(
+            func.trim(StorySession.chapter_key)
+        )
         row = (
             db.query(
                 func.count(StorySession.story_session_id),
-                func.count(distinct(StorySession.chapter_key)),
+                func.count(distinct(normalized_chapter)),
                 func.count(
                     case(
                         (

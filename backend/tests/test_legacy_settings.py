@@ -2,6 +2,7 @@
 
 import unittest
 from datetime import timedelta
+from unittest.mock import patch
 
 from fastapi import HTTPException
 from pydantic import ValidationError
@@ -213,6 +214,18 @@ class LegacySettingsTests(unittest.TestCase):
             )
         self.assertEqual(context.exception.status_code, 409)
         self.assertEqual(context.exception.detail["code"], "legacy_changed")
+
+    def test_racing_update_cannot_silently_overwrite(self):
+        with patch.object(
+            LegacyCRUD,
+            "apply_identity_changes_if_current",
+            return_value=False,
+        ):
+            with self.assertRaises(LegacySettingsConflictError):
+                self.update(display_name="Mama")
+
+        self.db.refresh(self.legacy)
+        self.assertEqual(self.legacy.display_name, "Mom")
 
     def test_related_records_and_protected_identity_are_preserved(self):
         story = StorySession(

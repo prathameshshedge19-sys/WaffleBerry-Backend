@@ -1,6 +1,6 @@
 """Owner-scoped persistence operations for the Memory Engine foundation."""
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
@@ -140,17 +140,34 @@ class LegacyCRUD:
         )
 
     @staticmethod
-    def apply_identity_changes(
-        legacy: Legacy,
+    def apply_identity_changes_if_current(
+        db: Session,
         *,
-        display_name: str | None = None,
-        relationship: str | None = None,
-    ) -> None:
-        """Apply validated identity values without committing."""
-        if display_name is not None:
-            legacy.display_name = display_name
-        if relationship is not None:
-            legacy.relationship = relationship
+        legacy_id: int,
+        user_id: int,
+        expected_updated_at: datetime,
+        updated_at: datetime,
+        changes: dict[str, str],
+    ) -> bool:
+        """Atomically update identity only if its timestamp is current."""
+        values: dict = {**changes, "updated_at": updated_at}
+        # SQLite may store a server-default whole-second value without a
+        # fractional suffix, then bind the same datetime with microseconds.
+        # A one-microsecond window preserves compare-and-swap semantics while
+        # accommodating that representation difference.
+        timestamp_floor = expected_updated_at - timedelta(microseconds=1)
+        timestamp_ceiling = expected_updated_at + timedelta(microseconds=1)
+        changed = (
+            db.query(Legacy)
+            .filter(
+                Legacy.legacy_id == legacy_id,
+                Legacy.owner_user_id == user_id,
+                Legacy.updated_at >= timestamp_floor,
+                Legacy.updated_at <= timestamp_ceiling,
+            )
+            .update(values, synchronize_session=False)
+        )
+        return changed == 1
 
 
 class StorySessionCRUD:
