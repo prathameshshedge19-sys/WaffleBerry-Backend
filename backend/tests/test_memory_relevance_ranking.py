@@ -19,6 +19,8 @@ from app.models.user import User
 from app.schemas.memory import (
     ApprovedMemoryRetrievalItem,
     ApprovedMemorySearchRequest,
+    MemoryDetails,
+    MemorySemanticAttributes,
 )
 from app.services.memory.retrieval import (
     MemoryRetrievalNotFoundError,
@@ -42,6 +44,7 @@ class MemoryRelevanceRankerTests(unittest.TestCase):
         importance=3,
         updated_at=None,
         memory_type=MemoryType.ATOMIC,
+        semantic_attributes=None,
     ):
         return ApprovedMemoryRetrievalItem(
             memory_id=memory_id,
@@ -49,11 +52,74 @@ class MemoryRelevanceRankerTests(unittest.TestCase):
             category=category,
             title=title,
             summary=summary,
+            details=(
+                MemoryDetails(semantic_attributes=semantic_attributes)
+                if semantic_attributes is not None
+                else None
+            ),
             importance=importance,
             extraction_confidence=Decimal("0.8"),
             created_at=self.now,
             updated_at=updated_at or self.now,
         )
+
+    def test_profession_intent_variants_retrieve_structured_occupation(self):
+        profession = self.item(
+            1,
+            title="Tuition teacher",
+            summary="She was a tuition teacher.",
+            semantic_attributes=MemorySemanticAttributes(
+                profession="tuition teacher",
+                occupation_category="education",
+            ),
+        )
+        for query in (
+            "What was your profession?",
+            "What was your job?",
+            "Tell me about your career.",
+            "What work did you do?",
+            "What was your occupation?",
+        ):
+            with self.subTest(query=query):
+                result = self.ranker.rank([profession], query)
+                self.assertEqual([item.memory_id for item in result], [1])
+
+    def test_teaching_relationship_retrieves_without_implying_profession(self):
+        teaching = self.item(
+            2,
+            title="Teaching her son",
+            summary="She taught her son until grade 10.",
+            category="relationship",
+            semantic_attributes=MemorySemanticAttributes(
+                taught_relationship="son",
+                education_level="grade 10",
+            ),
+        )
+        result = self.ranker.rank(
+            [teaching], "Who taught me until grade 10?"
+        )
+        self.assertEqual([item.memory_id for item in result], [2])
+        self.assertEqual(
+            self.ranker.rank([teaching], "What was your profession?"), []
+        )
+
+    def test_birthplace_intent_variants_use_explicit_attribute(self):
+        birthplace = self.item(
+            3,
+            title="Early life",
+            summary="She was born in Pune.",
+            semantic_attributes=MemorySemanticAttributes(
+                birthplace="Pune"
+            ),
+        )
+        for query in (
+            "Where were you born?",
+            "What was your birthplace?",
+            "What was your place of birth?",
+        ):
+            with self.subTest(query=query):
+                result = self.ranker.rank([birthplace], query)
+                self.assertEqual([item.memory_id for item in result], [3])
 
     def test_exact_phrase_and_title_matches_rank_above_partial_summary(self):
         partial = self.item(1, summary="Jasmine grew beside the old house")

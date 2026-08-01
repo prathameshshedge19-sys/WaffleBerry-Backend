@@ -125,6 +125,110 @@ def atomic_output(**overrides):
 
 
 class MemoryExtractionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_compound_statement_produces_atomic_semantic_memories(self):
+        legacy, session, messages = story_fixture()
+        messages[1].content = (
+            "I am a tuition teacher and taught my son until grade 10."
+        )
+        profession = atomic_output(
+            title="Profession as a tuition teacher",
+            summary="Mom was a tuition teacher.",
+            details={
+                "places": [],
+                "temporal_references": [],
+                "semantic_attributes": {
+                    "profession": "tuition teacher",
+                    "occupation_category": "education",
+                    "taught_relationship": None,
+                    "education_level": None,
+                    "birthplace": None,
+                },
+            },
+            evidence=[{
+                "source_message_id": 881,
+                "excerpt": "I am a tuition teacher",
+            }],
+        )
+        teaching = atomic_output(
+            category="relationship",
+            title="Teaching her son",
+            summary="Mom taught her son until grade 10.",
+            details={
+                "places": [],
+                "temporal_references": [],
+                "semantic_attributes": {
+                    "profession": None,
+                    "occupation_category": None,
+                    "taught_relationship": "son",
+                    "education_level": "grade 10",
+                    "birthplace": None,
+                },
+            },
+            evidence=[{
+                "source_message_id": 881,
+                "excerpt": "taught my son until grade 10",
+            }],
+        )
+        ai_service = FakeAIService(
+            json.dumps({"memories": [profession, teaching]})
+        )
+        service = MemoryExtractionService(ai_service)
+
+        memories = await service.extract_story_session(
+            legacy, session, messages
+        )
+
+        self.assertEqual(len(memories), 2)
+        self.assertTrue(
+            all(item.memory_type == MemoryType.ATOMIC for item in memories)
+        )
+        self.assertIn(
+            "multiple atomic memories", ai_service.messages[0].content
+        )
+        attributes = memories[0].details.semantic_attributes
+        self.assertEqual(attributes.profession, "tuition teacher")
+        self.assertEqual(attributes.occupation_category, "education")
+        self.assertEqual(
+            memories[0].provenance[0].excerpt,
+            "I am a tuition teacher",
+        )
+        self.assertEqual(
+            memories[1].details.semantic_attributes.taught_relationship,
+            "son",
+        )
+        self.assertEqual(
+            memories[1].details.semantic_attributes.education_level,
+            "grade 10",
+        )
+
+    async def test_teaching_evidence_does_not_establish_profession(self):
+        legacy, session, messages = story_fixture()
+        messages[1].content = "I taught my son until grade 10."
+        unsupported = atomic_output(
+            summary="Mom taught her son until grade 10.",
+            details={
+                "places": [],
+                "temporal_references": [],
+                "semantic_attributes": {
+                    "profession": "teacher",
+                    "occupation_category": "education",
+                    "taught_relationship": "son",
+                    "education_level": "grade 10",
+                    "birthplace": None,
+                },
+            },
+            evidence=[{
+                "source_message_id": 881,
+                "excerpt": "taught my son until grade 10",
+            }],
+        )
+        service = MemoryExtractionService(
+            FakeAIService(json.dumps({"memories": [unsupported]}))
+        )
+
+        with self.assertRaises(MemoryExtractionResponseError):
+            await service.extract_story_session(legacy, session, messages)
+
     async def test_zero_memories_is_a_valid_result(self):
         legacy, session, messages = story_fixture()
         ai_service = FakeAIService('{"memories":[]}')

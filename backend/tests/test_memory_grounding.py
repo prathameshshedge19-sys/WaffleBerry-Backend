@@ -19,7 +19,10 @@ from app.services.ai.exceptions import (
     MemoryGroundingError,
 )
 from app.services.chat_service import ChatService
-from app.services.memory.grounding import CompanionMemoryGrounding
+from app.services.memory.grounding import (
+    CompanionMemoryGrounding,
+    MemoryGroundingBudget,
+)
 from app.services.memory.retrieval import MemoryRetrievalNotFoundError
 
 
@@ -92,6 +95,12 @@ def fake_db():
 
 
 class CompanionMemoryGroundingTests(unittest.IsolatedAsyncioTestCase):
+    def test_retrieval_grounding_budgets_remain_unchanged(self):
+        budget = MemoryGroundingBudget()
+        self.assertEqual(budget.max_memories, 8)
+        self.assertEqual(budget.max_estimated_tokens, 1500)
+        self.assertEqual(budget.max_characters, 6000)
+
     def service(self, retrieval, ai=None):
         return ChatService(
             ai or FakeAIService(),
@@ -127,6 +136,40 @@ class CompanionMemoryGroundingTests(unittest.IsolatedAsyncioTestCase):
         ))
         self.assertIn("APPROVED LEGACY MEMORIES", prompt)
         self.assertIn("Mother's name is Anita.", prompt)
+
+    def test_related_memories_are_grounded_for_one_coherent_answer(self):
+        memories = [
+            ranked_memory(
+                1,
+                title="Tuition teacher",
+                summary="I was a tuition teacher.",
+                category="achievement",
+            ),
+            ranked_memory(
+                2,
+                title="Teaching her son",
+                summary="I taught my son until grade 10.",
+                category="relationship",
+            ),
+        ]
+        messages = self.service(
+            FakeRetrievalService(memories)
+        ).prepare_ai_input(
+            fake_db(), self.conversation(), "What work did you do?"
+        )
+        prompt = messages[0].content
+        self.assertIn("I was a tuition teacher.", prompt)
+        self.assertIn("I taught my son until grade 10.", prompt)
+        self.assertIn("one coherent, natural first-person answer", prompt)
+
+    def test_unsupported_question_keeps_uncertainty_instruction(self):
+        messages = self.service(FakeRetrievalService([])).prepare_ai_input(
+            fake_db(), self.conversation(), "What was your first salary?"
+        )
+        prompt = messages[0].content
+        self.assertNotIn("APPROVED LEGACY MEMORIES", prompt)
+        self.assertIn("I don't remember", prompt)
+        self.assertIn("Never guess", prompt)
 
     def test_no_match_and_unlinked_conversation_remain_ungrounded(self):
         for legacy_id, expected_calls in ((12, 1), (None, 0)):

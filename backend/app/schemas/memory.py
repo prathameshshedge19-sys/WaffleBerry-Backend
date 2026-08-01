@@ -339,11 +339,41 @@ class PlaceReference(BaseModel):
     _normalize_name = field_validator("name", mode="before")(_strip_required)
 
 
+class MemorySemanticAttributes(BaseModel):
+    """Explicit, source-grounded attributes used for deterministic recall."""
+
+    profession: str | None = Field(default=None, max_length=255)
+    occupation_category: str | None = Field(default=None, max_length=120)
+    taught_relationship: str | None = Field(default=None, max_length=100)
+    education_level: str | None = Field(default=None, max_length=120)
+    birthplace: str | None = Field(default=None, max_length=255)
+
+    model_config = ConfigDict(extra="forbid")
+
+    @field_validator(
+        "profession",
+        "occupation_category",
+        "taught_relationship",
+        "education_level",
+        "birthplace",
+        mode="before",
+    )
+    @classmethod
+    def normalize_optional_attribute(cls, value):
+        if not isinstance(value, str):
+            return value
+        normalized = value.strip()
+        return normalized or None
+
+
 class MemoryDetails(BaseModel):
     """Validated extensible details for non-universal memory attributes."""
 
     temporal_references: list[TemporalReference] = Field(default_factory=list)
     places: list[PlaceReference] = Field(default_factory=list)
+    semantic_attributes: MemorySemanticAttributes = Field(
+        default_factory=MemorySemanticAttributes
+    )
 
     model_config = ConfigDict(extra="allow")
 
@@ -519,6 +549,7 @@ class ApprovedMemoryRetrievalItem(BaseModel):
     category: str
     title: str
     summary: str
+    details: MemoryDetails | None = None
     importance: int | None = Field(default=None, ge=1, le=5)
     extraction_confidence: Decimal | None = Field(
         default=None,

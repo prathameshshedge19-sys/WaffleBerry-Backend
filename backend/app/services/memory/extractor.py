@@ -28,6 +28,10 @@ MEMORY_EXTRACTOR_VERSION = "memory-extractor-v1"
 ExtractionSourceType = Literal["story_session", "conversation"]
 logger = logging.getLogger(__name__)
 
+_EDUCATION_PROFESSION_TERMS = frozenset(
+    {"educator", "professor", "teacher", "tutor"}
+)
+
 _NULLABLE_STRING = {"type": ["string", "null"]}
 MEMORY_EXTRACTION_RESPONSE_SCHEMA: dict[str, object] = {
     "type": "object",
@@ -89,8 +93,30 @@ MEMORY_EXTRACTION_RESPONSE_SCHEMA: dict[str, object] = {
                                     "required": ["name", "region", "country", "certainty"],
                                 },
                             },
+                            "semantic_attributes": {
+                                "type": "object",
+                                "additionalProperties": False,
+                                "properties": {
+                                    "profession": _NULLABLE_STRING,
+                                    "occupation_category": _NULLABLE_STRING,
+                                    "taught_relationship": _NULLABLE_STRING,
+                                    "education_level": _NULLABLE_STRING,
+                                    "birthplace": _NULLABLE_STRING,
+                                },
+                                "required": [
+                                    "profession",
+                                    "occupation_category",
+                                    "taught_relationship",
+                                    "education_level",
+                                    "birthplace",
+                                ],
+                            },
                         },
-                        "required": ["temporal_references", "places"],
+                        "required": [
+                            "temporal_references",
+                            "places",
+                            "semantic_attributes",
+                        ],
                     },
                     "emotional_significance": _NULLABLE_STRING,
                     "importance": {"type": "integer", "minimum": 1, "maximum": 5},
@@ -438,6 +464,8 @@ class MemoryExtractionService:
                 "Memory extraction did not provide usable source evidence."
             )
 
+        MemoryExtractionService._validate_semantic_attributes(extracted)
+
         return MemoryCandidateCreate(
             memory_type=extracted.memory_type,
             category=extracted.category,
@@ -452,3 +480,40 @@ class MemoryExtractionService:
             tags=extracted.tags,
             provenance=provenance,
         )
+
+    @staticmethod
+    def _validate_semantic_attributes(extracted: ExtractedMemory) -> None:
+        """Reject semantic attributes not directly supported by evidence."""
+        attributes = extracted.details.semantic_attributes
+        evidence_text = " ".join(
+            evidence.excerpt for evidence in extracted.evidence
+        ).casefold()
+        for field in (
+            "profession",
+            "taught_relationship",
+            "education_level",
+            "birthplace",
+        ):
+            value = getattr(attributes, field)
+            if value is not None and value.casefold() not in evidence_text:
+                raise MemoryExtractionResponseError(
+                    "Memory extraction returned an unsupported semantic "
+                    "attribute."
+                )
+
+        category = attributes.occupation_category
+        if category is None or category.casefold() in evidence_text:
+            return
+        profession_tokens = set(
+            attributes.profession.casefold().split()
+            if attributes.profession is not None
+            else ()
+        )
+        if not (
+            category.casefold() == "education"
+            and profession_tokens & _EDUCATION_PROFESSION_TERMS
+        ):
+            raise MemoryExtractionResponseError(
+                "Memory extraction returned an unsupported occupation "
+                "category."
+            )
