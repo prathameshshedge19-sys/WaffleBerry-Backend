@@ -33,7 +33,7 @@ class CapturingProvider(AIProvider):
         self.extraction_response = extraction_response
         self.calls = []
 
-    async def generate_response(self, messages):
+    async def generate_response(self, messages, *, structured_response_schema=None):
         self.calls.append(list(messages))
         if len(self.calls) == 1:
             return json.dumps(self.extraction_response)
