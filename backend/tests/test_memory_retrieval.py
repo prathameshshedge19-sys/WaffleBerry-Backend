@@ -230,7 +230,18 @@ class MemoryRetrievalTests(unittest.TestCase):
         self.assertEqual(context.exception.status_code, 401)
 
     def test_response_excludes_review_and_internal_metadata(self):
-        self.memory(summary="Safe projection")
+        memory = self.memory(summary="Safe projection")
+        memory.details = {
+            "temporal_references": [],
+            "places": [],
+            "semantic_attributes": {
+                "profession": "tuition teacher",
+                "occupation_category": "education",
+                "taught_relationship": None,
+                "education_level": None,
+                "birthplace": None,
+            },
+        }
         result = self.retrieve().model_dump()
 
         self.assertEqual(
@@ -245,6 +256,7 @@ class MemoryRetrievalTests(unittest.TestCase):
                 "category",
                 "title",
                 "summary",
+                "details",
                 "importance",
                 "extraction_confidence",
                 "created_at",
@@ -259,6 +271,31 @@ class MemoryRetrievalTests(unittest.TestCase):
             "provenance",
         ):
             self.assertNotIn(hidden, result["memories"][0])
+
+        details = result["memories"][0]["details"]
+        self.assertEqual(
+            set(details),
+            {"temporal_references", "places", "semantic_attributes"},
+        )
+        self.assertEqual(
+            set(details["semantic_attributes"]),
+            {
+                "profession",
+                "occupation_category",
+                "taught_relationship",
+                "education_level",
+                "birthplace",
+            },
+        )
+        serialized_details = str(details)
+        for hidden in (
+            "review_status",
+            "reviewed_at",
+            "reviewed_by_user_id",
+            "normalized_fingerprint",
+            "provenance",
+        ):
+            self.assertNotIn(hidden, serialized_details)
 
 
 if __name__ == "__main__":
