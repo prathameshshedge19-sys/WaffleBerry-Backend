@@ -64,6 +64,8 @@ class OpenAIProvider(AIProvider):
     async def generate_response(
         self,
         messages: Sequence[AIMessage],
+        *,
+        structured_response_schema: Mapping[str, object] | None = None,
     ) -> str:
         """Return assistant text without exposing OpenAI SDK objects."""
         if not messages:
@@ -79,11 +81,22 @@ class OpenAIProvider(AIProvider):
             for message in messages
         ]
 
+        request_options = {
+            "model": self._settings.ai_model.strip(),
+            "input": request_messages,
+        }
+        if structured_response_schema is not None:
+            request_options["text"] = {
+                "format": {
+                    "type": "json_schema",
+                    "name": "structured_response",
+                    "schema": dict(structured_response_schema),
+                    "strict": True,
+                }
+            }
+
         try:
-            response = await self._client.responses.create(
-                model=self._settings.ai_model.strip(),
-                input=request_messages,
-            )
+            response = await self._client.responses.create(**request_options)
         except OpenAIError as exc:
             self._raise_provider_error(exc)
 

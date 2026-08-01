@@ -1,6 +1,7 @@
 """Extract validated, source-traceable memory candidates without persistence."""
 
 import json
+import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal, Protocol
@@ -25,6 +26,108 @@ from app.services.memory.exceptions import (
 
 MEMORY_EXTRACTOR_VERSION = "memory-extractor-v1"
 ExtractionSourceType = Literal["story_session", "conversation"]
+logger = logging.getLogger(__name__)
+
+_NULLABLE_STRING = {"type": ["string", "null"]}
+MEMORY_EXTRACTION_RESPONSE_SCHEMA: dict[str, object] = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "memories": {
+            "type": "array",
+            "maxItems": 50,
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "memory_type": {
+                        "type": "string",
+                        "enum": ["atomic", "narrative"],
+                    },
+                    "category": {
+                        "type": "string",
+                        "enum": [
+                            "personal_detail", "relationship", "place",
+                            "life_event", "preference", "tradition",
+                            "habit", "value", "achievement", "challenge",
+                            "lesson", "expression", "story",
+                        ],
+                    },
+                    "title": {"type": "string", "minLength": 1, "maxLength": 255},
+                    "summary": {"type": "string", "minLength": 1},
+                    "details": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "temporal_references": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "additionalProperties": False,
+                                    "properties": {
+                                        "text": {"type": "string", "minLength": 1, "maxLength": 255},
+                                        "start_date": {"type": ["string", "null"], "maxLength": 32},
+                                        "end_date": {"type": ["string", "null"], "maxLength": 32},
+                                        "precision": {"type": "string", "enum": ["day", "month", "season", "year", "decade", "range", "unknown"]},
+                                        "is_approximate": {"type": "boolean"},
+                                        "certainty": {"type": "string", "enum": ["stated", "approximate", "uncertain", "disputed"]},
+                                    },
+                                    "required": ["text", "start_date", "end_date", "precision", "is_approximate", "certainty"],
+                                },
+                            },
+                            "places": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "additionalProperties": False,
+                                    "properties": {
+                                        "name": {"type": "string", "minLength": 1, "maxLength": 255},
+                                        "region": {"type": ["string", "null"], "maxLength": 255},
+                                        "country": {"type": ["string", "null"], "maxLength": 255},
+                                        "certainty": {"type": "string", "enum": ["stated", "approximate", "uncertain", "disputed", "possible"]},
+                                    },
+                                    "required": ["name", "region", "country", "certainty"],
+                                },
+                            },
+                        },
+                        "required": ["temporal_references", "places"],
+                    },
+                    "emotional_significance": _NULLABLE_STRING,
+                    "importance": {"type": "integer", "minimum": 1, "maximum": 5},
+                    "extraction_confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                    "uncertainty_note": _NULLABLE_STRING,
+                    "participants": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "properties": {
+                                "name": {"type": "string", "minLength": 1, "maxLength": 255},
+                                "relationship": {"type": ["string", "null"], "maxLength": 100},
+                                "role": {"type": ["string", "null"], "enum": ["subject", "witness", "mentioned_person", None]},
+                            },
+                            "required": ["name", "relationship", "role"],
+                        },
+                    },
+                    "tags": {"type": "array", "maxItems": 30, "items": {"type": "string", "minLength": 1, "maxLength": 80}},
+                    "evidence": {
+                        "type": "array", "minItems": 1, "maxItems": 20,
+                        "items": {
+                            "type": "object", "additionalProperties": False,
+                            "properties": {
+                                "source_message_id": {"type": "integer", "minimum": 1},
+                                "excerpt": {"type": "string", "minLength": 1, "maxLength": 600},
+                            },
+                            "required": ["source_message_id", "excerpt"],
+                        },
+                    },
+                },
+                "required": ["memory_type", "category", "title", "summary", "details", "emotional_significance", "importance", "extraction_confidence", "uncertainty_note", "participants", "tags", "evidence"],
+            },
+        }
+    },
+    "required": ["memories"],
+}
 
 
 class ExtractableMessage(Protocol):
@@ -172,7 +275,10 @@ class MemoryExtractionService:
                 ),
             ),
         ]
-        response_text = await self._ai_service.generate_response(ai_messages)
+        response_text = await self._ai_service.generate_response(
+            ai_messages,
+            structured_response_schema=MEMORY_EXTRACTION_RESPONSE_SCHEMA,
+        )
         result = self._parse_response(response_text)
 
         return [
@@ -249,6 +355,7 @@ class MemoryExtractionService:
     def _parse_response(response_text: str) -> MemoryExtractionResult:
         """Parse strict JSON, tolerating only one surrounding JSON fence."""
         normalized = response_text.strip()
+        had_code_fence = normalized.startswith("```")
         if normalized.startswith("```") and normalized.endswith("```"):
             lines = normalized.splitlines()
             if len(lines) >= 3 and lines[0].strip() in {"```", "```json"}:
@@ -257,7 +364,23 @@ class MemoryExtractionService:
         try:
             payload = json.loads(normalized)
             return MemoryExtractionResult.model_validate(payload)
-        except (json.JSONDecodeError, TypeError, ValidationError):
+        except (json.JSONDecodeError, TypeError, ValidationError) as exc:
+            validation_errors = exc.errors() if isinstance(exc, ValidationError) else []
+            logger.warning(
+                "Invalid memory extraction response.",
+                extra={
+                    "exception_type": type(exc).__name__,
+                    "validation_field_paths": [
+                        ".".join(str(part) for part in error["loc"])
+                        for error in validation_errors
+                    ],
+                    "validation_error_types": [
+                        error["type"] for error in validation_errors
+                    ],
+                    "response_character_count": len(response_text),
+                    "response_had_code_fence": had_code_fence,
+                },
+            )
             raise MemoryExtractionResponseError(
                 "Memory extraction returned an invalid structured response."
             ) from None

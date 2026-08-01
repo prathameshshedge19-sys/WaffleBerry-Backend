@@ -1,6 +1,7 @@
 """Unit tests for provider-neutral AI memory extraction."""
 
 import json
+import logging
 import unittest
 
 from app.models.memory import (
@@ -25,10 +26,17 @@ class FakeAIService:
         self.response_text = response_text
         self.messages = None
         self.call_count = 0
+        self.structured_response_schema = None
 
-    async def generate_response(self, messages):
+    async def generate_response(
+        self,
+        messages,
+        *,
+        structured_response_schema=None,
+    ):
         self.call_count += 1
         self.messages = messages
+        self.structured_response_schema = structured_response_schema
         return self.response_text
 
 
@@ -130,6 +138,28 @@ class MemoryExtractionTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result, [])
         self.assertEqual(ai_service.call_count, 1)
+        self.assertEqual(
+            ai_service.structured_response_schema["required"],
+            ["memories"],
+        )
+        self.assertFalse(
+            ai_service.structured_response_schema["additionalProperties"]
+        )
+        self._assert_strict_objects(ai_service.structured_response_schema)
+
+    def _assert_strict_objects(self, node):
+        if isinstance(node, dict):
+            if node.get("type") == "object":
+                self.assertIs(node.get("additionalProperties"), False)
+                self.assertEqual(
+                    set(node.get("required", [])),
+                    set(node.get("properties", {})),
+                )
+            for value in node.values():
+                self._assert_strict_objects(value)
+        elif isinstance(node, list):
+            for value in node:
+                self._assert_strict_objects(value)
 
     async def test_multiple_candidates_reuse_existing_schema(self):
         legacy, session, messages = story_fixture()
@@ -347,6 +377,99 @@ class MemoryExtractionTests(unittest.IsolatedAsyncioTestCase):
                 session,
                 messages,
             )
+
+    async def test_whole_response_json_fence_is_supported(self):
+        legacy, session, messages = story_fixture()
+        service = MemoryExtractionService(
+            FakeAIService('  ```json\n{"memories":[]}\n```  ')
+        )
+
+        self.assertEqual(
+            await service.extract_story_session(legacy, session, messages),
+            [],
+        )
+
+    async def test_invalid_top_level_shapes_are_rejected(self):
+        legacy, session, messages = story_fixture()
+        for payload in ([], {"result": {"memories": []}}):
+            with self.subTest(payload=payload):
+                service = MemoryExtractionService(
+                    FakeAIService(json.dumps(payload))
+                )
+                with self.assertRaises(MemoryExtractionResponseError):
+                    await service.extract_story_session(
+                        legacy, session, messages
+                    )
+
+    async def test_extra_fields_are_rejected_at_every_strict_level(self):
+        legacy, session, messages = story_fixture()
+        payloads = [
+            {"memories": [], "extra": True},
+            {"memories": [atomic_output(extra=True)]},
+            {"memories": [atomic_output(evidence=[{
+                "source_message_id": 881,
+                "excerpt": "I was born in Pune in 1968",
+                "extra": True,
+            }])]},
+        ]
+        for payload in payloads:
+            with self.subTest(payload=payload):
+                with self.assertRaises(MemoryExtractionResponseError):
+                    await MemoryExtractionService(
+                        FakeAIService(json.dumps(payload))
+                    ).extract_story_session(legacy, session, messages)
+
+    async def test_missing_evidence_is_rejected(self):
+        legacy, session, messages = story_fixture()
+        memory = atomic_output()
+        del memory["evidence"]
+        with self.assertRaises(MemoryExtractionResponseError):
+            await MemoryExtractionService(
+                FakeAIService(json.dumps({"memories": [memory]}))
+            ).extract_story_session(legacy, session, messages)
+
+    async def test_invalid_enums_and_numeric_bounds_are_rejected(self):
+        legacy, session, messages = story_fixture()
+        invalid_values = [
+            {"memory_type": "episode"},
+            {"category": "weather"},
+            {"importance": 0},
+            {"importance": 6},
+            {"extraction_confidence": -0.01},
+            {"extraction_confidence": 1.01},
+        ]
+        for overrides in invalid_values:
+            with self.subTest(overrides=overrides):
+                payload = {"memories": [atomic_output(**overrides)]}
+                with self.assertRaises(MemoryExtractionResponseError):
+                    await MemoryExtractionService(
+                        FakeAIService(json.dumps(payload))
+                    ).extract_story_session(legacy, session, messages)
+
+    async def test_diagnostics_exclude_response_and_story_content(self):
+        legacy, session, messages = story_fixture()
+        secret_story = messages[1].content
+        raw_response = '{"memories":[{"summary":"private output"}]}'
+        service = MemoryExtractionService(FakeAIService(raw_response))
+
+        with self.assertLogs(
+            "app.services.memory.extractor", logging.WARNING
+        ) as captured:
+            with self.assertRaises(MemoryExtractionResponseError):
+                await service.extract_story_session(
+                    legacy, session, messages
+                )
+
+        diagnostics = " ".join(captured.output)
+        record = captured.records[0]
+        self.assertNotIn(raw_response, diagnostics)
+        self.assertNotIn(secret_story, diagnostics)
+        self.assertNotIn("private output", diagnostics)
+        self.assertEqual(record.exception_type, "ValidationError")
+        self.assertIn("memories.0.memory_type", record.validation_field_paths)
+        self.assertTrue(record.validation_error_types)
+        self.assertEqual(record.response_character_count, len(raw_response))
+        self.assertFalse(record.response_had_code_fence)
 
     async def test_invalid_candidate_contract_is_rejected(self):
         legacy, session, messages = story_fixture()

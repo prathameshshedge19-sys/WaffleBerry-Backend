@@ -3,7 +3,7 @@
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from typing import Literal, Sequence
+from typing import Literal, Mapping, Sequence
 
 
 AIMessageRole = Literal["system", "user", "assistant"]
@@ -28,8 +28,10 @@ class AIProvider(ABC):
     async def generate_response(
         self,
         messages: Sequence[AIMessage],
+        *,
+        structured_response_schema: Mapping[str, object] | None = None,
     ) -> str:
-        """Generate assistant text from provider-neutral messages."""
+        """Generate text, optionally constrained by a JSON Schema."""
         raise NotImplementedError
 
     async def stream_response(

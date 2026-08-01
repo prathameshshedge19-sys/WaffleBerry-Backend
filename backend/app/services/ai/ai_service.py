@@ -1,7 +1,7 @@
 """Provider-independent AI orchestration."""
 
 import logging
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
 
 from app.services.ai.exceptions import AIResponseError
 from app.services.ai.provider import AIMessage, AIProvider
@@ -25,12 +25,20 @@ class AIService:
     async def generate_response(
         self,
         messages: Sequence[AIMessage],
+        *,
+        structured_response_schema: Mapping[str, object] | None = None,
     ) -> str:
         """Generate and validate assistant text through the configured provider."""
         retry_number = 0
         while True:
             try:
-                response = await self._provider.generate_response(messages)
+                if structured_response_schema is None:
+                    response = await self._provider.generate_response(messages)
+                else:
+                    response = await self._provider.generate_response(
+                        messages,
+                        structured_response_schema=structured_response_schema,
+                    )
                 if not isinstance(response, str) or not response.strip():
                     raise AIResponseError(
                         "AI provider returned an empty response."
