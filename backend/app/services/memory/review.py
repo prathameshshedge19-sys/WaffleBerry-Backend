@@ -310,8 +310,11 @@ class MemoryReviewService:
         self, db: Session, legacy_id: int, memory_id: int
     ) -> Memory:
         memory = (
-            self._base_query(db, legacy_id)
-            .filter(Memory.memory_id == memory_id)
+            db.query(Memory)
+            .filter(
+                Memory.legacy_id == legacy_id,
+                Memory.memory_id == memory_id,
+            )
             .with_for_update()
             .first()
         )
