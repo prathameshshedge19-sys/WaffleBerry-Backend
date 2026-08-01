@@ -595,6 +595,58 @@ class LegacyPersonaTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("supported by approved Legacy memory data", normalized)
         self.assertIn("I don't remember", normalized)
 
+    def test_prompt_matches_profession_occupation_career_job_and_work(self):
+        prompt = PromptBuilder.build_legacy_persona_system_prompt(
+            display_name="Mom",
+            relationship="Mother",
+        )
+        normalized = " ".join(prompt.split())
+        self.assertIn(
+            "profession, occupation, career, job, and work express the same",
+            normalized,
+        )
+        self.assertIn("answer directly and confidently", normalized)
+        self.assertIn("does not suggest or repeat the answer", normalized)
+
+    def test_prompt_matches_birthplace_and_where_born(self):
+        prompt = PromptBuilder.build_legacy_persona_system_prompt(
+            display_name="Mom",
+            relationship="Mother",
+        )
+        normalized = " ".join(prompt.split())
+        self.assertIn(
+            "born, birthplace, and where someone was born", normalized
+        )
+        self.assertIn(
+            "only for matching the question to supplied facts", normalized
+        )
+
+    def test_prompt_synthesizes_multiple_compatible_memories(self):
+        prompt = PromptBuilder.build_legacy_persona_system_prompt(
+            display_name="Mom",
+            relationship="Mother",
+        )
+        normalized = " ".join(prompt.split())
+        self.assertIn("several compatible memories", normalized)
+        self.assertIn("one coherent, natural first-person answer", normalized)
+
+    def test_prompt_reserves_uncertainty_for_unsupported_facts(self):
+        prompt = PromptBuilder.build_legacy_persona_system_prompt(
+            display_name="Mom",
+            relationship="Mother",
+        )
+        normalized = " ".join(prompt.split())
+        self.assertIn("answer only part of the question", normalized)
+        self.assertIn("genuinely lack enough information", normalized)
+        for unsupported_fact in (
+            "occupation",
+            "date",
+            "name",
+            "relationship",
+            "place",
+        ):
+            self.assertIn(unsupported_fact, normalized)
+
     def test_continuity_does_not_persist_or_change_selection_contract(self):
         self.db.add_all(
             [
