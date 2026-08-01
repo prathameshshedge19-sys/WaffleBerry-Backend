@@ -348,6 +348,25 @@ class StorySessionCRUD:
         )
 
     @staticmethod
+    def list_legacy_story_sessions(
+        db: Session,
+        legacy_id: int,
+        user_id: int,
+    ) -> list[StorySession]:
+        """List persisted chapters only for an owned Legacy."""
+        if LegacyCRUD.get_user_legacy(db, legacy_id, user_id) is None:
+            raise MemoryPersistenceError("Legacy not found for user.")
+        return (
+            db.query(StorySession)
+            .filter(StorySession.legacy_id == legacy_id)
+            .order_by(
+                StorySession.created_at.asc(),
+                StorySession.story_session_id.asc(),
+            )
+            .all()
+        )
+
+    @staticmethod
     def append_story_message(
         db: Session,
         story_session_id: int,

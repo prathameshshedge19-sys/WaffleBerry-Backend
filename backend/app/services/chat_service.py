@@ -3,6 +3,9 @@
 from collections.abc import AsyncIterator, Iterable
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import logging
+import json
+from uuid import uuid4
 
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError
@@ -27,11 +30,27 @@ from app.services.memory.retrieval import (
 from app.services.persona_profile import PersonaProfile, PersonaProfileService
 
 
+logger = logging.getLogger(__name__)
+
+
+def _safe_log(level: int, event: str, **metadata) -> None:
+    """Emit journal-visible structured metadata with no story or prompt text."""
+    logger.log(
+        level,
+        json.dumps(
+            {"event": event, **metadata},
+            separators=(",", ":"),
+            sort_keys=True,
+        ),
+    )
+
+
 @dataclass(frozen=True)
 class PreparedCompanionInput:
     messages: list[AIMessage]
     memory_ids: tuple[int, ...] = ()
     retrieved_at: datetime | None = None
+    request_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -39,6 +58,7 @@ class CompanionGeneration:
     content: str
     memory_ids: tuple[int, ...] = ()
     retrieved_at: datetime | None = None
+    request_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -46,6 +66,7 @@ class CompanionStreamPlan:
     stream: AsyncIterator[str]
     memory_ids: tuple[int, ...] = ()
     retrieved_at: datetime | None = None
+    request_id: str = ""
 
 
 class ChatService:
@@ -103,6 +124,7 @@ class ChatService:
         )
         history.reverse()
         grounding_context = None
+        request_id = uuid4().hex
         memory_ids: tuple[int, ...] = ()
         retrieved_at = None
         persona_display_name = None
@@ -160,11 +182,29 @@ class ChatService:
             except SQLAlchemyError:
                 db.rollback()
                 retrieval_available = False
+                _safe_log(
+                    logging.WARNING,
+                    "companion_memory_retrieval_failed",
+                    request_id=request_id,
+                    user_id=conversation.user_id,
+                    conversation_id=conversation.conversation_id,
+                    legacy_id=legacy_id,
+                    retrieval_failure_category="database_error",
+                )
             except (
                 MemoryRetrievalNotFoundError,
                 MemoryRetrievalArchivedError,
             ) as exc:
                 db.rollback()
+                _safe_log(
+                    logging.WARNING,
+                    "companion_memory_retrieval_failed",
+                    request_id=request_id,
+                    user_id=conversation.user_id,
+                    conversation_id=conversation.conversation_id,
+                    legacy_id=legacy_id,
+                    retrieval_failure_category=type(exc).__name__,
+                )
                 raise MemoryGroundingError(
                     "Approved Legacy memories could not be prepared."
                 ) from exc
@@ -178,6 +218,19 @@ class ChatService:
                         memory.memory_id for memory in selection.memories
                     )
                     retrieved_at = datetime.now(timezone.utc)
+                _safe_log(
+                    logging.INFO,
+                    "companion_memory_retrieval",
+                    request_id=request_id,
+                    user_id=conversation.user_id,
+                    conversation_id=conversation.conversation_id,
+                    legacy_id=legacy_id,
+                    approved_candidate_count=ranked.approved_memory_count,
+                    retrieved_memory_count=ranked.matched_memory_count,
+                    selected_memory_ids=list(memory_ids),
+                    grounding_context_created=grounding_context is not None,
+                    provider_call_attempted=False,
+                )
                 try:
                     fidelity_plan = self._memory_fidelity.analyze_selected(
                         db,
@@ -196,6 +249,20 @@ class ChatService:
                     [],
                     retrieval_available=False,
                 )
+        else:
+            _safe_log(
+                logging.INFO,
+                "companion_memory_retrieval",
+                request_id=request_id,
+                user_id=conversation.user_id,
+                conversation_id=conversation.conversation_id,
+                legacy_id=legacy_id,
+                approved_candidate_count=0,
+                retrieved_memory_count=0,
+                selected_memory_ids=[],
+                grounding_context_created=False,
+                provider_call_attempted=False,
+            )
         return PreparedCompanionInput(
             messages=self._context_builder.build_chat_messages(
                 history,
@@ -209,6 +276,7 @@ class ChatService:
             ),
             memory_ids=memory_ids,
             retrieved_at=retrieved_at,
+            request_id=request_id,
         )
 
     async def generate_response(
@@ -238,11 +306,13 @@ class ChatService:
             user_message,
         )
         db.rollback()
+        self._log_provider_attempt(prepared, conversation)
         content = await self._ai_service.generate_response(prepared.messages)
         return CompanionGeneration(
             content=content,
             memory_ids=prepared.memory_ids,
             retrieved_at=prepared.retrieved_at,
+            request_id=prepared.request_id,
         )
 
     def stream_response(
@@ -272,10 +342,37 @@ class ChatService:
         )
         db.rollback()
         return CompanionStreamPlan(
-            stream=self._ai_service.stream_response(prepared.messages),
+            stream=self._stream_with_provider_log(prepared, conversation),
             memory_ids=prepared.memory_ids,
             retrieved_at=prepared.retrieved_at,
+            request_id=prepared.request_id,
         )
+
+    def _log_provider_attempt(
+        self,
+        prepared: PreparedCompanionInput,
+        conversation: Conversation,
+    ) -> None:
+        _safe_log(
+            logging.INFO,
+            "companion_provider_call",
+            request_id=prepared.request_id,
+            user_id=conversation.user_id,
+            conversation_id=conversation.conversation_id,
+            legacy_id=conversation.legacy_id,
+            selected_memory_ids=list(prepared.memory_ids),
+            grounding_context_created=bool(prepared.memory_ids),
+            provider_call_attempted=True,
+        )
+
+    async def _stream_with_provider_log(
+        self,
+        prepared: PreparedCompanionInput,
+        conversation: Conversation,
+    ) -> AsyncIterator[str]:
+        self._log_provider_attempt(prepared, conversation)
+        async for chunk in self._ai_service.stream_response(prepared.messages):
+            yield chunk
 
     def stream_story_response(
         self,

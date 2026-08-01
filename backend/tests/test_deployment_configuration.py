@@ -40,6 +40,24 @@ class DeploymentConfigurationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             settings.allowed_cors_origins
 
+    def test_production_cannot_silently_use_sqlite(self):
+        with self.assertRaisesRegex(ValueError, "PostgreSQL"):
+            Settings(
+                _env_file=None,
+                jwt_secret_key="test-only-secret",
+                debug=False,
+                database_url="sqlite:///./waffle_berry.db",
+            )
+
+    def test_development_can_explicitly_use_sqlite(self):
+        settings = Settings(
+            _env_file=None,
+            jwt_secret_key="test-only-secret",
+            debug=True,
+            database_url="sqlite:///:memory:",
+        )
+        self.assertEqual(settings.database_url, "sqlite:///:memory:")
+
 
 if __name__ == "__main__":
     unittest.main()

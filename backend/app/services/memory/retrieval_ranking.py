@@ -21,10 +21,21 @@ _STOP_WORDS = frozenset(
 def _tokens(value: str | None) -> list[str]:
     normalized = unicodedata.normalize("NFKC", value or "").casefold()
     return [
-        token
+        _singularize(token)
         for token in _WORD_PATTERN.findall(normalized)
         if token not in _STOP_WORDS
     ]
+
+
+def _singularize(token: str) -> str:
+    """Normalize common English plurals without stemming names or short words."""
+    if len(token) > 4 and token.endswith("ies"):
+        return f"{token[:-3]}y"
+    if len(token) > 4 and token.endswith("ses"):
+        return token[:-2]
+    if len(token) > 3 and token.endswith("s") and not token.endswith("ss"):
+        return token[:-1]
+    return token
 
 
 def _timestamp(value: datetime) -> float:

@@ -78,6 +78,16 @@ class MemoryRelevanceRankerTests(unittest.TestCase):
         memory = self.item(1, title="", summary="A mountain holiday")
         self.assertEqual(self.ranker.rank([memory], "jasmine"), [])
 
+    def test_common_plural_variants_retrieve_supported_fact(self):
+        memory = self.item(
+            1,
+            title="Favorite flowers",
+            summary="She loved jasmine flowers.",
+        )
+        result = self.ranker.rank([memory], "What was her favorite flower?")
+        self.assertEqual([item.memory_id for item in result], [1])
+        self.assertIn("flower", result[0].matched_terms)
+
     def test_atomic_and_narrative_memories_are_ranked(self):
         items = [
             self.item(1, title="School", memory_type=MemoryType.ATOMIC),

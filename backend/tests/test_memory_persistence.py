@@ -171,6 +171,35 @@ class MemoryPersistenceTests(unittest.TestCase):
         )
         self.assertEqual([message.sequence for message in ordered], [1, 2])
 
+    def test_persisted_chapters_can_be_rehydrated_only_by_owner(self):
+        legacy = self.create_legacy()
+        session = StorySessionCRUD.create_story_session(
+            self.db,
+            legacy.legacy_id,
+            self.owner.user_id,
+            StorySessionCreate(chapter_key="career", title="Career"),
+        )
+        StorySessionCRUD.append_story_message(
+            self.db,
+            session.story_session_id,
+            legacy.legacy_id,
+            StoryMessageCreate(
+                role=StoryMessageRole.USER,
+                content="My first job was at the library.",
+            ),
+        )
+
+        reopened = StorySessionCRUD.list_legacy_story_sessions(
+            self.db, legacy.legacy_id, self.owner.user_id
+        )
+        self.assertEqual([item.story_session_id for item in reopened], [session.story_session_id])
+        self.assertEqual(reopened[0].messages[0].content, "My first job was at the library.")
+
+        with self.assertRaises(MemoryPersistenceError):
+            StorySessionCRUD.list_legacy_story_sessions(
+                self.db, legacy.legacy_id, self.other_user.user_id
+            )
+
     def test_atomic_and_narrative_memories_belong_to_one_legacy(self):
         legacy = self.create_legacy()
         atomic = MemoryCRUD.create_memory_candidate(

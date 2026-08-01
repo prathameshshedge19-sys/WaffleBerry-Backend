@@ -1,7 +1,7 @@
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -68,6 +68,15 @@ class Settings(BaseSettings):
         ge=1,
     )
     memory_grounding_max_characters: int = Field(default=6000, ge=1)
+
+    @model_validator(mode="after")
+    def reject_production_sqlite_fallback(self):
+        """Production must explicitly select PostgreSQL persistence."""
+        if not self.debug and self.database_url.lower().startswith("sqlite"):
+            raise ValueError(
+                "DATABASE_URL must use PostgreSQL when DEBUG is false."
+            )
+        return self
 
 
 @lru_cache()

@@ -46,6 +46,7 @@ from app.schemas.memory import (
     StorySessionCompletionResponse,
     StorySessionCreate,
     StorySessionResponse,
+    StorySessionDetailResponse,
 )
 from app.schemas.user import StoryGuideMessage
 from app.services.ai.exceptions import AIServiceError
@@ -333,6 +334,25 @@ def create_or_resume_story_session(
         raise HTTPException(
             status_code=404, detail="Legacy was not found."
         ) from None
+
+
+@router.get(
+    "/legacies/{legacy_id}/story-sessions",
+    response_model=list[StorySessionDetailResponse],
+)
+def list_story_sessions(
+    legacy_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Rehydrate owner-scoped persisted chapter state for a Legacy."""
+    try:
+        sessions = StorySessionCRUD.list_legacy_story_sessions(
+            db, legacy_id, current_user.user_id
+        )
+    except MemoryPersistenceError:
+        raise HTTPException(status_code=404, detail="Legacy was not found.") from None
+    return sessions
 
 
 @router.get(

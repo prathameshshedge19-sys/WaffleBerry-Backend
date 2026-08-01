@@ -68,8 +68,10 @@ class MemoryRetrievalService:
             allow_archived=allow_archived,
         )
         memories = MemoryRelevanceRanker().rank(retrieved.memories, query)
-        return ApprovedMemorySearchResponse(
+        response = ApprovedMemorySearchResponse(
             legacy_id=legacy_id,
             matched_memory_count=len(memories),
             memories=memories,
         )
+        response._approved_memory_count = retrieved.approved_memory_count
+        return response

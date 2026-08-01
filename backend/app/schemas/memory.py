@@ -4,7 +4,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 
 from app.models.memory import (
     LegacyStatus,
@@ -236,6 +236,20 @@ class StorySessionResponse(BaseModel):
     completed_at: datetime | None
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class StoryMessageResponse(BaseModel):
+    role: StoryMessageRole
+    content: str
+    sequence: int
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class StorySessionDetailResponse(StorySessionResponse):
+    """Persisted chapter state returned when a Legacy is reopened."""
+
+    messages: list[StoryMessageResponse] = Field(default_factory=list)
 
 
 class PersistedStoryStreamRequest(BaseModel):
@@ -546,6 +560,12 @@ class ApprovedMemorySearchResponse(BaseModel):
     legacy_id: int
     matched_memory_count: int = Field(..., ge=0)
     memories: list[RankedApprovedMemoryItem] = Field(default_factory=list)
+    _approved_memory_count: int = PrivateAttr(default=0)
+
+    @property
+    def approved_memory_count(self) -> int:
+        """Internal diagnostic count, intentionally excluded from API output."""
+        return self._approved_memory_count
 
 
 class MemoryReviewParticipant(BaseModel):
