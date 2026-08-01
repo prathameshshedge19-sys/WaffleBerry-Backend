@@ -63,26 +63,42 @@ class MemoryRelevanceRankerTests(unittest.TestCase):
             updated_at=updated_at or self.now,
         )
 
-    def test_profession_intent_variants_retrieve_structured_occupation(self):
+    def test_open_ended_occupation_queries_retrieve_tuition_teacher(self):
         profession = self.item(
             1,
             title="Tuition teacher",
-            summary="She was a tuition teacher.",
-            semantic_attributes=MemorySemanticAttributes(
-                profession="tuition teacher",
-                occupation_category="education",
-            ),
+            summary="I was a tuition teacher.",
         )
         for query in (
             "What was your profession?",
             "What was your job?",
-            "Tell me about your career.",
+            "What did you do in your career?",
             "What work did you do?",
             "What was your occupation?",
+            "Were you a tuition teacher?",
         ):
             with self.subTest(query=query):
                 result = self.ranker.rank([profession], query)
                 self.assertEqual([item.memory_id for item in result], [1])
+                self.assertGreater(result[0].relevance_score, 0)
+
+        self.assertEqual(
+            self.ranker.rank([profession], "What flowers did you like?"), []
+        )
+
+    def test_query_intent_classification_is_small_and_controlled(self):
+        cases = {
+            "What was your employment?": "occupation",
+            "What did you do?": "occupation",
+            "Where were you born?": "birthplace",
+            "What grade did you study?": "education",
+            "What flowers did you like?": None,
+        }
+        for query, expected in cases.items():
+            with self.subTest(query=query):
+                self.assertEqual(
+                    self.ranker.classify_query_intent(query), expected
+                )
 
     def test_teaching_relationship_retrieves_without_implying_profession(self):
         teaching = self.item(

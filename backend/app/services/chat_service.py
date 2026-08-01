@@ -27,6 +27,7 @@ from app.services.memory.retrieval import (
     MemoryRetrievalNotFoundError,
     MemoryRetrievalService,
 )
+from app.services.memory.retrieval_ranking import MemoryRelevanceRanker
 from app.services.persona_profile import PersonaProfile, PersonaProfileService
 
 
@@ -132,6 +133,9 @@ class ChatService:
         retrieval_available = True
         persona_profile = PersonaProfile()
         fidelity_plan = MemoryFidelityAnalyzer().analyze([])
+        query_intent = MemoryRelevanceRanker.classify_query_intent(
+            user_message
+        )
         legacy_id = getattr(conversation, "legacy_id", None)
         if (
             legacy_id is not None
@@ -173,6 +177,9 @@ class ChatService:
                     history,
                     user_message,
                 )
+                query_intent = MemoryRelevanceRanker.classify_query_intent(
+                    retrieval_query
+                )
                 ranked = self._memory_retrieval.search_approved(
                     db,
                     user_id=conversation.user_id,
@@ -190,6 +197,11 @@ class ChatService:
                     conversation_id=conversation.conversation_id,
                     legacy_id=legacy_id,
                     retrieval_failure_category="database_error",
+                    query_intent=query_intent,
+                    approved_memory_count=None,
+                    matched_memory_count=0,
+                    selected_memory_ids=[],
+                    top_relevance_scores=[],
                 )
             except (
                 MemoryRetrievalNotFoundError,
@@ -204,6 +216,11 @@ class ChatService:
                     conversation_id=conversation.conversation_id,
                     legacy_id=legacy_id,
                     retrieval_failure_category=type(exc).__name__,
+                    query_intent=query_intent,
+                    approved_memory_count=None,
+                    matched_memory_count=0,
+                    selected_memory_ids=[],
+                    top_relevance_scores=[],
                 )
                 raise MemoryGroundingError(
                     "Approved Legacy memories could not be prepared."
@@ -226,8 +243,15 @@ class ChatService:
                     conversation_id=conversation.conversation_id,
                     legacy_id=legacy_id,
                     approved_candidate_count=ranked.approved_memory_count,
+                    approved_memory_count=ranked.approved_memory_count,
                     retrieved_memory_count=ranked.matched_memory_count,
+                    matched_memory_count=ranked.matched_memory_count,
                     selected_memory_ids=list(memory_ids),
+                    query_intent=query_intent,
+                    top_relevance_scores=[
+                        memory.relevance_score
+                        for memory in ranked.memories[:8]
+                    ],
                     grounding_context_created=grounding_context is not None,
                     provider_call_attempted=False,
                 )
@@ -258,8 +282,12 @@ class ChatService:
                 conversation_id=conversation.conversation_id,
                 legacy_id=legacy_id,
                 approved_candidate_count=0,
+                approved_memory_count=0,
                 retrieved_memory_count=0,
+                matched_memory_count=0,
                 selected_memory_ids=[],
+                query_intent=query_intent,
+                top_relevance_scores=[],
                 grounding_context_created=False,
                 provider_call_attempted=False,
             )

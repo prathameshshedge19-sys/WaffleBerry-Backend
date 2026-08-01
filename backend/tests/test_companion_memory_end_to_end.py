@@ -203,8 +203,13 @@ class CompanionMemoryEndToEndTests(unittest.IsolatedAsyncioTestCase):
             if event["event"] == "companion_provider_call"
         )
         self.assertEqual(retrieval_log["approved_candidate_count"], 1)
+        self.assertEqual(retrieval_log["approved_memory_count"], 1)
         self.assertEqual(retrieval_log["retrieved_memory_count"], 1)
+        self.assertEqual(retrieval_log["matched_memory_count"], 1)
         self.assertEqual(retrieval_log["selected_memory_ids"], [memory.memory_id])
+        self.assertEqual(retrieval_log["query_intent"], "occupation")
+        self.assertEqual(len(retrieval_log["top_relevance_scores"]), 1)
+        self.assertGreater(retrieval_log["top_relevance_scores"][0], 0)
         self.assertTrue(retrieval_log["grounding_context_created"])
         self.assertTrue(provider_log["provider_call_attempted"])
         self.assertEqual(retrieval_log["request_id"], provider_log["request_id"])

@@ -155,7 +155,7 @@ class CompanionMemoryGroundingTests(unittest.IsolatedAsyncioTestCase):
         messages = self.service(
             FakeRetrievalService(memories)
         ).prepare_ai_input(
-            fake_db(), self.conversation(), "What work did you do?"
+            fake_db(), self.conversation(), "What was your profession?"
         )
         prompt = messages[0].content
         self.assertIn("I was a tuition teacher.", prompt)
