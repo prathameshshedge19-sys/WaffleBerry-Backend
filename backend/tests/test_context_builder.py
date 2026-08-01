@@ -227,7 +227,11 @@ class ContextBuilderTests(unittest.IsolatedAsyncioTestCase):
         ]
         db = MagicMock()
         db.query.return_value = query
-        conversation = SimpleNamespace(conversation_id=7)
+        conversation = SimpleNamespace(
+            conversation_id=7,
+            user_id=11,
+            legacy_id=None,
+        )
         ai_service = CapturingAIService()
         service = ChatService(
             ai_service,
