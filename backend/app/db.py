@@ -5,10 +5,13 @@ from sqlalchemy.orm import declarative_base, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.config import get_settings
-
+from pathlib import Path
 
 settings = get_settings()
 DATABASE_URL = settings.database_url
+
+print("DATABASE_URL:", DATABASE_URL)
+print("Current working directory:", Path.cwd())
 
 engine_options = {}
 if DATABASE_URL.startswith("sqlite"):

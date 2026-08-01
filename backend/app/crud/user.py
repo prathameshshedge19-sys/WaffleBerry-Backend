@@ -31,18 +31,7 @@ class UserCRUD:
         db.add(db_user)
         db.commit()
         db.refresh(db_user)
-        print("Imported from:", evs.__file__)
-        print("Methods:", dir(evs.EmailVerificationService))
-        print(open(evs.__file__, "r").read())
-        otp = evs.EmailVerificationService.generate_otp()
-        otp_hash = evs.EmailVerificationService.hash_otp(otp)
-        print(f"Generated OTP: {otp}")
-
-        evs.EmailVerificationService.create_verification(
-            db=db,
-            user_id=db_user.user_id,
-            otp_hash=otp_hash
-        )
+       
         return db_user
     
     @staticmethod
@@ -60,7 +49,10 @@ class UserCRUD:
         password_hash = hash_password(password)
         if not hmac.compare_digest(password_hash, user.password_hash):
             return None
-
+        
+        if not user.is_verified:
+            return None
+        
         return user
     
     @staticmethod

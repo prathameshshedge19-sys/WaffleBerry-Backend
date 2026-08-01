@@ -13,6 +13,13 @@ from app.services.ai.provider_registry import validate_ai_configuration
 settings = get_settings()
 validate_ai_configuration(settings)
 
+# Import models so SQLAlchemy registers them
+from app.models.user import *
+from app.models.verification import *
+
+print("Registered tables:")
+print(list(Base.metadata.tables.keys()))
+
 # Create database tables
 Base.metadata.create_all(bind=engine)
 

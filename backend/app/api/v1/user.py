@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 
+from app.services.email_service import EmailService
 from app.services.email_verification_service import EmailVerificationService
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import StreamingResponse
@@ -16,7 +17,7 @@ from app.schemas.user import (
     UserCreate, UserLogin, UserResponse, LoginResponse, VoiceProfileCreate, VoiceProfileResponse, 
     VoiceProfileUpdate, VoiceSampleCreate, VoiceSampleResponse,
     ConversationCreate, ConversationUpdate, ConversationResponse,
-    MessageCreate, MessagePairResponse, MessageResponse, VerifyEmailRequest
+    MessageCreate, MessagePairResponse, MessageResponse, VerifyEmailRequest,ResendOTPRequest
 )
 from app.crud.user import (
     UserCRUD, VoiceProfileCRUD, VoiceSampleCRUD, ConversationCRUD, MessageCRUD
@@ -131,13 +132,41 @@ async def create_user(user: UserCreate, db: Session = Depends(get_db)):
         )
     
     db_user = UserCRUD.create_user(db, user)
+    otp = EmailVerificationService.generate_otp()
+    otp_hash = EmailVerificationService.hash_otp(otp)
+
+    EmailVerificationService.create_verification(
+        db=db,
+        user_id=db_user.user_id,
+        otp_hash=otp_hash,
+    )
+
+    await EmailService.send_otp(db_user.email, otp)
+
     return db_user
 
 
 @router.post("/login", response_model=LoginResponse)
 async def login(user: UserLogin, db: Session = Depends(get_db)):
     """Authenticate a user with an email and password."""
+
+    db_user = UserCRUD.get_user_by_email(db, user.email)
+
+    if not db_user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid email or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    if not db_user.is_verified:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Please verify your email before logging in.",
+        )
+
     authenticated_user = UserCRUD.authenticate_user(db, user.email, user.password)
+
     if not authenticated_user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -146,6 +175,7 @@ async def login(user: UserLogin, db: Session = Depends(get_db)):
         )
 
     access_token = create_access_token(authenticated_user.user_id)
+
     return {
         "access_token": access_token,
         "token_type": "bearer",
@@ -185,6 +215,33 @@ async def verify_email(
     return {
         "message": "Email verified successfully"
     }
+    
+@router.post("/resend-otp")
+async def resend_otp(
+    request: ResendOTPRequest,
+    db: Session = Depends(get_db),
+):
+    """Generate and send a new OTP."""
+
+    user = UserCRUD.get_user_by_email(db, request.email)
+
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found",
+        )
+
+    otp = EmailVerificationService.resend_otp(
+        db=db,
+        user_id=user.user_id,
+    )
+
+    await EmailService.send_otp(user.email, otp)
+
+    return {
+        "message": "OTP resent successfully"
+    }
+    
 @router.get("/me", response_model=UserResponse)
 async def read_current_user(
     current_user: User = Depends(get_current_user),

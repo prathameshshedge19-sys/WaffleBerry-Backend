@@ -31,7 +31,11 @@ class VerifyEmailRequest(BaseModel):
     email: EmailStr
     otp: str
 
+class ResendOTPRequest(BaseModel):
+    """Request body for resending OTP."""
 
+    email: EmailStr
+    
 class UserResponse(UserBase):
     """Schema for user response."""
     user_id: int

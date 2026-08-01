@@ -88,4 +88,25 @@ class EmailVerificationService:
         db.commit()
 
         return True
+    
+    @staticmethod
+    def resend_otp(db, user_id: int) -> str:
+        """Generate a new OTP and invalidate previous ones."""
+
+        db.query(Verification).filter(
+            Verification.user_id == user_id,
+            Verification.is_used == False,
+        ).update({"is_used": True})
+
+        otp = EmailVerificationService.generate_otp()
+        otp_hash = EmailVerificationService.hash_otp(otp)
+
+        EmailVerificationService.create_verification(
+            db=db,
+            user_id=user_id,
+            otp_hash=otp_hash,
+        )
+
+        return otp
+    
         
