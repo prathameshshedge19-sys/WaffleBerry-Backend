@@ -2,6 +2,8 @@
 
 import logging
 from collections import Counter
+from datetime import datetime, timezone
+from decimal import Decimal
 from time import perf_counter
 from typing import Any, Sequence
 
@@ -15,7 +17,14 @@ from app.crud.memory import (
     StorySessionCRUD,
 )
 from app.crud.user import MessageCRUD
-from app.models.memory import Memory, StoryMessage, StorySession
+from app.models.memory import (
+    LegacyStatus,
+    Memory,
+    MemoryReviewStatus,
+    StoryMessage,
+    StorySession,
+    StorySessionStatus,
+)
 from app.models.user import Conversation, Message
 from app.services.memory.extractor import MemoryExtractionService
 from app.services.memory.fingerprint import build_memory_fingerprint
@@ -41,6 +50,8 @@ from app.services.memory.validation_contracts import MemoryValidationStatus
 
 
 logger = logging.getLogger(__name__)
+
+GUIDED_STORY_AUTO_APPROVAL_CONFIDENCE = Decimal("0.85")
 
 
 class MemoryStoragePipeline:
@@ -104,8 +115,10 @@ class MemoryStoragePipeline:
             db=db,
             user_id=user_id,
             legacy_id=legacy_id,
+            legacy_status=legacy.status,
             source_type=MemoryPipelineSourceType.STORY_SESSION,
             source_id=story_session_id,
+            story_session=story_session,
             candidates=candidates,
             source_records=self._story_source_records(
                 legacy_id, story_session_id, messages
@@ -153,8 +166,10 @@ class MemoryStoragePipeline:
             db=db,
             user_id=user_id,
             legacy_id=legacy_id,
+            legacy_status=legacy.status,
             source_type=MemoryPipelineSourceType.CONVERSATION,
             source_id=conversation_id,
+            story_session=None,
             candidates=candidates,
             source_records=self._conversation_source_records(
                 legacy_id, conversation_id, messages
@@ -168,8 +183,10 @@ class MemoryStoragePipeline:
         db: Session,
         user_id: int,
         legacy_id: int,
+        legacy_status: LegacyStatus,
         source_type: MemoryPipelineSourceType,
         source_id: int,
+        story_session: StorySession | None,
         candidates: Sequence,
         source_records: list[ProvenanceSourceRecord],
         started: float,
@@ -231,7 +248,11 @@ class MemoryStoragePipeline:
                 report.candidates_accepted_for_persistence += 1
                 self._persist_result(
                     db=db,
+                    user_id=user_id,
                     legacy_id=legacy_id,
+                    legacy_status=legacy_status,
+                    source_type=source_type,
+                    story_session=story_session,
                     result=result,
                     item=item,
                     report=report,
@@ -265,7 +286,11 @@ class MemoryStoragePipeline:
         self,
         *,
         db: Session,
+        user_id: int,
         legacy_id: int,
+        legacy_status: LegacyStatus,
+        source_type: MemoryPipelineSourceType,
+        story_session: StorySession | None,
         result,
         item: MemoryPipelineItem,
         report: MemoryStorageReport,
@@ -331,6 +356,17 @@ class MemoryStoragePipeline:
                             related_id,
                             "possible_enrichment",
                         )
+                if self._should_auto_approve(
+                    memory=memory,
+                    user_id=user_id,
+                    legacy_status=legacy_status,
+                    source_type=source_type,
+                    story_session=story_session,
+                    validation_status=result.status,
+                ):
+                    memory.review_status = MemoryReviewStatus.APPROVED
+                    memory.reviewed_at = datetime.now(timezone.utc)
+                    memory.reviewed_by_user_id = user_id
             db.commit()
             db.refresh(memory)
         except IntegrityError:
@@ -375,6 +411,35 @@ class MemoryStoragePipeline:
             report.possible_enrichments_persisted += 1
         elif result.status == MemoryValidationStatus.CONTRADICTION:
             report.contradictions_persisted += 1
+
+    @staticmethod
+    def _should_auto_approve(
+        *,
+        memory: Memory,
+        user_id: int,
+        legacy_status: LegacyStatus,
+        source_type: MemoryPipelineSourceType,
+        story_session: StorySession | None,
+        validation_status: MemoryValidationStatus,
+    ) -> bool:
+        return (
+            source_type == MemoryPipelineSourceType.STORY_SESSION
+            and story_session is not None
+            and story_session.status == StorySessionStatus.COMPLETED
+            and story_session.created_by_user_id == user_id
+            and legacy_status == LegacyStatus.ACTIVE
+            and validation_status == MemoryValidationStatus.ACCEPTED
+            and memory.review_status == MemoryReviewStatus.CANDIDATE
+            and memory.contradiction_group_id is None
+            and not (
+                isinstance(memory.uncertainty_note, str)
+                and memory.uncertainty_note.strip()
+            )
+            and memory.extraction_confidence is not None
+            and memory.extraction_confidence
+            >= GUIDED_STORY_AUTO_APPROVAL_CONFIDENCE
+            and memory.superseded_by_memory_id is None
+        )
 
     @staticmethod
     def _record_persistence_error(

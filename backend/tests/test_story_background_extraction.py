@@ -316,9 +316,10 @@ class StoryBackgroundExtractionTests(unittest.TestCase):
             "completed",
         )
 
-    def test_26_background_memories_remain_candidates(self):
+    def test_26_background_pipeline_applies_auto_approval_rules(self):
         source = inspect.getsource(MemoryStoragePipeline)
-        self.assertNotIn("MemoryReviewStatus.APPROVED", source)
+        self.assertIn("_should_auto_approve", source)
+        self.assertIn("MemoryReviewStatus.APPROVED", source)
 
     def test_27_companion_chat_is_not_given_approved_memory(self):
         source = inspect.getsource(story_memory)

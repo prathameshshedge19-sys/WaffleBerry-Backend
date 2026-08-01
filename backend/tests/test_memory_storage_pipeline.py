@@ -1,6 +1,7 @@
 """Persistence integration tests for the Phase 6.5.5 storage pipeline."""
 
 import unittest
+from datetime import datetime, timezone
 from decimal import Decimal
 from unittest.mock import patch
 
@@ -13,6 +14,7 @@ from app.crud.memory import MemoryCRUD
 from app.db import Base
 from app.models.memory import (
     Legacy,
+    LegacyStatus,
     Memory,
     MemoryContradictionGroup,
     MemoryLink,
@@ -22,6 +24,7 @@ from app.models.memory import (
     StoryMessage,
     StoryMessageRole,
     StorySession,
+    StorySessionStatus,
 )
 from app.models.user import Conversation, Message, MessageRole, User
 from app.schemas.memory import (
@@ -116,6 +119,7 @@ class MemoryStoragePipelineTests(unittest.IsolatedAsyncioTestCase):
         details=None,
         participants=True,
         confidence="0.910",
+        uncertainty_note=None,
     ):
         source = message or self.user_story_message
         return MemoryCandidateCreate(
@@ -126,6 +130,7 @@ class MemoryStoragePipelineTests(unittest.IsolatedAsyncioTestCase):
             details=details or MemoryDetails(),
             importance=5,
             extraction_confidence=Decimal(confidence),
+            uncertainty_note=uncertainty_note,
             participants=(
                 [
                     MemoryParticipantCreate(
@@ -164,10 +169,101 @@ class MemoryStoragePipelineTests(unittest.IsolatedAsyncioTestCase):
             story_session_id=self.story.story_session_id,
         )
 
+    def complete_story(self):
+        self.story.status = StorySessionStatus.COMPLETED
+        self.story.completed_at = datetime.now(timezone.utc)
+        self.db.commit()
+
     async def test_accepted_candidate_is_persisted_as_candidate(self):
         report = await self.run_story([self.candidate()])
         memory = self.db.get(Memory, report.created_memory_ids[0])
         self.assertEqual(memory.review_status, MemoryReviewStatus.CANDIDATE)
+
+    async def test_completed_story_high_confidence_candidate_is_approved(self):
+        self.complete_story()
+        report = await self.run_story([self.candidate(confidence="0.850")])
+        memory = self.db.get(Memory, report.created_memory_ids[0])
+        self.assertEqual(memory.review_status, MemoryReviewStatus.APPROVED)
+        self.assertIsNotNone(memory.reviewed_at)
+        self.assertEqual(memory.reviewed_by_user_id, self.user.user_id)
+
+    async def test_completed_story_low_confidence_candidate_stays_pending(self):
+        self.complete_story()
+        report = await self.run_story([self.candidate(confidence="0.849")])
+        memory = self.db.get(Memory, report.created_memory_ids[0])
+        self.assertEqual(memory.review_status, MemoryReviewStatus.CANDIDATE)
+        self.assertIsNone(memory.reviewed_at)
+
+    async def test_completed_story_uncertain_candidate_stays_pending(self):
+        self.complete_story()
+        report = await self.run_story([
+            self.candidate(uncertainty_note="The year may be approximate.")
+        ])
+        memory = self.db.get(Memory, report.created_memory_ids[0])
+        self.assertEqual(memory.review_status, MemoryReviewStatus.CANDIDATE)
+        self.assertIsNone(memory.reviewed_by_user_id)
+
+    async def test_story_created_by_another_user_stays_pending(self):
+        self.complete_story()
+        self.story.created_by_user_id = self.other_user.user_id
+        self.db.commit()
+        report = await self.run_story([self.candidate()])
+        memory = self.db.get(Memory, report.created_memory_ids[0])
+        self.assertEqual(memory.review_status, MemoryReviewStatus.CANDIDATE)
+
+    async def test_archived_legacy_story_stays_pending(self):
+        self.complete_story()
+        self.legacy.status = LegacyStatus.ARCHIVED
+        self.db.commit()
+        report = await self.run_story([self.candidate()])
+        memory = self.db.get(Memory, report.created_memory_ids[0])
+        self.assertEqual(memory.review_status, MemoryReviewStatus.CANDIDATE)
+
+    async def test_conversation_candidate_stays_pending(self):
+        conversation = Conversation(
+            user_id=self.user.user_id,
+            legacy_id=self.legacy.legacy_id,
+            title="Conversation source",
+        )
+        self.db.add(conversation)
+        self.db.flush()
+        message = Message(
+            conversation_id=conversation.conversation_id,
+            role=MessageRole.USER,
+            content=self.user_story_message.content,
+        )
+        self.db.add(message)
+        self.db.commit()
+        candidate = self.candidate().model_copy(update={
+            "provenance": [MemoryProvenanceCreate(
+                source_type="conversation",
+                conversation_id=conversation.conversation_id,
+                message_id=message.message_id,
+                speaker="user",
+                excerpt="I was born in Pune in 1968",
+            )]
+        })
+        report = await MemoryStoragePipeline(
+            FakeExtractionService([candidate])
+        ).process_conversation(
+            self.db,
+            user_id=self.user.user_id,
+            legacy_id=self.legacy.legacy_id,
+            conversation_id=conversation.conversation_id,
+        )
+        memory = self.db.get(Memory, report.created_memory_ids[0])
+        self.assertEqual(memory.review_status, MemoryReviewStatus.CANDIDATE)
+
+    async def test_retry_does_not_repeat_auto_approval(self):
+        self.complete_story()
+        first = await self.run_story([self.candidate()])
+        memory = self.db.get(Memory, first.created_memory_ids[0])
+        reviewed_at = memory.reviewed_at
+        second = await self.run_story([self.candidate()])
+        self.db.refresh(memory)
+        self.assertEqual(second.memories_created, 0)
+        self.assertEqual(self.db.query(Memory).count(), 1)
+        self.assertEqual(memory.reviewed_at, reviewed_at)
 
     async def test_memory_and_provenance_are_persisted_together(self):
         report = await self.run_story([self.candidate()])
@@ -208,6 +304,7 @@ class MemoryStoragePipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(report.insufficient_candidates_skipped, 1)
 
     async def test_contradiction_preserves_both_claims(self):
+        self.complete_story()
         details_1968 = MemoryDetails(
             temporal_references=[
                 TemporalReference(
@@ -246,6 +343,9 @@ class MemoryStoragePipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             memories[0].contradiction_group_id,
             memories[1].contradiction_group_id,
+        )
+        self.assertEqual(
+            memories[1].review_status, MemoryReviewStatus.CANDIDATE
         )
 
     async def test_contradiction_group_is_reused(self):

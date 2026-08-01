@@ -22,7 +22,6 @@ from app.services.memory.background_extraction import StoryExtractionService
 from app.services.memory.extractor import MemoryExtractionService
 from app.services.memory.grounding import CompanionMemoryGrounding
 from app.services.memory.retrieval import MemoryRetrievalService
-from app.services.memory.review import MemoryReviewService
 from app.services.memory.storage_pipeline import MemoryStoragePipeline
 
 
@@ -140,18 +139,11 @@ class CompanionMemoryEndToEndTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(report.memories_created, 1)
         memory = self.db.get(Memory, report.created_memory_ids[0])
         self.assertEqual(memory.legacy_id, legacy.legacy_id)
-        self.assertEqual(memory.review_status, MemoryReviewStatus.CANDIDATE)
-
-        reviewed = MemoryReviewService().approve(
-            self.db,
-            user_id=owner.user_id,
-            legacy_id=legacy.legacy_id,
-            memory_id=memory.memory_id,
-            expected_updated_at=memory.updated_at,
-        )
+        self.assertEqual(memory.review_status, MemoryReviewStatus.APPROVED)
+        self.assertIsNotNone(memory.reviewed_at)
+        self.assertEqual(memory.reviewed_by_user_id, owner.user_id)
         self.db.expire_all()
         persisted = self.db.get(Memory, memory.memory_id)
-        self.assertEqual(reviewed.review_status, MemoryReviewStatus.APPROVED)
         self.assertEqual(persisted.review_status, MemoryReviewStatus.APPROVED)
 
         other = Memory(
