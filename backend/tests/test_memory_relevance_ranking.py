@@ -45,6 +45,8 @@ class MemoryRelevanceRankerTests(unittest.TestCase):
         updated_at=None,
         memory_type=MemoryType.ATOMIC,
         semantic_attributes=None,
+        uncertainty_note=None,
+        contradiction_group_id=None,
     ):
         return ApprovedMemoryRetrievalItem(
             memory_id=memory_id,
@@ -59,6 +61,8 @@ class MemoryRelevanceRankerTests(unittest.TestCase):
             ),
             importance=importance,
             extraction_confidence=Decimal("0.8"),
+            uncertainty_note=uncertainty_note,
+            contradiction_group_id=contradiction_group_id,
             created_at=self.now,
             updated_at=updated_at or self.now,
         )
@@ -179,6 +183,20 @@ class MemoryRelevanceRankerTests(unittest.TestCase):
         self.assertEqual({item.memory_type for item in result}, {
             MemoryType.ATOMIC, MemoryType.NARRATIVE
         })
+
+    def test_internal_uncertainty_and_conflict_metadata_survive_ranking(self):
+        memory = self.item(
+            1,
+            title="Marriage year",
+            summary="We may have married in 2002.",
+            uncertainty_note="The source was approximate.",
+            contradiction_group_id=9,
+        )
+        ranked = self.ranker.rank([memory], "married 2002")[0]
+        self.assertEqual(ranked.uncertainty_note, "The source was approximate.")
+        self.assertEqual(ranked.contradiction_group_id, 9)
+        self.assertNotIn("uncertainty_note", ranked.model_dump())
+        self.assertNotIn("contradiction_group_id", ranked.model_dump())
 
     def test_importance_is_only_a_tie_breaker(self):
         relevant_low = self.item(1, title="Jasmine tea", importance=1)

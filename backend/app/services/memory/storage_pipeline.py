@@ -51,7 +51,7 @@ from app.services.memory.validation_contracts import MemoryValidationStatus
 
 logger = logging.getLogger(__name__)
 
-GUIDED_STORY_AUTO_APPROVAL_CONFIDENCE = Decimal("0.85")
+GUIDED_STORY_AUTO_APPROVAL_CONFIDENCE = Decimal("0.40")
 
 
 class MemoryStoragePipeline:
@@ -428,13 +428,12 @@ class MemoryStoragePipeline:
             and story_session.status == StorySessionStatus.COMPLETED
             and story_session.created_by_user_id == user_id
             and legacy_status == LegacyStatus.ACTIVE
-            and validation_status == MemoryValidationStatus.ACCEPTED
+            and validation_status in {
+                MemoryValidationStatus.ACCEPTED,
+                MemoryValidationStatus.POSSIBLE_ENRICHMENT,
+                MemoryValidationStatus.CONTRADICTION,
+            }
             and memory.review_status == MemoryReviewStatus.CANDIDATE
-            and memory.contradiction_group_id is None
-            and not (
-                isinstance(memory.uncertainty_note, str)
-                and memory.uncertainty_note.strip()
-            )
             and memory.extraction_confidence is not None
             and memory.extraction_confidence
             >= GUIDED_STORY_AUTO_APPROVAL_CONFIDENCE

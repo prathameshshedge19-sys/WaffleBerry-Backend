@@ -29,9 +29,10 @@ class MemoryFidelityPlan:
         if self.has_conflict:
             return (
                 "The approved evidence for this topic has a recorded conflict. "
-                "Do not choose an account or merge incompatible details. Speak "
-                "in the first person with natural uncertainty, for example that "
-                "you remember it differently or are not certain."
+                "State the conflicting supported details. Do not choose an "
+                "account or merge incompatible details. Speak in the first "
+                "person with natural uncertainty and say that you are not "
+                "certain which account is correct."
             )
         if self.support_level == RetrievalSupportLevel.LOW:
             return (

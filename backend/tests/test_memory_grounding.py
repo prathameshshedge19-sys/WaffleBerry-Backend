@@ -69,6 +69,8 @@ def ranked_memory(
     summary="Mother's name is Anita.",
     category="personal_detail",
     memory_type=MemoryType.ATOMIC,
+    uncertainty_note=None,
+    contradiction_group_id=None,
 ):
     now = datetime(2026, 7, 31, tzinfo=timezone.utc)
     return RankedApprovedMemoryItem(
@@ -79,6 +81,8 @@ def ranked_memory(
         summary=summary,
         importance=5,
         extraction_confidence=Decimal("0.9"),
+        uncertainty_note=uncertainty_note,
+        contradiction_group_id=contradiction_group_id,
         created_at=now,
         updated_at=now,
         relevance_score=0.9,
@@ -162,6 +166,39 @@ class CompanionMemoryGroundingTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("I taught my son until grade 10.", prompt)
         self.assertIn("one coherent, natural first-person answer", prompt)
 
+    def test_uncertainty_metadata_and_cautious_instruction_reach_prompt(self):
+        memory = ranked_memory(
+            summary="Mom may have lived near Pune.",
+            uncertainty_note="The user said 'I think.'",
+        )
+        prompt = self.service(FakeRetrievalService([memory])).prepare_ai_input(
+            fake_db(), self.conversation(), "Where did you live?"
+        )[0].content
+        self.assertIn("Mom may have lived near Pune.", prompt)
+        self.assertIn("The user said 'I think.'", prompt)
+        self.assertIn("preserve any qualifications", prompt)
+
+    def test_conflicting_memories_reach_prompt_with_conflict_instruction(self):
+        memories = [
+            ranked_memory(
+                1,
+                summary="We married in 2002.",
+                contradiction_group_id=7,
+            ),
+            ranked_memory(
+                2,
+                summary="We married in 2003.",
+                contradiction_group_id=7,
+            ),
+        ]
+        prompt = self.service(FakeRetrievalService(memories)).prepare_ai_input(
+            fake_db(), self.conversation(), "When did you marry?"
+        )[0].content
+        self.assertIn("We married in 2002.", prompt)
+        self.assertIn("We married in 2003.", prompt)
+        self.assertIn("conflicting accounts", prompt)
+        self.assertIn("never choose one as definite", prompt)
+
     def test_unsupported_question_keeps_uncertainty_instruction(self):
         messages = self.service(FakeRetrievalService([])).prepare_ai_input(
             fake_db(), self.conversation(), "What was your first salary?"
@@ -196,7 +233,7 @@ class CompanionMemoryGroundingTests(unittest.IsolatedAsyncioTestCase):
         self.assertLess(prompt.index("À peu près"), prompt.index("दादी"))
         self.assertIn("peut-être", prompt)
 
-    def test_internal_ranking_and_review_metadata_are_not_rendered(self):
+    def test_internal_ranking_metadata_is_not_rendered(self):
         prompt = CompanionMemoryGrounding().build_context([ranked_memory()])
         for hidden in (
             "memory_id", "relevance_score", "matched_terms",

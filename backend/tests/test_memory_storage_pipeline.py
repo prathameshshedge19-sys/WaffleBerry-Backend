@@ -179,29 +179,47 @@ class MemoryStoragePipelineTests(unittest.IsolatedAsyncioTestCase):
         memory = self.db.get(Memory, report.created_memory_ids[0])
         self.assertEqual(memory.review_status, MemoryReviewStatus.CANDIDATE)
 
-    async def test_completed_story_high_confidence_candidate_is_approved(self):
+    async def test_completed_story_threshold_candidate_is_approved(self):
         self.complete_story()
-        report = await self.run_story([self.candidate(confidence="0.850")])
+        report = await self.run_story([self.candidate(confidence="0.400")])
         memory = self.db.get(Memory, report.created_memory_ids[0])
         self.assertEqual(memory.review_status, MemoryReviewStatus.APPROVED)
         self.assertIsNotNone(memory.reviewed_at)
         self.assertEqual(memory.reviewed_by_user_id, self.user.user_id)
 
-    async def test_completed_story_low_confidence_candidate_stays_pending(self):
+    async def test_completed_story_below_threshold_candidate_stays_pending(self):
         self.complete_story()
-        report = await self.run_story([self.candidate(confidence="0.849")])
+        report = await self.run_story([self.candidate(confidence="0.399")])
         memory = self.db.get(Memory, report.created_memory_ids[0])
         self.assertEqual(memory.review_status, MemoryReviewStatus.CANDIDATE)
         self.assertIsNone(memory.reviewed_at)
 
-    async def test_completed_story_uncertain_candidate_stays_pending(self):
+    async def test_completed_story_uncertain_candidate_is_approved_and_preserved(self):
         self.complete_story()
         report = await self.run_story([
             self.candidate(uncertainty_note="The year may be approximate.")
         ])
         memory = self.db.get(Memory, report.created_memory_ids[0])
-        self.assertEqual(memory.review_status, MemoryReviewStatus.CANDIDATE)
-        self.assertIsNone(memory.reviewed_by_user_id)
+        self.assertEqual(memory.review_status, MemoryReviewStatus.APPROVED)
+        self.assertEqual(memory.uncertainty_note, "The year may be approximate.")
+        self.assertEqual(memory.reviewed_by_user_id, self.user.user_id)
+
+    async def test_pronoun_resolved_memory_is_approved(self):
+        self.complete_story()
+        report = await self.run_story([
+            self.candidate(
+                summary="Makarand used to teach Mom maths.",
+                excerpt="taught mathematics",
+                confidence="0.930",
+                uncertainty_note=(
+                    "Makarand is resolved from the immediately preceding "
+                    "Story context."
+                ),
+            )
+        ])
+        memory = self.db.get(Memory, report.created_memory_ids[0])
+        self.assertEqual(memory.review_status, MemoryReviewStatus.APPROVED)
+        self.assertIn("resolved", memory.uncertainty_note)
 
     async def test_story_created_by_another_user_stays_pending(self):
         self.complete_story()
@@ -344,9 +362,8 @@ class MemoryStoragePipelineTests(unittest.IsolatedAsyncioTestCase):
             memories[0].contradiction_group_id,
             memories[1].contradiction_group_id,
         )
-        self.assertEqual(
-            memories[1].review_status, MemoryReviewStatus.CANDIDATE
-        )
+        self.assertEqual(memories[0].review_status, MemoryReviewStatus.APPROVED)
+        self.assertEqual(memories[1].review_status, MemoryReviewStatus.APPROVED)
 
     async def test_contradiction_group_is_reused(self):
         await self.test_contradiction_preserves_both_claims()

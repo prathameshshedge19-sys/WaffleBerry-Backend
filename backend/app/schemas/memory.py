@@ -556,6 +556,8 @@ class ApprovedMemoryRetrievalItem(BaseModel):
         ge=Decimal("0"),
         le=Decimal("1"),
     )
+    uncertainty_note: str | None = Field(default=None, exclude=True)
+    contradiction_group_id: int | None = Field(default=None, exclude=True)
     created_at: datetime
     updated_at: datetime
 

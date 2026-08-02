@@ -197,6 +197,8 @@ class MemoryRelevanceRanker:
             ranked.append(
                 RankedApprovedMemoryItem(
                     **memory.model_dump(),
+                    uncertainty_note=memory.uncertainty_note,
+                    contradiction_group_id=memory.contradiction_group_id,
                     relevance_score=round(score, 6),
                     matched_terms=matched_terms,
                 )
