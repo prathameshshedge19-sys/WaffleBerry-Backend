@@ -36,6 +36,11 @@ from app.schemas.memory import (
 )
 from app.services.memory.storage_exceptions import MemorySourceError
 from app.services.memory.storage_pipeline import MemoryStoragePipeline
+from app.services.memory.validation_contracts import (
+    MemoryValidationAction,
+    MemoryValidationResult,
+    MemoryValidationStatus,
+)
 
 
 class FakeExtractionService:
@@ -48,6 +53,17 @@ class FakeExtractionService:
     async def extract_conversation(self, legacy, conversation, messages):
         return list(self.candidates)
 
+
+class PossibleDuplicateValidationService:
+    def validate_candidate(self, candidate, **kwargs):
+        del kwargs
+        return MemoryValidationResult(
+            status=MemoryValidationStatus.POSSIBLE_DUPLICATE,
+            recommended_action=MemoryValidationAction.REVIEW_LINK,
+            explanation="Similar but not an exact duplicate.",
+            validation_confidence=Decimal("0.700"),
+            normalized_candidate=candidate,
+        )
 
 class MemoryStoragePipelineTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
@@ -187,12 +203,13 @@ class MemoryStoragePipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(memory.reviewed_at)
         self.assertEqual(memory.reviewed_by_user_id, self.user.user_id)
 
-    async def test_completed_story_below_threshold_candidate_stays_pending(self):
+    async def test_completed_story_low_confidence_candidate_is_approved(self):
         self.complete_story()
-        report = await self.run_story([self.candidate(confidence="0.399")])
+        report = await self.run_story([self.candidate(confidence="0.010")])
         memory = self.db.get(Memory, report.created_memory_ids[0])
-        self.assertEqual(memory.review_status, MemoryReviewStatus.CANDIDATE)
-        self.assertIsNone(memory.reviewed_at)
+        self.assertEqual(memory.review_status, MemoryReviewStatus.APPROVED)
+        self.assertEqual(memory.extraction_confidence, Decimal("0.010"))
+        self.assertIsNotNone(memory.reviewed_at)
 
     async def test_completed_story_uncertain_candidate_is_approved_and_preserved(self):
         self.complete_story()
@@ -203,6 +220,13 @@ class MemoryStoragePipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(memory.review_status, MemoryReviewStatus.APPROVED)
         self.assertEqual(memory.uncertainty_note, "The year may be approximate.")
         self.assertEqual(memory.reviewed_by_user_id, self.user.user_id)
+
+    async def test_completed_story_high_confidence_candidate_is_approved(self):
+        self.complete_story()
+        report = await self.run_story([self.candidate(confidence="0.950")])
+        memory = self.db.get(Memory, report.created_memory_ids[0])
+        self.assertEqual(memory.review_status, MemoryReviewStatus.APPROVED)
+        self.assertEqual(memory.extraction_confidence, Decimal("0.950"))
 
     async def test_pronoun_resolved_memory_is_approved(self):
         self.complete_story()
@@ -295,6 +319,21 @@ class MemoryStoragePipelineTests(unittest.IsolatedAsyncioTestCase):
         report = await self.run_story([self.candidate()])
         self.assertEqual(report.duplicates_skipped, 1)
         self.assertEqual(self.db.query(Memory).count(), 1)
+
+    async def test_completed_story_possible_duplicate_is_persisted(self):
+        self.complete_story()
+        report = await MemoryStoragePipeline(
+            FakeExtractionService([self.candidate()]),
+            validation_service=PossibleDuplicateValidationService(),
+        ).process_story_session(
+            self.db,
+            user_id=self.user.user_id,
+            legacy_id=self.legacy.legacy_id,
+            story_session_id=self.story.story_session_id,
+        )
+        memory = self.db.get(Memory, report.created_memory_ids[0])
+        self.assertEqual(report.memories_created, 1)
+        self.assertEqual(memory.review_status, MemoryReviewStatus.APPROVED)
 
     async def test_reprocessing_source_is_idempotent(self):
         first = await self.run_story([self.candidate()])

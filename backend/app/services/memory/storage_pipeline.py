@@ -3,7 +3,6 @@
 import logging
 from collections import Counter
 from datetime import datetime, timezone
-from decimal import Decimal
 from time import perf_counter
 from typing import Any, Sequence
 
@@ -50,9 +49,6 @@ from app.services.memory.validation_contracts import MemoryValidationStatus
 
 
 logger = logging.getLogger(__name__)
-
-GUIDED_STORY_AUTO_APPROVAL_CONFIDENCE = Decimal("0.40")
-
 
 class MemoryStoragePipeline:
     """Extract, validate, and atomically persist each eligible candidate."""
@@ -118,6 +114,7 @@ class MemoryStoragePipeline:
             legacy_status=legacy.status,
             source_type=MemoryPipelineSourceType.STORY_SESSION,
             source_id=story_session_id,
+            extraction_run_id=(metadata or {}).get("extraction_run_id"),
             story_session=story_session,
             candidates=candidates,
             source_records=self._story_source_records(
@@ -169,6 +166,7 @@ class MemoryStoragePipeline:
             legacy_status=legacy.status,
             source_type=MemoryPipelineSourceType.CONVERSATION,
             source_id=conversation_id,
+            extraction_run_id=None,
             story_session=None,
             candidates=candidates,
             source_records=self._conversation_source_records(
@@ -186,6 +184,7 @@ class MemoryStoragePipeline:
         legacy_status: LegacyStatus,
         source_type: MemoryPipelineSourceType,
         source_id: int,
+        extraction_run_id: int | None,
         story_session: StorySession | None,
         candidates: Sequence,
         source_records: list[ProvenanceSourceRecord],
@@ -234,7 +233,10 @@ class MemoryStoragePipeline:
 
             if status == MemoryValidationStatus.DUPLICATE:
                 report.duplicates_skipped += 1
-            elif status == MemoryValidationStatus.POSSIBLE_DUPLICATE:
+            elif (
+                status == MemoryValidationStatus.POSSIBLE_DUPLICATE
+                and source_type != MemoryPipelineSourceType.STORY_SESSION
+            ):
                 report.possible_duplicates_skipped += 1
             elif status == MemoryValidationStatus.INVALID:
                 report.invalid_candidates_skipped += 1
@@ -243,6 +245,7 @@ class MemoryStoragePipeline:
             elif status in {
                 MemoryValidationStatus.ACCEPTED,
                 MemoryValidationStatus.POSSIBLE_ENRICHMENT,
+                MemoryValidationStatus.POSSIBLE_DUPLICATE,
                 MemoryValidationStatus.CONTRADICTION,
             }:
                 report.candidates_accepted_for_persistence += 1
@@ -268,6 +271,7 @@ class MemoryStoragePipeline:
             "memory_storage_pipeline_complete",
             extra={
                 "legacy_id": legacy_id,
+                "extraction_run_id": extraction_run_id,
                 "source_type": source_type.value,
                 "source_id": source_id,
                 "candidates_extracted": report.candidates_extracted,
@@ -431,12 +435,10 @@ class MemoryStoragePipeline:
             and validation_status in {
                 MemoryValidationStatus.ACCEPTED,
                 MemoryValidationStatus.POSSIBLE_ENRICHMENT,
+                MemoryValidationStatus.POSSIBLE_DUPLICATE,
                 MemoryValidationStatus.CONTRADICTION,
             }
             and memory.review_status == MemoryReviewStatus.CANDIDATE
-            and memory.extraction_confidence is not None
-            and memory.extraction_confidence
-            >= GUIDED_STORY_AUTO_APPROVAL_CONFIDENCE
             and memory.superseded_by_memory_id is None
         )
 

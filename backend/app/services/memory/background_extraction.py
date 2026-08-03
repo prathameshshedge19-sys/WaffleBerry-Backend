@@ -229,6 +229,18 @@ async def execute_story_extraction(
             run = db.get(MemoryExtractionRun, extraction_run_id)
             run.status = MemoryExtractionRunStatus.FAILED
             run.last_error_code = _safe_error_code(exc)
+            logger.error(
+                "story_memory_extraction_failed",
+                extra={
+                    "extraction_run_id": extraction_run_id,
+                    "legacy_id": legacy_id,
+                    "story_session_id": story_session_id,
+                    "exception_type": type(exc).__name__,
+                    "chained_cause_type": _root_cause_type(exc),
+                    "validation_field_paths": [],
+                    "validation_error_types": [],
+                },
+            )
         run.completed_at = datetime.now(timezone.utc)
         db.commit()
         logger.info(
@@ -250,13 +262,29 @@ async def execute_story_extraction(
 
 
 def _safe_error_code(exc: Exception) -> str:
-    name = type(exc).__name__.casefold()
-    if "ownership" in name or "crosslegacy" in name or "source" in name:
+    names = " ".join(_exception_chain_types(exc)).casefold()
+    if "ownership" in names or "crosslegacy" in names or "source" in names:
         return "invalid_source"
-    if "response" in name or "validation" in name:
+    if "response" in names or "validation" in names:
         return "invalid_extraction_response"
-    if "provider" in name or "connection" in name or "timeout" in name:
+    if "provider" in names or "connection" in names or "timeout" in names:
         return "provider_unavailable"
-    if "provenance" in name:
+    if "provenance" in names:
         return "provenance_failure"
     return "extraction_failed"
+
+
+def _exception_chain_types(exc: Exception) -> list[str]:
+    """Return exception class names only; never include private messages."""
+    names: list[str] = []
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        names.append(type(current).__name__)
+        current = current.__cause__ or current.__context__
+    return names
+
+
+def _root_cause_type(exc: Exception) -> str:
+    return _exception_chain_types(exc)[-1]

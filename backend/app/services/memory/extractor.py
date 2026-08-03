@@ -307,16 +307,37 @@ class MemoryExtractionService:
         )
         result = self._parse_response(response_text)
 
-        return [
-            self._build_candidate(
-                extracted,
-                source_type=source_type,
-                source_container_id=source_container_id,
-                chapter=chapter,
-                eligible_messages=eligible_messages,
-            )
-            for extracted in result.memories
-        ]
+        candidates = []
+        for index, extracted in enumerate(result.memories):
+            try:
+                candidates.append(
+                    self._build_candidate(
+                        extracted,
+                        source_type=source_type,
+                        source_container_id=source_container_id,
+                        chapter=chapter,
+                        eligible_messages=eligible_messages,
+                    )
+                )
+            except MemoryExtractionResponseError as exc:
+                logger.warning(
+                    "memory_extraction_candidate_skipped",
+                    extra={
+                        "candidate_index": index,
+                        "exception_type": type(exc).__name__,
+                    },
+                )
+        logger.info(
+            "memory_extraction_candidates_built",
+            extra={
+                "source_type": source_type,
+                "source_container_id": source_container_id,
+                "candidate_count": len(result.memories),
+                "persistable_candidate_count": len(candidates),
+                "skipped_candidate_count": len(result.memories) - len(candidates),
+            },
+        )
+        return candidates
 
     @staticmethod
     def _prepare_messages(
@@ -464,7 +485,9 @@ class MemoryExtractionService:
                 "Memory extraction did not provide usable source evidence."
             )
 
-        MemoryExtractionService._validate_semantic_attributes(extracted)
+        extracted = MemoryExtractionService._sanitize_semantic_attributes(
+            extracted
+        )
 
         return MemoryCandidateCreate(
             memory_type=extracted.memory_type,
@@ -482,12 +505,15 @@ class MemoryExtractionService:
         )
 
     @staticmethod
-    def _validate_semantic_attributes(extracted: ExtractedMemory) -> None:
-        """Reject semantic attributes not directly supported by evidence."""
+    def _sanitize_semantic_attributes(
+        extracted: ExtractedMemory,
+    ) -> ExtractedMemory:
+        """Null unsupported optional attributes without losing the memory."""
         attributes = extracted.details.semantic_attributes
         evidence_text = " ".join(
             evidence.excerpt for evidence in extracted.evidence
         ).casefold()
+        unsupported: set[str] = set()
         for field in (
             "profession",
             "taught_relationship",
@@ -496,24 +522,31 @@ class MemoryExtractionService:
         ):
             value = getattr(attributes, field)
             if value is not None and value.casefold() not in evidence_text:
-                raise MemoryExtractionResponseError(
-                    "Memory extraction returned an unsupported semantic "
-                    "attribute."
-                )
+                unsupported.add(field)
 
         category = attributes.occupation_category
-        if category is None or category.casefold() in evidence_text:
-            return
-        profession_tokens = set(
-            attributes.profession.casefold().split()
-            if attributes.profession is not None
-            else ()
-        )
-        if not (
-            category.casefold() == "education"
-            and profession_tokens & _EDUCATION_PROFESSION_TERMS
-        ):
-            raise MemoryExtractionResponseError(
-                "Memory extraction returned an unsupported occupation "
-                "category."
+        if category is not None and category.casefold() not in evidence_text:
+            profession_tokens = set(
+                attributes.profession.casefold().split()
+                if attributes.profession is not None
+                else ()
             )
+            if not (
+                category.casefold() == "education"
+                and profession_tokens & _EDUCATION_PROFESSION_TERMS
+                and "profession" not in unsupported
+            ):
+                unsupported.add("occupation_category")
+        if not unsupported:
+            return extracted
+        sanitized_attributes = attributes.model_copy(
+            update={field: None for field in unsupported}
+        )
+        sanitized_details = extracted.details.model_copy(
+            update={"semantic_attributes": sanitized_attributes}
+        )
+        logger.info(
+            "memory_extraction_semantic_attributes_sanitized",
+            extra={"sanitized_attribute_fields": sorted(unsupported)},
+        )
+        return extracted.model_copy(update={"details": sanitized_details})

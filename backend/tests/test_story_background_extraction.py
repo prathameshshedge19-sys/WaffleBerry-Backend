@@ -226,6 +226,19 @@ class StoryBackgroundExtractionTests(unittest.TestCase):
         )
         self.assertEqual(code, "invalid_source")
 
+    def test_wrapped_provider_failure_uses_chained_cause(self):
+        cause = type("ProviderFailure", (Exception,), {})()
+        wrapper = RuntimeError("safe wrapper")
+        wrapper.__cause__ = cause
+        self.assertEqual(
+            background_extraction._safe_error_code(wrapper),
+            "provider_unavailable",
+        )
+        self.assertEqual(
+            background_extraction._root_cause_type(wrapper),
+            "ProviderFailure",
+        )
+
     def test_18_repeated_completion_reuses_boundary_run(self):
         self.append()
         _, first = self.complete()

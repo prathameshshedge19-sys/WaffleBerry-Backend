@@ -1,0 +1,16 @@
+ssh waffleberry@89.167.14.211
+
+
+PGPASSWORD='WaffleBerry@321' psql \
+-h 127.0.0.1 \
+-U waffleberry \
+-d waffleberry
+
+
+BEGIN TRANSACTION READ ONLY;
+.
+.
+.
+.
+ROLLBACK;
+

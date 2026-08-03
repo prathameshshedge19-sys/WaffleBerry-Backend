@@ -31,9 +31,9 @@ def _migration_module():
         Path(__file__).parents[1]
         / "alembic"
         / "versions"
-        / "0006_auto_approve_guided_story_memories.py"
+        / "0007_trust_completed_guided_story_memories.py"
     )
-    spec = importlib.util.spec_from_file_location("story_backfill_0006", path)
+    spec = importlib.util.spec_from_file_location("story_backfill_0007", path)
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
     spec.loader.exec_module(module)
@@ -231,14 +231,15 @@ class GuidedStoryCandidateBackfillTests(unittest.TestCase):
                 migration.upgrade()
         self.db.expire_all()
 
-        for memory_id in (25, 26):
+        for memory_id in (25, 26, 27):
             memory = self.db.get(Memory, memory_id)
             self.assertEqual(memory.review_status, MemoryReviewStatus.APPROVED)
             self.assertIsNotNone(memory.reviewed_at)
             self.assertIsNotNone(memory.reviewed_by_user_id)
-            self.assertIn("Pronoun resolved", memory.uncertainty_note)
+            if memory_id in (25, 26):
+                self.assertIn("Pronoun resolved", memory.uncertainty_note)
         self.assertEqual(self.db.get(Memory, 25).reviewed_at, first_reviewed_at)
-        for memory_id in (27, 28, 29):
+        for memory_id in (28, 29):
             self.assertEqual(
                 self.db.get(Memory, memory_id).review_status,
                 MemoryReviewStatus.CANDIDATE,

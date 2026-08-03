@@ -201,7 +201,7 @@ class MemoryExtractionTests(unittest.IsolatedAsyncioTestCase):
             "grade 10",
         )
 
-    async def test_teaching_evidence_does_not_establish_profession(self):
+    async def test_unsupported_optional_semantics_are_nulled(self):
         legacy, session, messages = story_fixture()
         messages[1].content = "I taught my son until grade 10."
         unsupported = atomic_output(
@@ -226,8 +226,39 @@ class MemoryExtractionTests(unittest.IsolatedAsyncioTestCase):
             FakeAIService(json.dumps({"memories": [unsupported]}))
         )
 
-        with self.assertRaises(MemoryExtractionResponseError):
-            await service.extract_story_session(legacy, session, messages)
+        candidates = await service.extract_story_session(
+            legacy, session, messages
+        )
+        attributes = candidates[0].details.semantic_attributes
+        self.assertIsNone(attributes.profession)
+        self.assertIsNone(attributes.occupation_category)
+        self.assertEqual(attributes.taught_relationship, "son")
+        self.assertEqual(attributes.education_level, "grade 10")
+
+    async def test_invalid_evidence_does_not_block_valid_candidate(self):
+        legacy, session, messages = story_fixture()
+        invalid = atomic_output(evidence=[{
+            "source_message_id": 880,
+            "excerpt": "What do you remember about home?",
+        }])
+        valid = atomic_output(title="Valid source-backed memory")
+        service = MemoryExtractionService(FakeAIService(json.dumps({
+            "memories": [invalid, valid],
+        })))
+
+        with self.assertLogs(
+            "app.services.memory.extractor", logging.WARNING
+        ) as captured:
+            candidates = await service.extract_story_session(
+                legacy, session, messages
+            )
+
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].title, "Valid source-backed memory")
+        self.assertEqual(
+            captured.records[0].exception_type,
+            "MemoryExtractionResponseError",
+        )
 
     async def test_zero_memories_is_a_valid_result(self):
         legacy, session, messages = story_fixture()
@@ -476,11 +507,7 @@ class MemoryExtractionTests(unittest.IsolatedAsyncioTestCase):
         )
 
         with self.assertRaises(MemoryExtractionResponseError):
-            await service.extract_story_session(
-                legacy,
-                session,
-                messages,
-            )
+            await service.extract_story_session(legacy, session, messages)
 
     async def test_whole_response_json_fence_is_supported(self):
         legacy, session, messages = story_fixture()
@@ -586,11 +613,7 @@ class MemoryExtractionTests(unittest.IsolatedAsyncioTestCase):
         )
 
         with self.assertRaises(MemoryExtractionResponseError):
-            await service.extract_story_session(
-                legacy,
-                session,
-                messages,
-            )
+            await service.extract_story_session(legacy, session, messages)
 
     async def test_unknown_or_assistant_evidence_is_rejected(self):
         legacy, session, messages = story_fixture()
@@ -606,12 +629,10 @@ class MemoryExtractionTests(unittest.IsolatedAsyncioTestCase):
             FakeAIService(json.dumps({"memories": [unknown]}))
         )
 
-        with self.assertRaises(MemoryExtractionResponseError):
-            await service.extract_story_session(
-                legacy,
-                session,
-                messages,
-            )
+        self.assertEqual(
+            await service.extract_story_session(legacy, session, messages),
+            [],
+        )
 
     async def test_non_verbatim_evidence_is_rejected(self):
         legacy, session, messages = story_fixture()
@@ -627,12 +648,10 @@ class MemoryExtractionTests(unittest.IsolatedAsyncioTestCase):
             FakeAIService(json.dumps({"memories": [paraphrased]}))
         )
 
-        with self.assertRaises(MemoryExtractionResponseError):
-            await service.extract_story_session(
-                legacy,
-                session,
-                messages,
-            )
+        self.assertEqual(
+            await service.extract_story_session(legacy, session, messages),
+            [],
+        )
 
     async def test_cross_legacy_source_is_rejected_before_ai_call(self):
         legacy, session, messages = story_fixture()
