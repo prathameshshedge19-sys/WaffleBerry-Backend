@@ -92,9 +92,8 @@ class TranscriptionService:
         self._provider = provider
         self._model = normalized_model
 
-    async def transcribe(self, data: bytes, content_type: str | None) -> str:
-        """Validate and transcribe one in-memory upload, then release it."""
-        audio = validate_audio_upload(data, content_type)
+    async def transcribe(self, audio: ValidatedAudio) -> str:
+        """Transcribe one validated in-memory upload, then release it."""
         started_at = perf_counter()
         stream = io.BytesIO(audio.data)
         try:

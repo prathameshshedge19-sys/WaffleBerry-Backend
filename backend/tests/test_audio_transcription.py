@@ -25,8 +25,8 @@ class FakeTranscriptionService:
         self.outcome = outcome
         self.calls = []
 
-    async def transcribe(self, data, content_type):
-        self.calls.append((data, content_type))
+    async def transcribe(self, audio):
+        self.calls.append(audio)
         if isinstance(self.outcome, Exception):
             raise self.outcome
         return self.outcome
@@ -57,6 +57,7 @@ class AudioTranscriptionEndpointTests(unittest.TestCase):
         response = self.client.post("/api/v1/audio/transcribe")
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json()["detail"]["code"], "audio_missing")
+        self.assertEqual(len(self.service.calls), 0)
 
     def test_empty_file_is_rejected(self):
         response = self.client.post(
@@ -65,6 +66,7 @@ class AudioTranscriptionEndpointTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json()["detail"]["code"], "audio_empty")
+        self.assertEqual(len(self.service.calls), 0)
 
     def test_unsupported_mime_type_is_rejected(self):
         response = self.client.post(
@@ -76,6 +78,25 @@ class AudioTranscriptionEndpointTests(unittest.TestCase):
             response.json()["detail"]["code"],
             "audio_format_unsupported",
         )
+        self.assertEqual(len(self.service.calls), 0)
+
+    def test_oversized_file_is_rejected_before_service(self):
+        response = self.client.post(
+            "/api/v1/audio/transcribe",
+            files={
+                "file": (
+                    "voice.webm",
+                    b"x" * (MAX_AUDIO_UPLOAD_BYTES + 1),
+                    "audio/webm",
+                )
+            },
+        )
+        self.assertEqual(response.status_code, 413)
+        self.assertEqual(
+            response.json()["detail"]["code"],
+            "audio_too_large",
+        )
+        self.assertEqual(len(self.service.calls), 0)
 
     def test_supported_browser_formats_are_accepted(self):
         for mime_type, extension in (
@@ -96,6 +117,7 @@ class AudioTranscriptionEndpointTests(unittest.TestCase):
                 )
                 self.assertEqual(response.status_code, 200)
                 self.assertEqual(response.json(), {"text": "A remembered story."})
+                self.assertEqual(self.service.calls[-1].content_type, mime_type)
 
     def test_provider_failure_maps_to_stable_safe_error(self):
         self.service.outcome = AIProviderUnavailableError("provider secret")
@@ -156,7 +178,9 @@ class AudioTranscriptionServiceTests(unittest.IsolatedAsyncioTestCase):
             provider,
             model="configured-transcription-model",
         )
-        result = await service.transcribe(b"audio bytes", "audio/ogg")
+        result = await service.transcribe(
+            validate_audio_upload(b"audio bytes", "audio/ogg")
+        )
 
         self.assertEqual(result, "Transcript text.")
         self.assertEqual(

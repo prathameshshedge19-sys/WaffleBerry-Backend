@@ -20,6 +20,7 @@ from app.services.ai.transcription_service import (
     MAX_AUDIO_UPLOAD_BYTES,
     AudioValidationError,
     TranscriptionService,
+    validate_audio_upload,
 )
 
 
@@ -91,7 +92,11 @@ async def transcribe_audio(
 
     try:
         data = await file.read(MAX_AUDIO_UPLOAD_BYTES + 1)
-        text = await service.transcribe(data, file.content_type)
+        validated = validate_audio_upload(
+            data,
+            file.content_type,
+        )
+        text = await service.transcribe(validated)
         return AudioTranscriptionResponse(text=text)
     except AudioValidationError as exc:
         raise _safe_error(
