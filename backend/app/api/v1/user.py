@@ -611,7 +611,6 @@ async def synthesize_message_speech(
             current_user=current_user,
             conversation_id=conversation_id,
             message_id=message_id,
-            voice=options.voice,
             response_format=options.response_format,
         )
     except MessageSpeechError as exc:

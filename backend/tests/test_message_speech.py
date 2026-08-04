@@ -13,6 +13,7 @@ from app.api.v1.user import get_message_speech_service_for_request
 from app.db import Base, get_db
 from app.dependencies.auth import get_current_user
 from app.main import app
+from app.models.memory import Legacy
 from app.models.user import Conversation, Message, MessageRole, User
 from app.services.ai.exceptions import (
     AIProviderError,
@@ -24,6 +25,10 @@ from app.services.ai.provider import SPEECH_MEDIA_TYPES, SpeechResult
 from app.services.message_speech_service import (
     MessageSpeechError,
     MessageSpeechService,
+)
+from app.services.voice_profile_resolver import (
+    StandardVoiceProfile,
+    StandardVoiceResolver,
 )
 
 
@@ -37,6 +42,7 @@ class FakeSpeechService:
         *,
         text,
         voice=None,
+        standard_voice_profile=None,
         response_format=None,
         preserve_text=False,
     ):
@@ -44,6 +50,7 @@ class FakeSpeechService:
             {
                 "text": text,
                 "voice": voice,
+                "standard_voice_profile": standard_voice_profile,
                 "response_format": response_format,
                 "preserve_text": preserve_text,
             }
@@ -83,17 +90,40 @@ class MessageSpeechTestCase(unittest.TestCase):
         self.session.refresh(self.owner)
         self.session.refresh(self.other_user)
 
+        self.legacy = Legacy(
+            owner_user_id=self.owner.user_id,
+            display_name="Mother Legacy",
+            relationship="Mother",
+        )
+        self.other_legacy = Legacy(
+            owner_user_id=self.owner.user_id,
+            display_name="Father Legacy",
+            relationship="Father",
+        )
+        self.foreign_legacy = Legacy(
+            owner_user_id=self.other_user.user_id,
+            display_name="Private Legacy",
+            relationship="Father",
+        )
+        self.session.add_all(
+            [self.legacy, self.other_legacy, self.foreign_legacy]
+        )
+        self.session.commit()
+
         self.conversation = Conversation(
             user_id=self.owner.user_id,
             title="Original title",
+            legacy_id=self.legacy.legacy_id,
         )
         self.other_conversation = Conversation(
             user_id=self.owner.user_id,
             title="Other conversation",
+            legacy_id=self.other_legacy.legacy_id,
         )
         self.foreign_conversation = Conversation(
             user_id=self.other_user.user_id,
             title="Private conversation",
+            legacy_id=self.foreign_legacy.legacy_id,
         )
         self.session.add_all(
             [self.conversation, self.other_conversation, self.foreign_conversation]
@@ -130,6 +160,7 @@ class MessageSpeechTestCase(unittest.TestCase):
         self.speech = FakeSpeechService()
         self.service = MessageSpeechService(
             self.speech,
+            StandardVoiceResolver("standard_female"),
             max_text_characters=4096,
         )
         app.dependency_overrides[get_db] = lambda: self.session
@@ -274,7 +305,6 @@ class MessageSpeechEligibilityTests(MessageSpeechTestCase):
                                 current_user=self.owner,
                                 conversation_id=1,
                                 message_id=1,
-                                voice=None,
                                 response_format=None,
                             )
                         )
@@ -282,7 +312,11 @@ class MessageSpeechEligibilityTests(MessageSpeechTestCase):
         self.assertEqual(self.speech.calls, [])
 
     def test_oversized_stored_content_is_rejected_without_truncation(self):
-        service = MessageSpeechService(self.speech, max_text_characters=5)
+        service = MessageSpeechService(
+            self.speech,
+            StandardVoiceResolver("standard_female"),
+            max_text_characters=5,
+        )
         oversized = self.add_message(
             self.conversation,
             MessageRole.ASSISTANT,
@@ -310,23 +344,63 @@ class MessageSpeechEligibilityTests(MessageSpeechTestCase):
 
 
 class MessageSpeechOptionsAndResponseTests(MessageSpeechTestCase):
-    def test_options_are_forwarded_and_client_text_is_rejected(self):
+    def test_format_is_forwarded_and_client_voice_and_text_are_rejected(self):
         response = self.client.post(
             self.endpoint(),
-            json={"voice": "  nova  ", "response_format": "WAV"},
+            json={"response_format": "WAV"},
         )
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(self.speech.calls[0]["voice"], "nova")
         self.assertEqual(self.speech.calls[0]["response_format"], "wav")
 
         for payload in (
-            {"voice": "   "},
+            {"voice": None},
+            {"voice": "nova"},
             {"response_format": "ogg"},
             {"text": "replacement text"},
         ):
             with self.subTest(payload=payload):
                 response = self.client.post(self.endpoint(), json=payload)
                 self.assertEqual(response.status_code, 422)
+
+    def test_conversation_legacy_selects_the_internal_voice_profile(self):
+        response = self.client.post(self.endpoint(), json={})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            self.speech.calls[-1]["standard_voice_profile"],
+            StandardVoiceProfile.FEMALE,
+        )
+
+        response = self.client.post(
+            self.endpoint(self.other_conversation, self.other_assistant),
+            json={},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            self.speech.calls[-1]["standard_voice_profile"],
+            StandardVoiceProfile.MALE,
+        )
+
+    def test_supported_historical_relationships_and_fallback_are_resolved(self):
+        cases = (
+            ("Father", StandardVoiceProfile.MALE),
+            ("Brother", StandardVoiceProfile.MALE),
+            ("Grandfather", StandardVoiceProfile.MALE),
+            ("Mother", StandardVoiceProfile.FEMALE),
+            ("Sister", StandardVoiceProfile.FEMALE),
+            ("Grandmother", StandardVoiceProfile.FEMALE),
+            ("Partner", StandardVoiceProfile.FEMALE),
+            ("Unknown relationship", StandardVoiceProfile.FEMALE),
+        )
+        for relationship, expected in cases:
+            with self.subTest(relationship=relationship):
+                self.legacy.relationship = relationship
+                self.session.commit()
+                response = self.client.post(self.endpoint(), json={})
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(
+                    self.speech.calls[-1]["standard_voice_profile"],
+                    expected,
+                )
 
     def test_every_format_returns_safe_raw_binary(self):
         for response_format, media_type in SPEECH_MEDIA_TYPES.items():

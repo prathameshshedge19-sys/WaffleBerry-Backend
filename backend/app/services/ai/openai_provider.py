@@ -167,15 +167,21 @@ class OpenAIProvider(AIProvider):
         voice: str,
         response_format: str,
         timeout_seconds: float,
+        instructions: str | None = None,
     ) -> SpeechResult:
         """Generate speech audio in memory with the OpenAI Audio API."""
         try:
+            request = {
+                "input": text,
+                "model": model,
+                "voice": voice,
+                "response_format": response_format,
+                "timeout": timeout_seconds,
+            }
+            if instructions is not None:
+                request["instructions"] = instructions
             response = await self._client.audio.speech.create(
-                input=text,
-                model=model,
-                voice=voice,
-                response_format=response_format,
-                timeout=timeout_seconds,
+                **request,
             )
             content = getattr(response, "content", None)
         except OpenAIError as exc:

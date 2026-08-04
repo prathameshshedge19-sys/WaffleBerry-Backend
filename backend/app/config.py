@@ -55,6 +55,9 @@ class Settings(BaseSettings):
     audio_transcription_model: str = "gpt-4o-mini-transcribe"
     openai_tts_model: str = "gpt-4o-mini-tts"
     openai_tts_voice: str = "alloy"
+    openai_tts_male_voice: str = "cedar"
+    openai_tts_female_voice: str = "marin"
+    default_standard_voice_profile: str = "standard_female"
     openai_tts_format: str = "mp3"
     tts_max_text_characters: int = Field(default=4096, ge=1, le=4096)
     tts_timeout_seconds: float = Field(default=60.0, gt=0)

@@ -2,6 +2,14 @@
 
 from app.services.ai.exceptions import AIConfigurationError, AIInvalidResponseError
 from app.services.ai.provider import AIProvider, SPEECH_MEDIA_TYPES, SpeechResult
+from app.services.voice_profile_resolver import StandardVoiceProfile
+
+
+STANDARD_SPEECH_DELIVERY_INSTRUCTIONS = """Speak naturally, warmly, and conversationally.
+Use realistic pauses and gentle emotional expression.
+Avoid sounding like a narrator, announcer, or customer-service agent.
+Speak as if talking privately to a close family member.
+Do not exaggerate emotion."""
 
 
 class SpeechService:
@@ -13,6 +21,8 @@ class SpeechService:
         *,
         model: str,
         default_voice: str,
+        standard_male_voice: str,
+        standard_female_voice: str,
         default_format: str,
         max_text_characters: int,
         timeout_seconds: float,
@@ -23,6 +33,16 @@ class SpeechService:
             default_voice,
             "OPENAI_TTS_VOICE",
         )
+        self._standard_voices = {
+            StandardVoiceProfile.MALE: self._required_setting(
+                standard_male_voice,
+                "OPENAI_TTS_MALE_VOICE",
+            ),
+            StandardVoiceProfile.FEMALE: self._required_setting(
+                standard_female_voice,
+                "OPENAI_TTS_FEMALE_VOICE",
+            ),
+        }
         normalized_format = self._required_setting(
             default_format,
             "OPENAI_TTS_FORMAT",
@@ -44,6 +64,7 @@ class SpeechService:
         *,
         text: str,
         voice: str | None = None,
+        standard_voice_profile: StandardVoiceProfile | str | None = None,
         response_format: str | None = None,
         preserve_text: bool = False,
     ) -> SpeechResult:
@@ -53,11 +74,22 @@ class SpeechService:
             raise ValueError("Speech text must not be blank.")
         if len(resolved_text) > self._max_text_characters:
             raise ValueError("Speech text exceeds the configured maximum.")
-        resolved_voice = (
-            self._required_setting(voice, "voice")
-            if voice is not None
-            else self._default_voice
-        )
+        if voice is not None and standard_voice_profile is not None:
+            raise ValueError("Speech voice overrides are mutually exclusive.")
+        if standard_voice_profile is not None:
+            try:
+                profile = StandardVoiceProfile(standard_voice_profile)
+            except (TypeError, ValueError):
+                raise AIConfigurationError(
+                    "Standard voice profile is not supported."
+                ) from None
+            resolved_voice = self._standard_voices[profile]
+        else:
+            resolved_voice = (
+                self._required_setting(voice, "voice")
+                if voice is not None
+                else self._default_voice
+            )
         resolved_format = (
             response_format.strip().lower()
             if response_format is not None
@@ -72,6 +104,11 @@ class SpeechService:
             voice=resolved_voice,
             response_format=resolved_format,
             timeout_seconds=self._timeout_seconds,
+            instructions=(
+                STANDARD_SPEECH_DELIVERY_INSTRUCTIONS
+                if self._model.startswith("gpt-4o-mini-tts")
+                else None
+            ),
         )
         if not isinstance(result, SpeechResult) or not result.content:
             raise AIInvalidResponseError(

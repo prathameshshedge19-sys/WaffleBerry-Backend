@@ -55,7 +55,13 @@ class SpeechSynthesisRequest(SpeechOptions):
         return normalized
 
 
-class MessageSpeechRequest(SpeechOptions):
+class MessageSpeechRequest(BaseModel):
     """Speech options for immutable stored assistant content."""
 
     model_config = ConfigDict(extra="forbid")
+    response_format: SpeechFormat | None = None
+
+    @field_validator("response_format", mode="before")
+    @classmethod
+    def normalize_format(cls, value: object) -> object:
+        return value.strip().lower() if isinstance(value, str) else value

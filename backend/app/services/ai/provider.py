@@ -84,6 +84,7 @@ class AIProvider(ABC):
         voice: str,
         response_format: str,
         timeout_seconds: float,
+        instructions: str | None = None,
     ) -> SpeechResult:
         """Return transient speech audio without exposing provider objects."""
         raise NotImplementedError

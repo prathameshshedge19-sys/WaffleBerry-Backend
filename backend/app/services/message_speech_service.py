@@ -6,6 +6,7 @@ from app.crud.user import ConversationCRUD, MessageCRUD
 from app.models.user import MessageRole, User
 from app.services.ai.provider import SpeechResult
 from app.services.ai.speech_service import SpeechService
+from app.services.voice_profile_resolver import StandardVoiceResolver
 
 
 class MessageSpeechError(Exception):
@@ -24,10 +25,12 @@ class MessageSpeechService:
     def __init__(
         self,
         speech_service: SpeechService,
+        voice_resolver: StandardVoiceResolver,
         *,
         max_text_characters: int,
     ) -> None:
         self._speech_service = speech_service
+        self._voice_resolver = voice_resolver
         self._max_text_characters = max_text_characters
 
     async def synthesize_assistant_message(
@@ -37,7 +40,6 @@ class MessageSpeechService:
         current_user: User,
         conversation_id: int,
         message_id: int,
-        voice: str | None,
         response_format: str | None,
     ) -> SpeechResult:
         """Use stored assistant text without changing persisted chat data."""
@@ -85,11 +87,16 @@ class MessageSpeechService:
                 409,
             )
 
+        legacy = getattr(conversation, "legacy", None)
+        voice_profile = self._voice_resolver.resolve(
+            getattr(legacy, "relationship", None)
+        )
+
         # End the read-only transaction before awaiting the external provider.
         db.rollback()
         return await self._speech_service.synthesize(
             text=stored_text,
-            voice=voice,
+            standard_voice_profile=voice_profile,
             response_format=response_format,
             preserve_text=True,
         )

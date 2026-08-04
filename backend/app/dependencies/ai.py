@@ -20,6 +20,7 @@ from app.services.memory.grounding import (
 from app.services.ai.transcription_service import TranscriptionService
 from app.services.ai.speech_service import SpeechService
 from app.services.message_speech_service import MessageSpeechService
+from app.services.voice_profile_resolver import StandardVoiceResolver
 
 
 @lru_cache()
@@ -60,6 +61,8 @@ def get_speech_service() -> SpeechService:
         get_ai_provider(),
         model=settings.openai_tts_model,
         default_voice=settings.openai_tts_voice,
+        standard_male_voice=settings.openai_tts_male_voice,
+        standard_female_voice=settings.openai_tts_female_voice,
         default_format=settings.openai_tts_format,
         max_text_characters=settings.tts_max_text_characters,
         timeout_seconds=settings.tts_timeout_seconds,
@@ -72,6 +75,7 @@ def get_message_speech_service() -> MessageSpeechService:
     settings = get_settings()
     return MessageSpeechService(
         get_speech_service(),
+        StandardVoiceResolver(settings.default_standard_voice_profile),
         max_text_characters=settings.tts_max_text_characters,
     )
 
