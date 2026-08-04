@@ -41,10 +41,24 @@ class MemoryRetrievalService:
                 "Restore this Legacy before continuing."
             )
         memories = MemoryCRUD.list_approved_for_retrieval(db, legacy_id)
-        items = [
-            ApprovedMemoryRetrievalItem.model_validate(memory)
-            for memory in memories
-        ]
+        items = []
+        for memory in memories:
+            item = ApprovedMemoryRetrievalItem.model_validate(memory)
+            item.participant_names = [
+                participant.name for participant in memory.participants
+            ]
+            item.participant_relationships = [
+                participant.relationship
+                for participant in memory.participants
+                if participant.relationship
+            ]
+            item.tags = [
+                link.tag.name for link in memory.tag_links if link.tag
+            ]
+            item.source_topics = [
+                source.chapter for source in memory.provenance if source.chapter
+            ]
+            items.append(item)
         return ApprovedMemoryRetrievalResponse(
             legacy_id=legacy_id,
             approved_memory_count=len(items),

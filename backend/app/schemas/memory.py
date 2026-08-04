@@ -549,6 +549,12 @@ class ApprovedMemoryRetrievalItem(BaseModel):
     category: str
     title: str
     summary: str
+    participant_names: list[str] = Field(default_factory=list, exclude=True)
+    participant_relationships: list[str] = Field(
+        default_factory=list, exclude=True
+    )
+    tags: list[str] = Field(default_factory=list, exclude=True)
+    source_topics: list[str] = Field(default_factory=list, exclude=True)
     details: MemoryDetails | None = None
     importance: int | None = Field(default=None, ge=1, le=5)
     extraction_confidence: Decimal | None = Field(
@@ -587,6 +593,7 @@ class RankedApprovedMemoryItem(ApprovedMemoryRetrievalItem):
 
     relevance_score: float = Field(..., ge=0, le=1)
     matched_terms: list[str] = Field(default_factory=list)
+    topic_buckets: list[str] = Field(default_factory=list, exclude=True)
 
 
 class ApprovedMemorySearchResponse(BaseModel):

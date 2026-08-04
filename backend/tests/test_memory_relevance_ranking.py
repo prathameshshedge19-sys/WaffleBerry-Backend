@@ -47,6 +47,10 @@ class MemoryRelevanceRankerTests(unittest.TestCase):
         semantic_attributes=None,
         uncertainty_note=None,
         contradiction_group_id=None,
+        participant_names=None,
+        participant_relationships=None,
+        tags=None,
+        source_topics=None,
     ):
         return ApprovedMemoryRetrievalItem(
             memory_id=memory_id,
@@ -63,6 +67,10 @@ class MemoryRelevanceRankerTests(unittest.TestCase):
             extraction_confidence=Decimal("0.8"),
             uncertainty_note=uncertainty_note,
             contradiction_group_id=contradiction_group_id,
+            participant_names=participant_names or [],
+            participant_relationships=participant_relationships or [],
+            tags=tags or [],
+            source_topics=source_topics or [],
             created_at=self.now,
             updated_at=updated_at or self.now,
         )
@@ -235,6 +243,70 @@ class MemoryRelevanceRankerTests(unittest.TestCase):
             self.ranker.rank([self.item(1, summary="The old house")], "the"),
             [],
         )
+
+    def test_broad_family_query_retrieves_and_diversifies_family_buckets(self):
+        memories = [
+            self.item(1, title="Brother's games", summary="My brother played hide and seek."),
+            self.item(2, title="Brother's lessons", summary="My brother taught mathematics."),
+            self.item(3, title="My husband", summary="My husband enjoyed music."),
+            self.item(4, title="Our daughter", summary="Our daughter lived nearby."),
+            self.item(5, title="My mother", summary="My mother taught Marathi."),
+            self.item(6, title="The family dog", summary="Our dog was energetic."),
+        ]
+        result = self.ranker.rank(memories, "Tell me about our family.")
+        self.assertEqual({item.memory_id for item in result}, {1, 2, 3, 4, 5, 6})
+        first_five = result[:5]
+        covered = {bucket for item in first_five for bucket in item.topic_buckets}
+        self.assertTrue({"siblings", "spouse_partner", "children", "parents", "pets"} <= covered)
+        self.assertLess(
+            [item.memory_id for item in result].index(1),
+            [item.memory_id for item in result].index(2),
+        )
+        self.assertTrue(self.ranker.classify_query("Tell me about our family").broad)
+
+    def test_broad_parents_is_focused_and_parent_name_query_is_specific(self):
+        memories = [
+            self.item(1, title="My mother", summary="My mother was a teacher."),
+            self.item(2, title="My father", summary="My father was a farmer."),
+            self.item(3, title="Wedding year", summary="We married in 1990."),
+            self.item(4, title="School marks", summary="I earned high marks."),
+        ]
+        broad = self.ranker.rank(memories, "What do you remember about your parents?")
+        self.assertEqual([item.memory_id for item in broad], [1, 2])
+        classification = self.ranker.classify_query("What were your parents' names?")
+        self.assertFalse(classification.broad)
+        self.assertEqual([item.memory_id for item in self.ranker.rank(memories, "parents names")], [1, 2])
+
+    def test_broad_topics_cover_marriage_education_and_work(self):
+        marriage = [
+            self.item(1, title="My spouse"), self.item(2, title="Wedding year"),
+            self.item(3, title="Wedding place"), self.item(4, title="Our first meeting"),
+        ]
+        education = [
+            self.item(5, title="School"), self.item(6, title="School marks"),
+            self.item(7, title="Favourite subject"), self.item(8, title="Poems at school"),
+        ]
+        work = [self.item(9, title="My profession"), self.item(10, title="Tutoring work")]
+        self.assertEqual(len(self.ranker.rank(marriage, "Tell me about your marriage")), 4)
+        self.assertEqual(len(self.ranker.rank(education, "Tell me about school")), 4)
+        self.assertEqual(len(self.ranker.rank(work, "Tell me about your work")), 2)
+
+    def test_structured_fields_are_searchable_without_raw_story_text(self):
+        pet = self.item(
+            1, title="A lively companion", summary="Always energetic.",
+            participant_names=["Tuffy"], participant_relationships=["pet"],
+            tags=["dog"], source_topics=["Family life"],
+        )
+        self.assertEqual([x.memory_id for x in self.ranker.rank([pet], "Was Tuffy a dog?")], [1])
+
+    def test_specific_named_queries_remain_precise(self):
+        memories = [
+            self.item(1, title="Tuffy", summary="Tuffy was a Pomeranian."),
+            self.item(2, title="Makarand", summary="Makarand taught me maths."),
+            self.item(3, title="Family home", summary="We lived near Pune."),
+        ]
+        self.assertEqual([x.memory_id for x in self.ranker.rank(memories, "Was Tuffy a Pomeranian?")], [1])
+        self.assertEqual([x.memory_id for x in self.ranker.rank(memories, "What did Makarand teach?")], [2])
 
     def test_ranking_module_has_no_ai_or_network_integration(self):
         source = inspect.getsource(inspect.getmodule(MemoryRelevanceRanker))

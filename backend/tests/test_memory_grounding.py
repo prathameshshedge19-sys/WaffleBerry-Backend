@@ -166,6 +166,15 @@ class CompanionMemoryGroundingTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("I taught my son until grade 10.", prompt)
         self.assertIn("one coherent, natural first-person answer", prompt)
 
+    def test_prompt_requires_broad_synthesis_and_forbids_premature_forgetting(self):
+        prompt = self.service(FakeRetrievalService([ranked_memory()])).prepare_ai_input(
+            fake_db(), self.conversation(), "Tell me about our family"
+        )[0].content
+        self.assertIn("examine every supplied memory", prompt)
+        self.assertIn("synthesize multiple compatible memories", prompt)
+        self.assertIn("do not append generic \"I don't remember more\"", prompt)
+        self.assertIn("identify the specific remaining uncertainty", prompt)
+
     def test_uncertainty_metadata_and_cautious_instruction_reach_prompt(self):
         memory = ranked_memory(
             summary="Mom may have lived near Pune.",

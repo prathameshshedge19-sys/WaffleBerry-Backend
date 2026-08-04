@@ -133,9 +133,8 @@ class ChatService:
         retrieval_available = True
         persona_profile = PersonaProfile()
         fidelity_plan = MemoryFidelityAnalyzer().analyze([])
-        query_intent = MemoryRelevanceRanker.classify_query_intent(
-            user_message
-        )
+        query_classification = MemoryRelevanceRanker.classify_query(user_message)
+        query_intent = query_classification.intent
         legacy_id = getattr(conversation, "legacy_id", None)
         if (
             legacy_id is not None
@@ -177,9 +176,10 @@ class ChatService:
                     history,
                     user_message,
                 )
-                query_intent = MemoryRelevanceRanker.classify_query_intent(
+                query_classification = MemoryRelevanceRanker.classify_query(
                     retrieval_query
                 )
+                query_intent = query_classification.intent
                 ranked = self._memory_retrieval.search_approved(
                     db,
                     user_id=conversation.user_id,
@@ -198,6 +198,7 @@ class ChatService:
                     legacy_id=legacy_id,
                     retrieval_failure_category="database_error",
                     query_intent=query_intent,
+                    query_scope=("broad" if query_classification.broad else "specific"),
                     approved_memory_count=None,
                     matched_memory_count=0,
                     selected_memory_ids=[],
@@ -217,6 +218,7 @@ class ChatService:
                     legacy_id=legacy_id,
                     retrieval_failure_category=type(exc).__name__,
                     query_intent=query_intent,
+                    query_scope=("broad" if query_classification.broad else "specific"),
                     approved_memory_count=None,
                     matched_memory_count=0,
                     selected_memory_ids=[],
@@ -248,6 +250,15 @@ class ChatService:
                     matched_memory_count=ranked.matched_memory_count,
                     selected_memory_ids=list(memory_ids),
                     query_intent=query_intent,
+                    query_scope=("broad" if query_classification.broad else "specific"),
+                    positive_scoring_memory_count=ranked.matched_memory_count,
+                    selected_topic_buckets=list(dict.fromkeys(
+                        bucket for memory in selection.memories
+                        for bucket in memory.topic_buckets
+                    )),
+                    selected_relevance_scores=[
+                        memory.relevance_score for memory in selection.memories
+                    ],
                     top_relevance_scores=[
                         memory.relevance_score
                         for memory in ranked.memories[:8]
@@ -287,6 +298,7 @@ class ChatService:
                 matched_memory_count=0,
                 selected_memory_ids=[],
                 query_intent=query_intent,
+                query_scope=("broad" if query_classification.broad else "specific"),
                 top_relevance_scores=[],
                 grounding_context_created=False,
                 provider_call_attempted=False,
