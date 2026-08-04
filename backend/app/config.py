@@ -52,6 +52,7 @@ class Settings(BaseSettings):
     # AI settings
     ai_provider: str = "openai"
     ai_model: str = ""
+    audio_transcription_model: str = "gpt-4o-mini-transcribe"
     openai_api_key: str | None = None
     ai_connect_timeout_seconds: float = Field(default=10.0, gt=0)
     ai_read_timeout_seconds: float = Field(default=90.0, gt=0)

@@ -3,7 +3,7 @@
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from typing import Literal, Mapping, Sequence
+from typing import BinaryIO, Literal, Mapping, Sequence
 
 
 AIMessageRole = Literal["system", "user", "assistant"]
@@ -45,4 +45,15 @@ class AIProvider(ABC):
         """Stream assistant text when supported by the provider."""
         if False:
             yield ""
+        raise NotImplementedError
+
+    async def transcribe_audio(
+        self,
+        audio: BinaryIO,
+        *,
+        filename: str,
+        content_type: str,
+        model: str,
+    ) -> str:
+        """Return transcript text for one transient audio stream."""
         raise NotImplementedError

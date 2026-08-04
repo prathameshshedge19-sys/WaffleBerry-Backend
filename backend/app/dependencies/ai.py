@@ -4,6 +4,7 @@ from functools import lru_cache
 
 from app.config import get_settings
 from app.services.ai.ai_service import AIService
+from app.services.ai.provider import AIProvider
 from app.services.ai.context_builder import ContextBuilder
 from app.services.ai.provider_registry import create_ai_provider
 from app.services.ai.retry import AIRetryPolicy
@@ -16,13 +17,20 @@ from app.services.memory.grounding import (
     CompanionMemoryGrounding,
     MemoryGroundingBudget,
 )
+from app.services.ai.transcription_service import TranscriptionService
+
+
+@lru_cache()
+def get_ai_provider() -> AIProvider:
+    """Return the shared configured provider adapter."""
+    return create_ai_provider(get_settings())
 
 
 @lru_cache()
 def get_ai_service() -> AIService:
     """Return one shared provider-backed AI service for all AI modes."""
     settings = get_settings()
-    provider = create_ai_provider(settings)
+    provider = get_ai_provider()
     retry_policy = AIRetryPolicy(
         max_retries=settings.ai_retry_max_retries,
         base_delay_seconds=settings.ai_retry_base_delay_seconds,
@@ -30,6 +38,16 @@ def get_ai_service() -> AIService:
         jitter_seconds=settings.ai_retry_jitter_seconds,
     )
     return AIService(provider, retry_policy=retry_policy)
+
+
+@lru_cache()
+def get_transcription_service() -> TranscriptionService:
+    """Return transient audio transcription orchestration."""
+    settings = get_settings()
+    return TranscriptionService(
+        get_ai_provider(),
+        model=settings.audio_transcription_model,
+    )
 
 
 @lru_cache()

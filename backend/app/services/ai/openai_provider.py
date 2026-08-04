@@ -3,7 +3,7 @@
 import logging
 from collections.abc import AsyncIterator
 from collections.abc import Mapping
-from typing import NoReturn, Sequence
+from typing import BinaryIO, NoReturn, Sequence
 
 import httpx
 from openai import (
@@ -130,6 +130,32 @@ class OpenAIProvider(AIProvider):
                     )
                 )
         return assistant_text
+
+    async def transcribe_audio(
+        self,
+        audio: BinaryIO,
+        *,
+        filename: str,
+        content_type: str,
+        model: str,
+    ) -> str:
+        """Transcribe bounded in-memory audio with the OpenAI Audio API."""
+        try:
+            audio.seek(0)
+            response = await self._client.audio.transcriptions.create(
+                model=model,
+                file=(filename, audio, content_type),
+                response_format="json",
+            )
+        except OpenAIError as exc:
+            self._raise_provider_error(exc)
+
+        transcript = getattr(response, "text", None)
+        if not isinstance(transcript, str) or not transcript.strip():
+            raise AIInvalidResponseError(
+                "OpenAI returned an empty transcription."
+            )
+        return transcript.strip()
 
     @staticmethod
     def _citation_links(response: object) -> list[tuple[str, str]]:
