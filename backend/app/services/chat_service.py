@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import logging
 import json
+import re
 from uuid import uuid4
 
 from sqlalchemy.orm import Session
@@ -16,6 +17,14 @@ from app.services.ai.ai_service import AIService
 from app.services.ai.context_builder import ContextBuilder, ConversationMessage
 from app.services.ai.provider import AIMessage
 from app.services.ai.exceptions import MemoryGroundingError
+from app.services.ai.exceptions import AIProviderError
+from app.services.ai.external_knowledge import (
+    attach_external_context,
+    attach_web_failure_context,
+    ExternalKnowledgeClassifier,
+    QueryKnowledgeMode,
+)
+from app.services.ai.provider import ExternalKnowledgeMode
 from app.services.conversation_continuity import ConversationContinuity
 from app.services.memory.grounding import CompanionMemoryGrounding
 from app.services.memory.fidelity import (
@@ -52,6 +61,9 @@ class PreparedCompanionInput:
     memory_ids: tuple[int, ...] = ()
     retrieved_at: datetime | None = None
     request_id: str = ""
+    query_mode: QueryKnowledgeMode = "autobiographical_memory"
+    external_knowledge_mode: ExternalKnowledgeMode | None = None
+    external_lookup_messages: tuple[AIMessage, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -135,6 +147,7 @@ class ChatService:
         fidelity_plan = MemoryFidelityAnalyzer().analyze([])
         query_classification = MemoryRelevanceRanker.classify_query(user_message)
         query_intent = query_classification.intent
+        knowledge_plan = ExternalKnowledgeClassifier.classify(user_message)
         legacy_id = getattr(conversation, "legacy_id", None)
         if (
             legacy_id is not None
@@ -313,10 +326,22 @@ class ChatService:
                 retrieval_available=retrieval_available,
                 persona_style_profile=persona_profile.prompt_data(),
                 persona_fidelity_guidance=fidelity_plan.prompt_guidance(),
+                external_knowledge_enabled=(
+                    knowledge_plan.query_mode != "autobiographical_memory"
+                ),
             ),
             memory_ids=memory_ids,
             retrieved_at=retrieved_at,
             request_id=request_id,
+            query_mode=knowledge_plan.query_mode,
+            external_knowledge_mode=knowledge_plan.external_knowledge_mode,
+            external_lookup_messages=(
+                ExternalKnowledgeClassifier.build_public_lookup_messages(
+                    user_message
+                )
+                if knowledge_plan.web_search_requested
+                else ()
+            ),
         )
 
     async def generate_response(
@@ -347,7 +372,52 @@ class ChatService:
         )
         db.rollback()
         self._log_provider_attempt(prepared, conversation)
-        content = await self._ai_service.generate_response(prepared.messages)
+        try:
+            synthesis_messages = prepared.messages
+            if prepared.external_knowledge_mode == "web_search":
+                external_facts = await self._ai_service.generate_response(
+                    prepared.external_lookup_messages,
+                    external_knowledge_mode="web_search",
+                )
+                synthesis_messages = attach_external_context(
+                    prepared.messages,
+                    external_facts,
+                )
+                _safe_log(
+                    logging.INFO,
+                    "companion_external_knowledge_completed",
+                    request_id=prepared.request_id,
+                    query_mode=prepared.query_mode,
+                    web_search_requested=True,
+                    web_search_completed=True,
+                    memory_count_supplied=len(prepared.memory_ids),
+                    external_source_count=self._source_link_count(
+                        external_facts
+                    ),
+                    fallback_reason=None,
+                    provider_tool_exception_type=None,
+                )
+            content = await self._ai_service.generate_response(
+                synthesis_messages
+            )
+        except AIProviderError as exc:
+            if prepared.external_knowledge_mode != "web_search":
+                raise
+            _safe_log(
+                logging.WARNING,
+                "companion_external_knowledge_fallback",
+                request_id=prepared.request_id,
+                query_mode=prepared.query_mode,
+                web_search_requested=True,
+                web_search_completed=False,
+                memory_count_supplied=len(prepared.memory_ids),
+                external_source_count=0,
+                fallback_reason="provider_tool_failure",
+                provider_tool_exception_type=type(exc).__name__,
+            )
+            content = await self._ai_service.generate_response(
+                attach_web_failure_context(prepared.messages)
+            )
         return CompanionGeneration(
             content=content,
             memory_ids=prepared.memory_ids,
@@ -403,7 +473,20 @@ class ChatService:
             selected_memory_ids=list(prepared.memory_ids),
             grounding_context_created=bool(prepared.memory_ids),
             provider_call_attempted=True,
+            query_mode=prepared.query_mode,
+            web_search_requested=(
+                prepared.external_knowledge_mode == "web_search"
+            ),
+            memory_count_supplied=len(prepared.memory_ids),
+            web_search_completed=False,
+            external_source_count=0,
+            fallback_reason=None,
+            provider_tool_exception_type=None,
         )
+
+    @staticmethod
+    def _source_link_count(content: str) -> int:
+        return len(set(re.findall(r"https?://[^\s)\]]+", content)))
 
     async def _stream_with_provider_log(
         self,
@@ -411,8 +494,58 @@ class ChatService:
         conversation: Conversation,
     ) -> AsyncIterator[str]:
         self._log_provider_attempt(prepared, conversation)
-        async for chunk in self._ai_service.stream_response(prepared.messages):
-            yield chunk
+        received = False
+        try:
+            synthesis_messages = prepared.messages
+            external_facts = None
+            if prepared.external_knowledge_mode == "web_search":
+                external_facts = await self._ai_service.generate_response(
+                    prepared.external_lookup_messages,
+                    external_knowledge_mode="web_search",
+                )
+                synthesis_messages = attach_external_context(
+                    prepared.messages,
+                    external_facts,
+                )
+            async for chunk in self._ai_service.stream_response(
+                synthesis_messages
+            ):
+                received = True
+                yield chunk
+            if prepared.external_knowledge_mode == "web_search":
+                _safe_log(
+                    logging.INFO,
+                    "companion_external_knowledge_completed",
+                    request_id=prepared.request_id,
+                    query_mode=prepared.query_mode,
+                    web_search_requested=True,
+                    web_search_completed=True,
+                    memory_count_supplied=len(prepared.memory_ids),
+                    external_source_count=self._source_link_count(
+                        external_facts or ""
+                    ),
+                    fallback_reason=None,
+                    provider_tool_exception_type=None,
+                )
+        except AIProviderError as exc:
+            if received or prepared.external_knowledge_mode != "web_search":
+                raise
+            _safe_log(
+                logging.WARNING,
+                "companion_external_knowledge_fallback",
+                request_id=prepared.request_id,
+                query_mode=prepared.query_mode,
+                web_search_requested=True,
+                web_search_completed=False,
+                memory_count_supplied=len(prepared.memory_ids),
+                external_source_count=0,
+                fallback_reason="provider_tool_failure",
+                provider_tool_exception_type=type(exc).__name__,
+            )
+            async for chunk in self._ai_service.stream_response(
+                attach_web_failure_context(prepared.messages)
+            ):
+                yield chunk
 
     def stream_story_response(
         self,

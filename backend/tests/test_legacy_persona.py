@@ -591,8 +591,16 @@ class LegacyPersonaTests(unittest.IsolatedAsyncioTestCase):
         normalized = " ".join(prompt.split())
         self.assertIn("first person using I, me, and my", normalized)
         self.assertIn("Never invent, infer, embellish, or fill gaps", normalized)
-        self.assertIn("Every factual claim", normalized)
-        self.assertIn("supported by approved Legacy memory data", normalized)
+        self.assertIn("PERSONAL FACTS", normalized)
+        self.assertIn(
+            "must come only from approved Legacy memory data", normalized
+        )
+        self.assertIn("GENERAL PUBLIC FACTS", normalized)
+        self.assertIn("may come from model knowledge", normalized)
+        self.assertIn(
+            "Never phrase a public fact as a personal memory", normalized
+        )
+        self.assertNotIn("preferences, places, or dates", normalized)
         self.assertIn("I don't remember", normalized)
 
     def test_prompt_matches_profession_occupation_career_job_and_work(self):

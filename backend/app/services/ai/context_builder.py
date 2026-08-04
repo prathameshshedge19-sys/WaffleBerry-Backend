@@ -6,6 +6,7 @@ from typing import Protocol
 from app.services.ai.exceptions import AIInvalidResponseError
 from app.services.ai.prompt_builder import PromptBuilder
 from app.services.ai.provider import AIMessage, AIMessageRole
+from app.services.ai.external_knowledge import EXTERNAL_KNOWLEDGE_BOUNDARY
 
 
 class ConversationMessage(Protocol):
@@ -130,6 +131,7 @@ class ContextBuilder:
         retrieval_available: bool = True,
         persona_style_profile: dict[str, list[str]] | None = None,
         persona_fidelity_guidance: str | None = None,
+        external_knowledge_enabled: bool = False,
     ) -> list[AIMessage]:
         """Build chat context and require a valid latest user message."""
         if self._normalize_content(latest_user_message) is None:
@@ -146,6 +148,10 @@ class ContextBuilder:
             )
             if grounding_context:
                 system_prompt = f"{system_prompt}\n\n{grounding_context}"
+            if external_knowledge_enabled:
+                system_prompt = (
+                    f"{system_prompt}\n\n{EXTERNAL_KNOWLEDGE_BOUNDARY}"
+                )
             latest = self._normalize_content(latest_user_message)
             valid_history = [
                 normalized
@@ -168,6 +174,14 @@ class ContextBuilder:
                 latest_user_message,
                 grounding_context=grounding_context,
             )
+            if external_knowledge_enabled:
+                messages[0] = AIMessage(
+                    role="system",
+                    content=(
+                        f"{messages[0].content}\n\n"
+                        f"{EXTERNAL_KNOWLEDGE_BOUNDARY}"
+                    ),
+                )
         return messages
 
     def build_story_messages(

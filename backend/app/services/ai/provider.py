@@ -7,6 +7,7 @@ from typing import Literal, Mapping, Sequence
 
 
 AIMessageRole = Literal["system", "user", "assistant"]
+ExternalKnowledgeMode = Literal["web_search"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,6 +31,7 @@ class AIProvider(ABC):
         messages: Sequence[AIMessage],
         *,
         structured_response_schema: Mapping[str, object] | None = None,
+        external_knowledge_mode: ExternalKnowledgeMode | None = None,
     ) -> str:
         """Generate text, optionally constrained by a JSON Schema."""
         raise NotImplementedError
@@ -37,6 +39,8 @@ class AIProvider(ABC):
     async def stream_response(
         self,
         messages: Sequence[AIMessage],
+        *,
+        external_knowledge_mode: ExternalKnowledgeMode | None = None,
     ) -> AsyncIterator[str]:
         """Stream assistant text when supported by the provider."""
         if False:
