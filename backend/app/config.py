@@ -53,6 +53,11 @@ class Settings(BaseSettings):
     ai_provider: str = "openai"
     ai_model: str = ""
     audio_transcription_model: str = "gpt-4o-mini-transcribe"
+    openai_tts_model: str = "gpt-4o-mini-tts"
+    openai_tts_voice: str = "alloy"
+    openai_tts_format: str = "mp3"
+    tts_max_text_characters: int = Field(default=4096, ge=1, le=4096)
+    tts_timeout_seconds: float = Field(default=60.0, gt=0)
     openai_api_key: str | None = None
     ai_connect_timeout_seconds: float = Field(default=10.0, gt=0)
     ai_read_timeout_seconds: float = Field(default=90.0, gt=0)

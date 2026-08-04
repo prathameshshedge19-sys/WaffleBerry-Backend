@@ -244,6 +244,22 @@ class MessageCRUD:
     AUTO_TITLE_MAX_LENGTH = 45
 
     @staticmethod
+    def get_conversation_message(
+        db: Session,
+        conversation_id: int,
+        message_id: int,
+    ) -> Message | None:
+        """Return a message only when both scoped identifiers match."""
+        return (
+            db.query(Message)
+            .filter(
+                Message.message_id == message_id,
+                Message.conversation_id == conversation_id,
+            )
+            .first()
+        )
+
+    @staticmethod
     def _add_grounding_provenance(
         db: Session,
         *,

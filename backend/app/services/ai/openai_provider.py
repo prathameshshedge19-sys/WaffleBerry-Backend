@@ -35,6 +35,8 @@ from app.services.ai.provider import (
     AIMessage,
     AIProvider,
     ExternalKnowledgeMode,
+    SPEECH_MEDIA_TYPES,
+    SpeechResult,
 )
 
 
@@ -156,6 +158,47 @@ class OpenAIProvider(AIProvider):
                 "OpenAI returned an empty transcription."
             )
         return transcript.strip()
+
+    async def synthesize_speech(
+        self,
+        *,
+        text: str,
+        model: str,
+        voice: str,
+        response_format: str,
+        timeout_seconds: float,
+    ) -> SpeechResult:
+        """Generate speech audio in memory with the OpenAI Audio API."""
+        try:
+            response = await self._client.audio.speech.create(
+                input=text,
+                model=model,
+                voice=voice,
+                response_format=response_format,
+                timeout=timeout_seconds,
+            )
+            content = getattr(response, "content", None)
+        except OpenAIError as exc:
+            self._raise_provider_error(exc)
+        except (AttributeError, TypeError, ValueError):
+            raise AIInvalidResponseError(
+                "OpenAI returned unreadable speech audio."
+            ) from None
+
+        if not isinstance(content, bytes) or not content:
+            raise AIInvalidResponseError(
+                "OpenAI returned empty speech audio."
+            )
+        media_type = SPEECH_MEDIA_TYPES.get(response_format)
+        if media_type is None:
+            raise AIInvalidResponseError(
+                "OpenAI returned an unsupported speech format."
+            )
+        return SpeechResult(
+            content=content,
+            media_type=media_type,
+            file_extension=response_format,
+        )
 
     @staticmethod
     def _citation_links(response: object) -> list[tuple[str, str]]:

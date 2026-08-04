@@ -18,6 +18,8 @@ from app.services.memory.grounding import (
     MemoryGroundingBudget,
 )
 from app.services.ai.transcription_service import TranscriptionService
+from app.services.ai.speech_service import SpeechService
+from app.services.message_speech_service import MessageSpeechService
 
 
 @lru_cache()
@@ -47,6 +49,30 @@ def get_transcription_service() -> TranscriptionService:
     return TranscriptionService(
         get_ai_provider(),
         model=settings.audio_transcription_model,
+    )
+
+
+@lru_cache()
+def get_speech_service() -> SpeechService:
+    """Return transient speech-synthesis orchestration."""
+    settings = get_settings()
+    return SpeechService(
+        get_ai_provider(),
+        model=settings.openai_tts_model,
+        default_voice=settings.openai_tts_voice,
+        default_format=settings.openai_tts_format,
+        max_text_characters=settings.tts_max_text_characters,
+        timeout_seconds=settings.tts_timeout_seconds,
+    )
+
+
+@lru_cache()
+def get_message_speech_service() -> MessageSpeechService:
+    """Return read-only stored-message speech orchestration."""
+    settings = get_settings()
+    return MessageSpeechService(
+        get_speech_service(),
+        max_text_characters=settings.tts_max_text_characters,
     )
 
 

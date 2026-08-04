@@ -9,7 +9,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 from app.db import get_db
 from app.dependencies.auth import get_current_user
-from app.dependencies.ai import get_chat_service
+from app.dependencies.ai import get_chat_service, get_message_speech_service
 from app.models.user import User
 from app.schemas.user import (
     UserCreate, UserLogin, UserResponse, LoginResponse, VoiceProfileCreate, VoiceProfileResponse, 
@@ -17,6 +17,7 @@ from app.schemas.user import (
     ConversationCreate, ConversationUpdate, ConversationResponse,
     MessageCreate, MessagePairResponse, MessageResponse, StoryGuideRequest
 )
+from app.schemas.audio import MessageSpeechRequest
 from app.crud.user import (
     UserCRUD, VoiceProfileCRUD, VoiceSampleCRUD, ConversationCRUD, MessageCRUD
 )
@@ -35,11 +36,24 @@ from app.services.ai.exceptions import (
     AIServiceError,
     AITimeoutError,
 )
+from app.api.v1.speech_http import speech_audio_response, speech_http_error
+from app.services.message_speech_service import (
+    MessageSpeechError,
+    MessageSpeechService,
+)
 
 logger = logging.getLogger(__name__)
 
 
 router = APIRouter()
+
+
+def get_message_speech_service_for_request() -> MessageSpeechService:
+    """Resolve message speech lazily with safe configuration errors."""
+    try:
+        return get_message_speech_service()
+    except Exception as exc:
+        raise speech_http_error(exc) from None
 
 
 def _require_active_conversation_legacy(
@@ -575,6 +589,46 @@ async def delete_conversation(
 
 
 # ==================== MESSAGE ENDPOINTS ====================
+
+@router.post(
+    "/conversations/{conversation_id}/messages/{message_id}/speech",
+    response_class=Response,
+)
+async def synthesize_message_speech(
+    conversation_id: int,
+    message_id: int,
+    options: MessageSpeechRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    service: MessageSpeechService = Depends(
+        get_message_speech_service_for_request
+    ),
+) -> Response:
+    """Generate speech from an owned persisted assistant message."""
+    try:
+        result = await service.synthesize_assistant_message(
+            db=db,
+            current_user=current_user,
+            conversation_id=conversation_id,
+            message_id=message_id,
+            voice=options.voice,
+            response_format=options.response_format,
+        )
+    except MessageSpeechError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail={
+                "code": exc.code,
+                "message": exc.safe_message,
+            },
+        ) from None
+    except Exception as exc:
+        raise speech_http_error(exc) from None
+
+    return speech_audio_response(
+        result,
+        filename_stem="berry-response",
+    )
 
 @router.post(
     "/conversations/{conversation_id}/messages",

@@ -1,11 +1,13 @@
 """Authenticated transient audio transcription endpoint."""
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from fastapi.responses import Response
 
-from app.dependencies.ai import get_transcription_service
+from app.api.v1.speech_http import speech_audio_response, speech_http_error
+from app.dependencies.ai import get_speech_service, get_transcription_service
 from app.dependencies.auth import get_current_user
 from app.models.user import User
-from app.schemas.audio import AudioTranscriptionResponse
+from app.schemas.audio import AudioTranscriptionResponse, SpeechSynthesisRequest
 from app.services.ai.exceptions import (
     AIAuthenticationError,
     AIConnectionError,
@@ -16,6 +18,7 @@ from app.services.ai.exceptions import (
     AIRateLimitError,
     AITimeoutError,
 )
+from app.services.ai.speech_service import SpeechService
 from app.services.ai.transcription_service import (
     MAX_AUDIO_UPLOAD_BYTES,
     AudioValidationError,
@@ -73,6 +76,14 @@ def _provider_error(exc: Exception) -> HTTPException:
     )
 
 
+def get_speech_service_for_request() -> SpeechService:
+    """Resolve speech configuration lazily with a safe API error."""
+    try:
+        return get_speech_service()
+    except Exception as exc:
+        raise speech_http_error(exc) from None
+
+
 @router.post(
     "/audio/transcribe",
     response_model=AudioTranscriptionResponse,
@@ -108,3 +119,25 @@ async def transcribe_audio(
         raise _provider_error(exc) from None
     finally:
         await file.close()
+
+
+@router.post("/audio/speech", response_class=Response)
+async def synthesize_speech(
+    request: SpeechSynthesisRequest,
+    _current_user: User = Depends(get_current_user),
+    service: SpeechService = Depends(get_speech_service_for_request),
+) -> Response:
+    """Return transient generated speech audio without persistence."""
+    try:
+        result = await service.synthesize(
+            text=request.text,
+            voice=request.voice,
+            response_format=request.response_format,
+        )
+    except Exception as exc:
+        raise speech_http_error(exc) from None
+
+    return speech_audio_response(
+        result,
+        filename_stem="waffleberry-speech",
+    )
