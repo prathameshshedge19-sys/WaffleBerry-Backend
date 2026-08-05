@@ -64,6 +64,24 @@ class SpeechTextNormalizerTests(unittest.TestCase):
     def test_inline_code_keeps_content_without_visual_delimiters(self):
         self.assertEqual(self.normalize("Use `memory_id` carefully."), "Use memory_id carefully.")
 
+    def test_indian_names_numbers_dates_times_currency_and_danda_are_preserved(self):
+        samples = (
+            "Prathamesh 14 July 2019 ला Mumbai हून Pune ला सकाळी 7:30 वाजता गेला होता.",
+            "प्रथमेश १४ जुलै २०१९ रोजी सकाळी ७:३० वाजता मुंबईहून पुण्याला गेला होता।",
+            "₹500 आणि ५०० रुपये, 25%। पुढचे वाक्य॥",
+            "Dadar Dombivli Mumbai Pune Thane Nashik Nagpur Maharashtra",
+        )
+        for sample in samples:
+            with self.subTest(sample=sample):
+                self.assertEqual(self.normalize(sample), sample)
+
+    def test_mixed_language_word_and_paragraph_order_is_preserved(self):
+        source = "आज market मध्ये खूप लोक आहेत।\n\nTomorrow Pune ला जाऊया?"
+        self.assertEqual(self.normalize(source), source)
+
+    def test_unicode_is_normalized_consistently_without_changing_content(self):
+        self.assertEqual(self.normalize("Cafe\u0301 Pune"), "Café Pune")
+
     def test_empty_normalized_result_is_rejected(self):
         for source in ("😊✨", "https://example.com", "```x\ncode\n```"):
             with self.subTest(source=source), self.assertRaises(ValueError):

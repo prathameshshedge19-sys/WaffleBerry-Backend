@@ -35,7 +35,8 @@ class SpeechTextNormalizer:
         if not isinstance(text, str):
             raise ValueError("Speech text must be a string.")
 
-        prepared = self._FENCED_CODE.sub("\n", text)
+        prepared = unicodedata.normalize("NFC", text)
+        prepared = self._FENCED_CODE.sub("\n", prepared)
         prepared = self._MARKDOWN_LINK.sub(lambda match: match.group(1) or "", prepared)
         prepared = self._RAW_URL.sub("", prepared)
         prepared = self._UUID.sub("", prepared)
@@ -83,7 +84,7 @@ class SpeechTextNormalizer:
         normalized = re.sub(r" *\n{2,} *", "\n\n", normalized)
         normalized = re.sub(r"\s+([,.!?])", r"\1", normalized)
         normalized = re.sub(r",\s*,+", ", ", normalized)
-        normalized = normalized.strip()
+        normalized = unicodedata.normalize("NFC", normalized.strip())
         normalized = re.sub(r"^[,.-]+\s*", "", normalized)
         if not normalized:
             raise ValueError("Speech text is empty after normalization.")
@@ -92,7 +93,7 @@ class SpeechTextNormalizer:
     @staticmethod
     def _sentence(value: str) -> str:
         value = value.strip()
-        return value if not value or value[-1] in ".!?" else f"{value}."
+        return value if not value or value[-1] in ".!?।॥" else f"{value}."
 
     @staticmethod
     def _strip_html(value: str) -> str:

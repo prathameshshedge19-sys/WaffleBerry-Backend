@@ -1,10 +1,15 @@
 """Provider-independent orchestration for transient speech synthesis."""
 
+import logging
+
 from app.services.ai.exceptions import AIConfigurationError, AIInvalidResponseError
 from app.services.ai.provider import AIProvider, SPEECH_MEDIA_TYPES, SpeechResult
 from app.services.speech_delivery_resolver import SpeechDeliveryResolver
 from app.services.speech_text_normalizer import SpeechTextNormalizer
 from app.services.voice_profile_resolver import StandardVoiceProfile
+
+
+logger = logging.getLogger(__name__)
 
 
 class SpeechService:
@@ -101,6 +106,15 @@ class SpeechService:
         delivery = self._delivery_resolver.resolve(
             standard_voice_profile,
             resolved_text,
+        )
+        logger.info(
+            "TTS speech profile resolved (language_mode=%s, voice_profile=%s).",
+            delivery.language_mode.value,
+            (
+                StandardVoiceProfile(standard_voice_profile).value
+                if standard_voice_profile is not None
+                else "neutral"
+            ),
         )
 
         result = await self._provider.synthesize_speech(

@@ -273,6 +273,29 @@ class RealtimeSpeechProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("last_event_type=response.created", output)
         self.assertNotIn("private message", output)
 
+    async def test_fidelity_accepts_harmless_punctuation_and_unicode_changes(self):
+        pcm = b"\x01\x02"
+        connection = FakeConnection(
+            [
+                {"type": "session.created"},
+                {
+                    "type": "response.output_audio.delta",
+                    "delta": base64.b64encode(pcm).decode(),
+                },
+                {
+                    "type": "response.output_audio_transcript.done",
+                    "transcript": "मला  तो दिवस आठवतो.",
+                },
+                {"type": "response.done", "response": {"status": "completed"}},
+            ]
+        )
+        result = await self.provider(connection).synthesize(
+            text="मला तो दिवस आठवतो।",
+            voice="marin",
+            instructions="Speak faithfully.",
+        )
+        self.assertEqual(result.content[44:], pcm)
+
 
 if __name__ == "__main__":
     unittest.main()

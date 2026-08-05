@@ -22,6 +22,7 @@ from app.services.ai.exceptions import (
     AITimeoutError,
 )
 from app.services.ai.provider import SpeechResult
+from app.services.speech_fidelity_comparator import SpeechFidelityComparator
 
 
 REALTIME_URL = "wss://api.openai.com/v1/realtime"
@@ -51,6 +52,7 @@ class RealtimeSpeechProvider:
         max_audio_bytes: int,
         output_format: str,
         debug: bool = False,
+        fidelity_comparator: SpeechFidelityComparator | None = None,
         connector: Connector | None = None,
     ) -> None:
         self._api_key = self._required(api_key, "OPENAI_API_KEY")
@@ -70,6 +72,7 @@ class RealtimeSpeechProvider:
         self._timeout = timeout_seconds
         self._max_audio_bytes = max_audio_bytes
         self._debug = debug
+        self._fidelity = fidelity_comparator or SpeechFidelityComparator()
         self._connector = connector or self._connect
 
     async def synthesize(
@@ -271,7 +274,10 @@ class RealtimeSpeechProvider:
                     raise AIProviderError(
                         "OpenAI Realtime did not complete speech generation."
                     )
-                if transcript is not None and transcript != expected_text:
+                if transcript is not None and not self._fidelity.equivalent(
+                    expected_text,
+                    transcript,
+                ):
                     raise AIInvalidResponseError(
                         "OpenAI Realtime did not preserve the supplied text."
                     )

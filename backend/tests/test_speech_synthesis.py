@@ -24,6 +24,7 @@ from app.services.ai.provider import SPEECH_MEDIA_TYPES, SpeechResult
 from app.services.ai.speech_service import SpeechService
 from app.services.speech_delivery_resolver import (
     FEMALE_DELIVERY_INSTRUCTIONS,
+    FINAL_FIDELITY_INSTRUCTIONS,
     LANGUAGE_INSTRUCTIONS,
     MALE_DELIVERY_INSTRUCTIONS,
     NEUTRAL_DELIVERY_INSTRUCTIONS,
@@ -177,8 +178,9 @@ class SpeechServiceTests(unittest.IsolatedAsyncioTestCase):
         await service.synthesize(text="Hello")
         self.assertEqual(
             provider.calls[0]["instructions"],
+            f"{LANGUAGE_INSTRUCTIONS[SpeechLanguageMode.ENGLISH]}\n"
             f"{NEUTRAL_DELIVERY_INSTRUCTIONS}\n"
-            f"{LANGUAGE_INSTRUCTIONS[SpeechLanguageMode.ENGLISH]}",
+            f"{FINAL_FIDELITY_INSTRUCTIONS}",
         )
 
     async def test_normalized_text_and_profile_delivery_reach_provider(self):
@@ -206,7 +208,15 @@ class SpeechServiceTests(unittest.IsolatedAsyncioTestCase):
                 call = provider.calls[-1]
                 self.assertEqual(call["text"], "Memory.\n\nHello, Asha!")
                 self.assertEqual(call["voice"], expected_voice)
-                self.assertTrue(call["instructions"].startswith(expected_instructions))
+                self.assertIn(expected_instructions, call["instructions"])
+                self.assertTrue(
+                    call["instructions"].startswith(
+                        LANGUAGE_INSTRUCTIONS[SpeechLanguageMode.ENGLISH]
+                    )
+                )
+                self.assertTrue(
+                    call["instructions"].endswith(FINAL_FIDELITY_INSTRUCTIONS)
+                )
 
     async def test_source_limit_is_checked_before_normalization(self):
         service = SpeechService(

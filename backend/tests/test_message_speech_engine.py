@@ -121,6 +121,66 @@ class RealtimeSpeechFidelityTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(FIDELITY_INSTRUCTIONS, call["instructions"])
         self.assertIn("not a question", call["instructions"])
 
+    async def test_voice_profiles_combine_with_language_specific_guidance(self):
+        cases = (
+            (
+                StandardVoiceProfile.MALE,
+                "दादर खूप सुंदर आहे आणि मला तिथे जायचं आहे.",
+                "cedar",
+                "conversational Marathi",
+            ),
+            (
+                StandardVoiceProfile.FEMALE,
+                "दादर खूप सुंदर आहे आणि मला तिथे जायचं आहे.",
+                "marin",
+                "conversational Marathi",
+            ),
+            (
+                StandardVoiceProfile.MALE,
+                "मुझे वह शाम याद है और वहाँ बहुत लोग थे।",
+                "cedar",
+                "conversational Hindi",
+            ),
+            (
+                StandardVoiceProfile.FEMALE,
+                "मुझे वह शाम याद है और वहाँ बहुत लोग थे।",
+                "marin",
+                "conversational Hindi",
+            ),
+            (
+                StandardVoiceProfile.FEMALE,
+                "आज सुंदर दिवस आहे",
+                "marin",
+                "Do not assume all Devanagari text is Hindi",
+            ),
+            (
+                StandardVoiceProfile.MALE,
+                "Mala ajunhi athavta, apan sandhyakali khup gappa maraycho.",
+                "cedar",
+                "not ordinary English",
+            ),
+        )
+        for profile, text, voice, guidance in cases:
+            with self.subTest(profile=profile, guidance=guidance):
+                provider = FakeRealtimeProvider()
+                service = RealtimeSpeechService(
+                    provider,
+                    standard_male_voice="cedar",
+                    standard_female_voice="marin",
+                    max_text_characters=4096,
+                )
+                await service.synthesize(
+                    text=text,
+                    standard_voice_profile=profile,
+                    response_format="mp3",
+                )
+                call = provider.calls[0]
+                self.assertEqual(call["text"], text)
+                self.assertEqual(call["voice"], voice)
+                self.assertTrue(call["instructions"].startswith(FIDELITY_INSTRUCTIONS))
+                self.assertIn(guidance, call["instructions"])
+                self.assertIn("warm", call["instructions"].lower())
+
 
 class FakeRealtimeProvider:
     def __init__(self):
