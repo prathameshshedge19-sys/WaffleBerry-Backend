@@ -70,6 +70,21 @@ class Settings(BaseSettings):
     )
     openai_realtime_output_format: str = "audio/pcm"
     realtime_fallback_to_tts: bool = True
+    sarvam_api_key: str | None = None
+    sarvam_model: str = "bulbul:v3"
+    sarvam_speaker_male: str = "shubh"
+    sarvam_speaker_female: str = "priya"
+    sarvam_output_format: str = "wav"
+    sarvam_timeout_seconds: float = Field(default=60.0, gt=0)
+    sarvam_max_text_characters: int = Field(default=2500, ge=1, le=2500)
+    sarvam_max_audio_bytes: int = Field(default=25 * 1024 * 1024, ge=1)
+    sarvam_pace: float = Field(default=0.92, ge=0.5, le=2.0)
+    sarvam_temperature: float = Field(default=0.6, ge=0.01, le=2.0)
+    sarvam_pronunciation_dictionary_id: str | None = None
+    sarvam_pronunciation_dictionary_required: bool = False
+    speech_emotion_enabled: bool = True
+    speech_nonverbal_cues_enabled: bool = False
+    speech_discourse_markers_enabled: bool = False
     openai_api_key: str | None = None
     ai_connect_timeout_seconds: float = Field(default=10.0, gt=0)
     ai_read_timeout_seconds: float = Field(default=90.0, gt=0)

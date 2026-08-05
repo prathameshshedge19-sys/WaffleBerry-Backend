@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "description": "Manually reviewed WaffleBerry product and local test terms.",
+  "pronunciations": {
+    "mr-IN": {
+      "WaffleBerry": "वॉफल बेरी",
+      "Berry": "बेरी",
+      "Prathamesh": "प्रथमेश",
+      "Dadar": "दादर",
+      "Dombivli": "डोंबिवली",
+      "Mumbai": "मुंबई",
+      "Pune": "पुणे",
+      "Thane": "ठाणे",
+      "Nashik": "नाशिक",
+      "Nagpur": "नागपूर",
+      "Maharashtra": "महाराष्ट्र"
+    },
+    "hi-IN": {
+      "WaffleBerry": "वॉफल बेरी",
+      "Berry": "बेरी",
+      "Prathamesh": "प्रथमेश",
+      "Dadar": "दादर",
+      "Dombivli": "डोंबिवली",
+      "Mumbai": "मुंबई",
+      "Pune": "पुणे",
+      "Thane": "ठाणे",
+      "Nashik": "नाशिक",
+      "Nagpur": "नागपुर",
+      "Maharashtra": "महाराष्ट्र"
+    },
+    "en-IN": {
+      "WaffleBerry": "waffle berry",
+      "AI": "A I",
+      "API": "A P I",
+      "JWT": "J W T"
+    }
+  }
+}
