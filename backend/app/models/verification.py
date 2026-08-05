@@ -18,6 +18,12 @@ class Verification(Base):
 
     otp_hash = Column(String(255), nullable=False)
 
+    purpose = Column(
+        String(50),
+        nullable=False,
+        default="email_verification"
+    )
+
     expires_at = Column(DateTime(timezone=True), nullable=False)
 
     attempt_count = Column(Integer, default=0, nullable=False)

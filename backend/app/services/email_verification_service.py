@@ -21,19 +21,21 @@ class EmailVerificationService:
         return hashlib.sha256(otp.encode()).hexdigest()
 
     @staticmethod
-    def create_verification(db, user_id: int, otp_hash: str):
+    def create_verification(
+        db,
+        user_id: int,
+        otp_hash: str,
+        purpose: str = "email_verification"
+    ):
         """Create a verification record."""
 
         expires = datetime.now(timezone.utc) + timedelta(minutes=10)
-
-        print("Creating verification...")
-        print("UTC now:", datetime.now(timezone.utc))
-        print("Expires:", expires)
 
         verification = Verification(
             user_id=user_id,
             otp_hash=otp_hash,
             expires_at=expires,
+            purpose=purpose,
         )
 
         db.add(verification)
@@ -46,28 +48,40 @@ class EmailVerificationService:
     def verify_otp(db, user_id: int, otp: str) -> bool:
         """Verify the latest OTP for a user."""
 
+        return (
+            EmailVerificationService.verify_otp_status(
+                db,
+                user_id,
+                otp
+            ) == "verified"
+        )
+
+    @staticmethod
+    def verify_otp_status(
+        db,
+        user_id: int,
+        otp: str,
+        purpose: str = "email_verification"
+    ) -> str:
+        """Verify the latest OTP for a purpose and return its status."""
+
         verification = (
             db.query(Verification)
             .filter(
                 Verification.user_id == user_id,
-                Verification.is_used == False,
+                Verification.purpose == purpose,
             )
             .order_by(Verification.created_at.desc())
             .first()
         )
 
-        print("Verification record:", verification)
-
         if not verification:
-            print("No verification record found")
-            return False
+            return "invalid"
 
-        print("Stored hash:", verification.otp_hash)
-        print("Entered hash:", EmailVerificationService.hash_otp(otp))
-        print("Expires at:", verification.expires_at)
+        if verification.is_used:
+            return "used"
 
         current_time = datetime.utcnow()
-        print("Current UTC:", current_time)
 
         expires_at = verification.expires_at
 
@@ -75,26 +89,27 @@ class EmailVerificationService:
             expires_at = expires_at.replace(tzinfo=None)
 
         if expires_at < current_time:
-            print("OTP expired")
-            return False
+            return "expired"
 
         if verification.otp_hash != EmailVerificationService.hash_otp(otp):
-            print("OTP hash mismatch")
-            return False
-
-        print("OTP verified successfully")
+            return "invalid"
 
         verification.is_used = True
         db.commit()
 
-        return True
+        return "verified"
     
     @staticmethod
-    def resend_otp(db, user_id: int) -> str:
+    def resend_otp(
+        db,
+        user_id: int,
+        purpose: str = "email_verification"
+    ) -> str:
         """Generate a new OTP and invalidate previous ones."""
 
         db.query(Verification).filter(
             Verification.user_id == user_id,
+            Verification.purpose == purpose,
             Verification.is_used == False,
         ).update({"is_used": True})
 
@@ -105,6 +120,7 @@ class EmailVerificationService:
             db=db,
             user_id=user_id,
             otp_hash=otp_hash,
+            purpose=purpose,
         )
 
         return otp

@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.v1.project import router as project_router
 from app.api.v1.user import router as user_router
 from app.config import get_settings
-from app.db import Base, engine
+from app.db import Base, engine, ensure_schema
 from app.services.ai.provider_registry import validate_ai_configuration
 
 settings = get_settings()
@@ -22,6 +22,7 @@ print(list(Base.metadata.tables.keys()))
 
 # Create database tables
 Base.metadata.create_all(bind=engine)
+ensure_schema()
 
 # Initialize FastAPI app
 app = FastAPI(

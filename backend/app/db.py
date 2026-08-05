@@ -1,6 +1,6 @@
 """Database configuration and session management."""
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import declarative_base, sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -27,6 +27,26 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 # Base class for ORM models
 Base = declarative_base()
+
+
+def ensure_schema():
+    """Apply lightweight local schema upgrades not handled by create_all."""
+    if engine.dialect.name != "sqlite":
+        return
+
+    columns = {
+        column["name"]
+        for column in inspect(engine).get_columns("verification")
+    }
+
+    if "purpose" not in columns:
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "ALTER TABLE verification ADD COLUMN purpose "
+                    "VARCHAR(50) NOT NULL DEFAULT 'email_verification'"
+                )
+            )
 
 
 def get_db():

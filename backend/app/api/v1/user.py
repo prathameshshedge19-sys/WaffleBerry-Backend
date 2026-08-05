@@ -14,7 +14,7 @@ from app.dependencies.auth import get_current_user
 from app.dependencies.ai import get_chat_service
 from app.models.user import User
 from app.schemas.user import (
-    UserCreate, UserLogin, UserResponse, LoginResponse, VoiceProfileCreate, VoiceProfileResponse, 
+    UserCreate, UserLogin, UserResponse, SignupResponse, LoginResponse, VoiceProfileCreate, VoiceProfileResponse, 
     VoiceProfileUpdate, VoiceSampleCreate, VoiceSampleResponse,
     ConversationCreate, ConversationUpdate, ConversationResponse,
     MessageCreate, MessagePairResponse, MessageResponse, VerifyEmailRequest,ResendOTPRequest
@@ -115,7 +115,7 @@ def _ai_http_exception(exc: AIServiceError) -> HTTPException:
 
 # ==================== USER ENDPOINTS ====================
 
-@router.post("/users", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/users", response_model=SignupResponse, status_code=status.HTTP_201_CREATED)
 async def create_user(user: UserCreate, db: Session = Depends(get_db)):
     """Create a new user account.
     
@@ -123,26 +123,76 @@ async def create_user(user: UserCreate, db: Session = Depends(get_db)):
     - **email**: User's email (must be unique)
     - **password**: Password (minimum 8 characters)
     """
+    logger.info("[signup] Received account creation request.")
+
     # Check if email already exists
     existing_user = UserCRUD.get_user_by_email(db, user.email)
     if existing_user:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Email already registered"
+        if existing_user.is_verified:
+            logger.info("[signup] Email is already registered.")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Email already registered"
+            )
+
+        logger.info(
+            "[signup] Resending OTP for unverified user (user_id=%d).",
+            existing_user.user_id,
+        )
+        otp = EmailVerificationService.resend_otp(
+            db=db,
+            user_id=existing_user.user_id,
+        )
+
+        try:
+            await EmailService.send_otp(existing_user.email, otp)
+        except TimeoutError as exc:
+            logger.exception("[signup] OTP resend timed out.")
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Unable to send the verification email. Please try again.",
+            ) from exc
+        except Exception as exc:
+            logger.exception("[signup] OTP resend failed.")
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Unable to send the verification email. Please try again.",
+            ) from exc
+
+        response = SignupResponse.model_validate(existing_user)
+        return response.model_copy(
+            update={"verification_resent": True}
         )
     
     db_user = UserCRUD.create_user(db, user)
+    logger.info("[signup] User record created (user_id=%d).", db_user.user_id)
     otp = EmailVerificationService.generate_otp()
     otp_hash = EmailVerificationService.hash_otp(otp)
 
+    logger.info("[signup] Creating OTP verification record.")
     EmailVerificationService.create_verification(
         db=db,
         user_id=db_user.user_id,
         otp_hash=otp_hash,
     )
 
-    await EmailService.send_otp(db_user.email, otp)
+    logger.info("[signup] Sending OTP email.")
+    try:
+        await EmailService.send_otp(db_user.email, otp)
+    except TimeoutError as exc:
+        logger.exception("[signup] OTP email delivery timed out.")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Unable to send the verification email. Please try again.",
+        ) from exc
+    except Exception as exc:
+        logger.exception("[signup] OTP email delivery failed.")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Unable to send the verification email. Please try again.",
+        ) from exc
 
+    logger.info("[signup] OTP email sent; returning account creation response.")
     return db_user
 
 

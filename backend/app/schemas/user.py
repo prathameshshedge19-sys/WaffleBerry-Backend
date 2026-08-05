@@ -45,6 +45,12 @@ class UserResponse(UserBase):
         from_attributes = True
 
 
+class SignupResponse(UserResponse):
+    """Schema returned after creating or resuming signup."""
+
+    verification_resent: bool = False
+
+
 class LoginResponse(BaseModel):
     """Schema returned after successful authentication."""
     access_token: str

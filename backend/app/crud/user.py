@@ -40,6 +40,18 @@ class UserCRUD:
         return db.query(User).filter(User.email == email).first()
 
     @staticmethod
+    def update_password(
+        db: Session,
+        user: User,
+        password: str
+    ) -> User:
+        """Update a user's password using the existing hash function."""
+        user.password_hash = hash_password(password)
+        db.commit()
+        db.refresh(user)
+        return user
+
+    @staticmethod
     def authenticate_user(db: Session, email: str, password: str) -> User | None:
         """Authenticate a user by email and password."""
         user = UserCRUD.get_user_by_email(db, email)
