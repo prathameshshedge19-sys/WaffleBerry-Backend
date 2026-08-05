@@ -2,14 +2,9 @@
 
 from app.services.ai.exceptions import AIConfigurationError, AIInvalidResponseError
 from app.services.ai.provider import AIProvider, SPEECH_MEDIA_TYPES, SpeechResult
+from app.services.speech_delivery_resolver import SpeechDeliveryResolver
+from app.services.speech_text_normalizer import SpeechTextNormalizer
 from app.services.voice_profile_resolver import StandardVoiceProfile
-
-
-STANDARD_SPEECH_DELIVERY_INSTRUCTIONS = """Speak naturally, warmly, and conversationally.
-Use realistic pauses and gentle emotional expression.
-Avoid sounding like a narrator, announcer, or customer-service agent.
-Speak as if talking privately to a close family member.
-Do not exaggerate emotion."""
 
 
 class SpeechService:
@@ -26,6 +21,8 @@ class SpeechService:
         default_format: str,
         max_text_characters: int,
         timeout_seconds: float,
+        text_normalizer: SpeechTextNormalizer | None = None,
+        delivery_resolver: SpeechDeliveryResolver | None = None,
     ) -> None:
         self._provider = provider
         self._model = self._required_setting(model, "OPENAI_TTS_MODEL")
@@ -58,6 +55,8 @@ class SpeechService:
         self._default_format = normalized_format
         self._max_text_characters = max_text_characters
         self._timeout_seconds = timeout_seconds
+        self._text_normalizer = text_normalizer or SpeechTextNormalizer()
+        self._delivery_resolver = delivery_resolver or SpeechDeliveryResolver()
 
     async def synthesize(
         self,
@@ -69,11 +68,12 @@ class SpeechService:
         preserve_text: bool = False,
     ) -> SpeechResult:
         """Generate non-empty speech audio without persistence."""
-        resolved_text = text if preserve_text else text.strip()
-        if not resolved_text.strip():
+        source_text = text if preserve_text else text.strip()
+        if not source_text.strip():
             raise ValueError("Speech text must not be blank.")
-        if len(resolved_text) > self._max_text_characters:
+        if len(source_text) > self._max_text_characters:
             raise ValueError("Speech text exceeds the configured maximum.")
+        resolved_text = self._text_normalizer.normalize(source_text)
         if voice is not None and standard_voice_profile is not None:
             raise ValueError("Speech voice overrides are mutually exclusive.")
         if standard_voice_profile is not None:
@@ -98,6 +98,11 @@ class SpeechService:
         if resolved_format not in SPEECH_MEDIA_TYPES:
             raise ValueError("Speech response format is not supported.")
 
+        delivery = self._delivery_resolver.resolve(
+            standard_voice_profile,
+            resolved_text,
+        )
+
         result = await self._provider.synthesize_speech(
             text=resolved_text,
             model=self._model,
@@ -105,7 +110,7 @@ class SpeechService:
             response_format=resolved_format,
             timeout_seconds=self._timeout_seconds,
             instructions=(
-                STANDARD_SPEECH_DELIVERY_INSTRUCTIONS
+                delivery.instructions
                 if self._model.startswith("gpt-4o-mini-tts")
                 else None
             ),

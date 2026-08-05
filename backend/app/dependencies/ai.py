@@ -19,6 +19,9 @@ from app.services.memory.grounding import (
 )
 from app.services.ai.transcription_service import TranscriptionService
 from app.services.ai.speech_service import SpeechService
+from app.services.ai.message_speech_engine import ConfiguredMessageSpeechEngine
+from app.services.ai.realtime_speech_provider import RealtimeSpeechProvider
+from app.services.ai.realtime_speech_service import RealtimeSpeechService
 from app.services.message_speech_service import MessageSpeechService
 from app.services.voice_profile_resolver import StandardVoiceResolver
 
@@ -73,8 +76,30 @@ def get_speech_service() -> SpeechService:
 def get_message_speech_service() -> MessageSpeechService:
     """Return read-only stored-message speech orchestration."""
     settings = get_settings()
+    selected_engine = settings.message_speech_engine.strip().lower()
+    realtime_engine = None
+    # Realtime settings are intentionally validated only when selected.
+    if selected_engine == "realtime":
+        realtime_engine = RealtimeSpeechService(
+            RealtimeSpeechProvider(
+                api_key=settings.openai_api_key,
+                model=settings.openai_realtime_model,
+                timeout_seconds=settings.openai_realtime_timeout_seconds,
+                max_audio_bytes=settings.openai_realtime_max_audio_bytes,
+                output_format=settings.openai_realtime_output_format,
+                debug=settings.debug,
+            ),
+            standard_male_voice=settings.openai_tts_male_voice,
+            standard_female_voice=settings.openai_tts_female_voice,
+            max_text_characters=settings.tts_max_text_characters,
+        )
     return MessageSpeechService(
-        get_speech_service(),
+        ConfiguredMessageSpeechEngine(
+            selected_engine=selected_engine,
+            tts_engine=get_speech_service(),
+            realtime_engine=realtime_engine,
+            fallback_to_tts=settings.realtime_fallback_to_tts,
+        ),
         StandardVoiceResolver(settings.default_standard_voice_profile),
         max_text_characters=settings.tts_max_text_characters,
     )

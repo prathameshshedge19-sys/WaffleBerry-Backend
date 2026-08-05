@@ -21,9 +21,13 @@ from app.services.ai.exceptions import (
 )
 from app.services.ai.openai_provider import OpenAIProvider
 from app.services.ai.provider import SPEECH_MEDIA_TYPES, SpeechResult
-from app.services.ai.speech_service import (
-    STANDARD_SPEECH_DELIVERY_INSTRUCTIONS,
-    SpeechService,
+from app.services.ai.speech_service import SpeechService
+from app.services.speech_delivery_resolver import (
+    FEMALE_DELIVERY_INSTRUCTIONS,
+    LANGUAGE_INSTRUCTIONS,
+    MALE_DELIVERY_INSTRUCTIONS,
+    NEUTRAL_DELIVERY_INSTRUCTIONS,
+    SpeechLanguageMode,
 )
 from app.services.voice_profile_resolver import StandardVoiceProfile
 
@@ -173,8 +177,58 @@ class SpeechServiceTests(unittest.IsolatedAsyncioTestCase):
         await service.synthesize(text="Hello")
         self.assertEqual(
             provider.calls[0]["instructions"],
-            STANDARD_SPEECH_DELIVERY_INSTRUCTIONS,
+            f"{NEUTRAL_DELIVERY_INSTRUCTIONS}\n"
+            f"{LANGUAGE_INSTRUCTIONS[SpeechLanguageMode.ENGLISH]}",
         )
+
+    async def test_normalized_text_and_profile_delivery_reach_provider(self):
+        provider = RecordingSpeechProvider()
+        service = SpeechService(
+            provider,
+            model="gpt-4o-mini-tts",
+            default_voice="alloy",
+            standard_male_voice="cedar",
+            standard_female_voice="marin",
+            default_format="mp3",
+            max_text_characters=100,
+            timeout_seconds=12.5,
+        )
+        for profile, expected_voice, expected_instructions in (
+            (StandardVoiceProfile.MALE, "cedar", MALE_DELIVERY_INSTRUCTIONS),
+            (StandardVoiceProfile.FEMALE, "marin", FEMALE_DELIVERY_INSTRUCTIONS),
+        ):
+            with self.subTest(profile=profile):
+                await service.synthesize(
+                    text="## Memory\n\n**Hello**, Asha!",
+                    standard_voice_profile=profile,
+                    preserve_text=True,
+                )
+                call = provider.calls[-1]
+                self.assertEqual(call["text"], "Memory.\n\nHello, Asha!")
+                self.assertEqual(call["voice"], expected_voice)
+                self.assertTrue(call["instructions"].startswith(expected_instructions))
+
+    async def test_source_limit_is_checked_before_normalization(self):
+        service = SpeechService(
+            RecordingSpeechProvider(),
+            model="gpt-4o-mini-tts",
+            default_voice="alloy",
+            standard_male_voice="cedar",
+            standard_female_voice="marin",
+            default_format="mp3",
+            max_text_characters=5,
+            timeout_seconds=12.5,
+        )
+        with self.assertRaises(ValueError):
+            await service.synthesize(text="**Hi**")
+
+    async def test_empty_normalized_text_is_rejected_before_provider(self):
+        provider = RecordingSpeechProvider()
+        with self.assertRaises(ValueError):
+            await self.make_service(provider).synthesize(
+                text="https://example.com"
+            )
+        self.assertEqual(provider.calls, [])
 
     async def test_empty_provider_audio_is_rejected(self):
         provider = RecordingSpeechProvider(content=b"")
@@ -198,7 +252,7 @@ class SpeechServiceTests(unittest.IsolatedAsyncioTestCase):
             voice="alloy",
             response_format="opus",
             timeout_seconds=15,
-            instructions=STANDARD_SPEECH_DELIVERY_INSTRUCTIONS,
+            instructions="central instructions",
         )
 
         self.assertIsInstance(result, SpeechResult)
@@ -211,7 +265,7 @@ class SpeechServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(speech_api.kwargs["timeout"], 15)
         self.assertEqual(
             speech_api.kwargs["instructions"],
-            STANDARD_SPEECH_DELIVERY_INSTRUCTIONS,
+            "central instructions",
         )
 
     async def test_empty_openai_audio_is_rejected(self):

@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 from app.crud.user import ConversationCRUD, MessageCRUD
 from app.models.user import MessageRole, User
 from app.services.ai.provider import SpeechResult
-from app.services.ai.speech_service import SpeechService
+from app.services.ai.message_speech_engine import MessageSpeechEngine
 from app.services.voice_profile_resolver import StandardVoiceResolver
 
 
@@ -24,7 +24,7 @@ class MessageSpeechService:
 
     def __init__(
         self,
-        speech_service: SpeechService,
+        speech_service: MessageSpeechEngine,
         voice_resolver: StandardVoiceResolver,
         *,
         max_text_characters: int,
