@@ -9,6 +9,7 @@ from app.schemas.memory import (
     ApprovedMemoryRetrievalResponse,
 )
 from app.services.memory.retrieval_ranking import MemoryRelevanceRanker
+from app.services.memory.embedding import MemoryEmbeddingService
 from app.models.memory import LegacyStatus
 
 
@@ -22,6 +23,11 @@ class MemoryRetrievalArchivedError(Exception):
 
 class MemoryRetrievalService:
     """Retrieve normalized approved memories without ranking or prompting."""
+
+    def __init__(
+        self, embedding_service: MemoryEmbeddingService | None = None
+    ) -> None:
+        self._embedding_service = embedding_service
 
     def retrieve_approved(
         self,
@@ -81,11 +87,25 @@ class MemoryRetrievalService:
             legacy_id=legacy_id,
             allow_archived=allow_archived,
         )
-        memories = MemoryRelevanceRanker().rank(retrieved.memories, query)
+        semantic_scores = None
+        semantic_route_used = False
+        if self._embedding_service is not None:
+            semantic_result = self._embedding_service.score(
+                db, retrieved.memories, query
+            )
+            semantic_scores = semantic_result.scores
+            semantic_route_used = semantic_result.route_used
+        memories = MemoryRelevanceRanker().rank(
+            retrieved.memories,
+            query,
+            semantic_scores=semantic_scores,
+        )
         response = ApprovedMemorySearchResponse(
             legacy_id=legacy_id,
             matched_memory_count=len(memories),
             memories=memories,
         )
         response._approved_memory_count = retrieved.approved_memory_count
+        response._semantic_route_used = semantic_route_used
+        response._semantic_candidate_count = len(semantic_scores or {})
         return response

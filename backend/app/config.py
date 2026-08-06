@@ -94,6 +94,13 @@ class Settings(BaseSettings):
     ai_retry_jitter_seconds: float = Field(default=0.15, ge=0)
     ai_max_context_messages: int = Field(default=24, ge=2)
 
+    memory_semantic_retrieval_enabled: bool = True
+    memory_embedding_provider: str = "openai"
+    memory_embedding_model: str = "text-embedding-3-small"
+    memory_embedding_version: str = "v1"
+    memory_embedding_dimensions: int = Field(default=1536, ge=1)
+    memory_semantic_threshold: float = Field(default=0.35, ge=-1, le=1)
+
     # Companion approved-memory grounding budget
     memory_grounding_max_memories: int = Field(default=8, ge=1, le=100)
     memory_grounding_max_estimated_tokens: int = Field(
@@ -108,6 +115,18 @@ class Settings(BaseSettings):
         if not self.debug and self.database_url.lower().startswith("sqlite"):
             raise ValueError(
                 "DATABASE_URL must use PostgreSQL when DEBUG is false."
+            )
+        if self.memory_semantic_retrieval_enabled and any(
+            not value.strip()
+            for value in (
+                self.memory_embedding_provider,
+                self.memory_embedding_model,
+                self.memory_embedding_version,
+            )
+        ):
+            raise ValueError(
+                "Semantic memory retrieval requires embedding provider, "
+                "model, and version configuration."
             )
         return self
 

@@ -498,6 +498,11 @@ class Memory(Base):
         ForeignKey("users.user_id", ondelete="SET NULL"),
         nullable=True,
     )
+    embedding = Column(JSON, nullable=True)
+    embedding_model = Column(String(120), nullable=True)
+    embedding_version = Column(String(40), nullable=True)
+    embedding_dimensions = Column(Integer, nullable=True)
+    embedded_at = Column(DateTime(timezone=True), nullable=True)
 
     legacy = orm_relationship(
         "Legacy",

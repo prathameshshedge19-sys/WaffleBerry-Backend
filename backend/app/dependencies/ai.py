@@ -13,6 +13,8 @@ from app.services.memory.extractor import MemoryExtractionService
 from app.services.memory.storage_pipeline import MemoryStoragePipeline
 from app.services.memory.validation import MemoryValidationService
 from app.services.memory.retrieval import MemoryRetrievalService
+from app.services.memory.embedding import MemoryEmbeddingService
+from app.services.memory.embedding_registry import create_embedding_provider
 from app.services.memory.grounding import (
     CompanionMemoryGrounding,
     MemoryGroundingBudget,
@@ -47,6 +49,18 @@ def get_ai_service() -> AIService:
         jitter_seconds=settings.ai_retry_jitter_seconds,
     )
     return AIService(provider, retry_policy=retry_policy)
+
+
+@lru_cache()
+def get_memory_embedding_service() -> MemoryEmbeddingService | None:
+    """Return configured multilingual retrieval or a lexical-only fallback."""
+    settings = get_settings()
+    if not settings.memory_semantic_retrieval_enabled:
+        return None
+    return MemoryEmbeddingService(
+        create_embedding_provider(settings),
+        threshold=settings.memory_semantic_threshold,
+    )
 
 
 @lru_cache()
@@ -127,7 +141,7 @@ def get_chat_service() -> ChatService:
     return ChatService(
         get_ai_service(),
         context_builder,
-        MemoryRetrievalService(),
+        MemoryRetrievalService(get_memory_embedding_service()),
         CompanionMemoryGrounding(
             MemoryGroundingBudget(
                 max_memories=settings.memory_grounding_max_memories,

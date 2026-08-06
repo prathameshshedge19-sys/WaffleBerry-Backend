@@ -28,6 +28,7 @@ from app.services.memory.review import (
     MemoryReviewNotFoundError,
     MemoryReviewService,
 )
+from app.dependencies.ai import get_memory_embedding_service
 
 
 router = APIRouter()
@@ -40,7 +41,7 @@ def get_memory_review_service() -> MemoryReviewService:
 
 def get_memory_retrieval_service() -> MemoryRetrievalService:
     """Create a request-safe stateless retrieval coordinator."""
-    return MemoryRetrievalService()
+    return MemoryRetrievalService(get_memory_embedding_service())
 
 
 @router.get(

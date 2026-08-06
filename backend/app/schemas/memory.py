@@ -564,6 +564,11 @@ class ApprovedMemoryRetrievalItem(BaseModel):
     )
     uncertainty_note: str | None = Field(default=None, exclude=True)
     contradiction_group_id: int | None = Field(default=None, exclude=True)
+    embedding: list[float] | None = Field(default=None, exclude=True)
+    embedding_model: str | None = Field(default=None, exclude=True)
+    embedding_version: str | None = Field(default=None, exclude=True)
+    embedding_dimensions: int | None = Field(default=None, exclude=True)
+    embedded_at: datetime | None = Field(default=None, exclude=True)
     created_at: datetime
     updated_at: datetime
 
@@ -592,6 +597,7 @@ class RankedApprovedMemoryItem(ApprovedMemoryRetrievalItem):
     """Approved-memory projection with transparent ranking metadata."""
 
     relevance_score: float = Field(..., ge=0, le=1)
+    semantic_score: float | None = Field(default=None, ge=-1, le=1, exclude=True)
     matched_terms: list[str] = Field(default_factory=list)
     topic_buckets: list[str] = Field(default_factory=list, exclude=True)
 
@@ -601,11 +607,21 @@ class ApprovedMemorySearchResponse(BaseModel):
     matched_memory_count: int = Field(..., ge=0)
     memories: list[RankedApprovedMemoryItem] = Field(default_factory=list)
     _approved_memory_count: int = PrivateAttr(default=0)
+    _semantic_route_used: bool = PrivateAttr(default=False)
+    _semantic_candidate_count: int = PrivateAttr(default=0)
 
     @property
     def approved_memory_count(self) -> int:
         """Internal diagnostic count, intentionally excluded from API output."""
         return self._approved_memory_count
+
+    @property
+    def semantic_route_used(self) -> bool:
+        return self._semantic_route_used
+
+    @property
+    def semantic_candidate_count(self) -> int:
+        return self._semantic_candidate_count
 
 
 class MemoryReviewParticipant(BaseModel):

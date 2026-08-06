@@ -1,14 +1,13 @@
 """Deterministic structured, topic, intent, and lexical memory ranking."""
 
-import re
 import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from app.schemas.memory import ApprovedMemoryRetrievalItem, RankedApprovedMemoryItem
+from app.services.memory.multilingual_retrieval import retrieval_tokens
 
 
-_WORD_PATTERN = re.compile(r"[^\W_]+", re.UNICODE)
 _STOP_WORDS = frozenset({
     "a", "about", "an", "and", "are", "for", "in", "is",
     "me", "of", "our", "s", "tell", "the", "to", "what", "were", "you",
@@ -105,8 +104,11 @@ def _singularize(token: str) -> str:
 
 
 def _tokens(value: str | None) -> list[str]:
-    normalized = unicodedata.normalize("NFKC", value or "").casefold()
-    return [_singularize(token) for token in _WORD_PATTERN.findall(normalized) if token not in _STOP_WORDS]
+    return [
+        _singularize(token)
+        for token in retrieval_tokens(value)
+        if token not in _STOP_WORDS
+    ]
 
 
 def _timestamp(value: datetime) -> float:
@@ -178,7 +180,13 @@ class MemoryRelevanceRanker:
     def classify_query_intent(cls, query: str) -> str | None:
         return cls.classify_query(query).intent
 
-    def rank(self, memories: list[ApprovedMemoryRetrievalItem], query: str) -> list[RankedApprovedMemoryItem]:
+    def rank(
+        self,
+        memories: list[ApprovedMemoryRetrievalItem],
+        query: str,
+        *,
+        semantic_scores: dict[int, float] | None = None,
+    ) -> list[RankedApprovedMemoryItem]:
         query_tokens = list(dict.fromkeys(_tokens(query)))
         if not query_tokens:
             return []
@@ -201,11 +209,18 @@ class MemoryRelevanceRanker:
             topic_matches = expansion & searchable
             if (
                 classification.broad
+                and memory.memory_id not in (semantic_scores or {})
                 and not (_BROAD_MEMORY_CORE[classification.intent] & searchable)
             ):
                 continue
             phrase_bonus = 0.35 if query_phrase in " ".join(title_tokens) else (0.25 if query_phrase in " ".join(summary_tokens) else 0.0)
-            score = min(1.0, phrase_bonus + (0.55 if intent_attribute_match else 0.0) + (0.20 if expansion & (title_set | summary_set | category_set) else 0.0) + (0.40 * len(query_set & title_set) / len(query_set)) + (0.20 * len(query_set & summary_set) / len(query_set)) + (0.05 * len(query_set & category_set) / len(query_set)) + (0.10 * len(query_set & structured_set) / len(query_set)) + (0.18 * min(2, len(topic_matches)) if classification.broad else 0.0))
+            lexical_score = min(1.0, phrase_bonus + (0.55 if intent_attribute_match else 0.0) + (0.20 if expansion & (title_set | summary_set | category_set) else 0.0) + (0.40 * len(query_set & title_set) / len(query_set)) + (0.20 * len(query_set & summary_set) / len(query_set)) + (0.05 * len(query_set & category_set) / len(query_set)) + (0.10 * len(query_set & structured_set) / len(query_set)) + (0.18 * min(2, len(topic_matches)) if classification.broad else 0.0))
+            semantic_score = (semantic_scores or {}).get(memory.memory_id)
+            score = (
+                min(1.0, 0.65 * semantic_score + 0.35 * lexical_score)
+                if semantic_score is not None
+                else lexical_score
+            )
             if score <= 0:
                 continue
             bucket_source = searchable | topic_matches
@@ -219,7 +234,16 @@ class MemoryRelevanceRanker:
                 source_topics=memory.source_topics,
                 uncertainty_note=memory.uncertainty_note,
                 contradiction_group_id=memory.contradiction_group_id,
+                embedding=memory.embedding,
+                embedding_model=memory.embedding_model,
+                embedding_version=memory.embedding_version,
+                embedding_dimensions=memory.embedding_dimensions,
+                embedded_at=memory.embedded_at,
                 relevance_score=round(score, 6), matched_terms=matched,
+                semantic_score=(
+                    round(semantic_score, 6)
+                    if semantic_score is not None else None
+                ),
                 topic_buckets=buckets,
             ))
 

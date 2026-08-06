@@ -31,6 +31,7 @@ from app.services.memory.fidelity import (
     MemoryFidelityAnalyzer,
     MemoryFidelityService,
 )
+from app.services.memory.multilingual_retrieval import detect_query_language_mode
 from app.services.memory.retrieval import (
     MemoryRetrievalArchivedError,
     MemoryRetrievalNotFoundError,
@@ -147,6 +148,7 @@ class ChatService:
         fidelity_plan = MemoryFidelityAnalyzer().analyze([])
         query_classification = MemoryRelevanceRanker.classify_query(user_message)
         query_intent = query_classification.intent
+        query_language_mode = detect_query_language_mode(user_message)
         knowledge_plan = ExternalKnowledgeClassifier.classify(user_message)
         legacy_id = getattr(conversation, "legacy_id", None)
         if (
@@ -193,6 +195,7 @@ class ChatService:
                     retrieval_query
                 )
                 query_intent = query_classification.intent
+                query_language_mode = detect_query_language_mode(retrieval_query)
                 ranked = self._memory_retrieval.search_approved(
                     db,
                     user_id=conversation.user_id,
@@ -211,6 +214,8 @@ class ChatService:
                     legacy_id=legacy_id,
                     retrieval_failure_category="database_error",
                     query_intent=query_intent,
+                    query_language_mode=query_language_mode,
+                    retrieval_route="semantic_unavailable_lexical_fallback",
                     query_scope=("broad" if query_classification.broad else "specific"),
                     approved_memory_count=None,
                     matched_memory_count=0,
@@ -231,6 +236,8 @@ class ChatService:
                     legacy_id=legacy_id,
                     retrieval_failure_category=type(exc).__name__,
                     query_intent=query_intent,
+                    query_language_mode=query_language_mode,
+                    retrieval_route="semantic_unavailable_lexical_fallback",
                     query_scope=("broad" if query_classification.broad else "specific"),
                     approved_memory_count=None,
                     matched_memory_count=0,
@@ -263,6 +270,26 @@ class ChatService:
                     matched_memory_count=ranked.matched_memory_count,
                     selected_memory_ids=list(memory_ids),
                     query_intent=query_intent,
+                    query_language_mode=query_language_mode,
+                    retrieval_route=(
+                        "multilingual_semantic_lexical_hybrid"
+                        if ranked.semantic_route_used
+                        else "semantic_unavailable_lexical_fallback"
+                    ),
+                    semantic_candidate_count=ranked.semantic_candidate_count,
+                    semantic_top_score=max(
+                        (
+                            memory.semantic_score
+                            for memory in selection.memories
+                            if memory.semantic_score is not None
+                        ),
+                        default=None,
+                    ),
+                    embedding_versions=list(dict.fromkeys(
+                        memory.embedding_version
+                        for memory in selection.memories
+                        if memory.embedding_version
+                    )),
                     query_scope=("broad" if query_classification.broad else "specific"),
                     positive_scoring_memory_count=ranked.matched_memory_count,
                     selected_topic_buckets=list(dict.fromkeys(
@@ -311,6 +338,8 @@ class ChatService:
                 matched_memory_count=0,
                 selected_memory_ids=[],
                 query_intent=query_intent,
+                query_language_mode=query_language_mode,
+                retrieval_route="not_applicable",
                 query_scope=("broad" if query_classification.broad else "specific"),
                 top_relevance_scores=[],
                 grounding_context_created=False,
