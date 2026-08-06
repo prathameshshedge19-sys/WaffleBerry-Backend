@@ -9,6 +9,7 @@ from app.api.v1.user import router as user_router
 from app.api.v1.memory import router as memory_router
 from app.api.v1.story_memory import router as story_memory_router
 from app.api.v1.audio import router as audio_router
+from app.api.v1.registration import router as registration_router
 from app.config import get_settings
 from app.services.ai.provider_registry import validate_ai_configuration
 
@@ -33,6 +34,11 @@ app.add_middleware(
 )
 
 # Include routers
+app.include_router(
+    registration_router,
+    prefix=settings.api_v1_prefix,
+    tags=["registration"],
+)
 app.include_router(
     user_router,
     prefix=settings.api_v1_prefix,
@@ -80,12 +86,11 @@ async def api_health_check():
         "message": "API is operational",
         "features": [
             "User authentication",
+            "Email-verified registration",
             "Voice profile creation",
             "Voice sample upload",
             "Conversation management",
             "Message handling"
         ]
     }
-
-
 

@@ -102,6 +102,27 @@ class Settings(BaseSettings):
     )
     memory_grounding_max_characters: int = Field(default=6000, ge=1)
 
+    # Email Verification OTP Registration
+    registration_otp_length: int = Field(default=6, ge=4, le=10)
+    registration_otp_ttl_seconds: int = Field(default=600, ge=60)
+    registration_otp_max_attempts: int = Field(default=5, ge=1)
+    registration_otp_resend_cooldown_seconds: int = Field(default=60, ge=1)
+    registration_otp_max_sends_per_hour: int = Field(default=5, ge=1)
+    registration_session_ttl_seconds: int = Field(default=1800, ge=300)
+
+    # Email Service Configuration
+    email_provider: str = "console" if True else "smtp"  # Set to "smtp" in production
+    email_from_address: str = "noreply@waffleberry.app"
+    email_from_name: str = "WaffleBerry"
+
+    # SMTP Configuration (used when email_provider is "smtp")
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_username: str = ""
+    smtp_password: str = ""
+    smtp_use_tls: bool = True
+    smtp_timeout_seconds: float = Field(default=10.0, gt=0)
+
     @model_validator(mode="after")
     def reject_production_sqlite_fallback(self):
         """Production must explicitly select PostgreSQL persistence."""
