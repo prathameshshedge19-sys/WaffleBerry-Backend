@@ -1,7 +1,6 @@
 """Deterministic multilingual identity intent and grounding."""
 
 import json
-import re
 import unicodedata
 from dataclasses import dataclass
 
@@ -17,11 +16,18 @@ from app.models.memory import (
 )
 
 
-_WORD = re.compile(r"[^\W_]+", re.UNICODE)
-
-
 def _tokens(value: str) -> set[str]:
-    return set(_WORD.findall(unicodedata.normalize("NFKC", value).casefold()))
+    tokens: set[str] = set()
+    current: list[str] = []
+    for char in unicodedata.normalize("NFKC", value).casefold():
+        if unicodedata.category(char)[0] in {"L", "M", "N"}:
+            current.append(char)
+        elif current:
+            tokens.add("".join(current))
+            current = []
+    if current:
+        tokens.add("".join(current))
+    return tokens
 
 
 _CONCEPTS = {
@@ -41,6 +47,28 @@ _PREFERRED = {"preferred", "call", "nickname", "टोपणनाव", "पस�
 _SECOND_PERSON = {
     "you", "tula", "tumhala", "tumhe", "तुला", "तुम्हाला", "तुम्हें"
 }
+_SPOUSE_MORPHOLOGY_STEMS = (
+    "नवरा",
+    "नवऱ्या",
+    "बायको",
+    "पती",
+    "पत्नी",
+    "navra",
+    "navrya",
+    "bayko",
+    "patni",
+)
+_IDENTITY_QUESTION_WORDS = {
+    "who", "कोण", "कौन", "relationship", "नातं", "रिश्ता"
+}
+
+
+def _has_spouse_morphology(tokens: set[str]) -> bool:
+    return any(
+        token.startswith(stem)
+        for token in tokens
+        for stem in _SPOUSE_MORPHOLOGY_STEMS
+    )
 
 
 def detect_identity_intent(query: str | None) -> IdentityFactType | None:
@@ -58,7 +86,14 @@ def detect_identity_intent(query: str | None) -> IdentityFactType | None:
         return IdentityFactType.PREFERRED_NAME
     if "birth" in tokens and "date" in tokens:
         return IdentityFactType.BIRTH_DATE
+    spouse_morphology = _has_spouse_morphology(tokens)
+    if spouse_morphology and (
+        matches(_NAME) or bool(tokens & _IDENTITY_QUESTION_WORDS)
+    ):
+        return IdentityFactType.SPOUSE_NAME
     for fact_type, concepts in _CONCEPTS.items():
+        if fact_type == IdentityFactType.SPOUSE_NAME and spouse_morphology:
+            continue
         if matches(concepts):
             return fact_type
     if matches(_NAME):

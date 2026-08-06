@@ -20,6 +20,7 @@ from app.models.memory import (
 from app.models.user import User
 from app.services.memory.identity_facts import IdentityFactProjectionService
 from app.services.memory.identity_retrieval import (
+    _tokens,
     detect_identity_intent,
     IdentityFactRetrievalService,
 )
@@ -47,6 +48,39 @@ class IdentityIntentTests(unittest.TestCase):
         for query, expected in cases.items():
             with self.subTest(query=query):
                 self.assertEqual(detect_identity_intent(query), expected)
+
+    def test_marathi_spouse_inflections_preserve_unicode_words(self):
+        spouse_queries = (
+            "तुझ्या नवऱ्याचं नाव काय आहे?",
+            "तुझ्या नवऱ्याचं पूर्ण नाव काय आहे?",
+            "तुझ्या नवऱ्याचे नाव काय?",
+            "तुझ्या नवऱ्याचा नाव काय?",
+            "तुझ्या बायकोचं नाव काय आहे?",
+            "तुझ्या बायकोचे नाव काय?",
+            "तुझ्या पत्नीचं पूर्ण नाव काय आहे?",
+            "What is your husband's name?",
+            "तुम्हारे पति का नाम क्या है?",
+            "Tujhya navryacha nav kay aahe?",
+        )
+        for query in spouse_queries:
+            with self.subTest(query=query):
+                self.assertEqual(
+                    detect_identity_intent(query),
+                    IdentityFactType.SPOUSE_NAME,
+                )
+        self.assertEqual(
+            _tokens("तुझ्या नवऱ्याचं नाव काय आहे?"),
+            {"तुझ्या", "नवऱ्याचं", "नाव", "काय", "आहे"},
+        )
+
+    def test_unrelated_marathi_sentences_do_not_trigger_spouse_intent(self):
+        for query in (
+            "माझा नवरा आज बाजारात गेला.",
+            "बायकोने आज जेवण बनवलं.",
+            "पत्नी आणि पती प्रवासाला गेले.",
+        ):
+            with self.subTest(query=query):
+                self.assertIsNone(detect_identity_intent(query))
 
 
 class IdentityRetrievalTests(unittest.TestCase):
@@ -159,6 +193,17 @@ class IdentityRetrievalTests(unittest.TestCase):
         ):
             with self.subTest(query=query):
                 self.assertIn("Kiran Shedge", self.retrieve(query).context)
+
+    def test_marathi_inflected_husband_query_retrieves_spouse_fact(self):
+        self.add_fact(
+            "spouse_name",
+            "Madhav Kulkarni",
+            relationship="husband",
+        )
+        result = self.retrieve("तुझ्या नवऱ्याचं नाव काय आहे?")
+        self.assertEqual(result.fact_type, IdentityFactType.SPOUSE_NAME)
+        self.assertEqual(result.candidate_count, 1)
+        self.assertIn('"value": "Madhav Kulkarni"', result.context)
 
     def test_conflicts_are_preserved_and_other_legacy_is_isolated(self):
         self.add_fact("full_name", "Pallavi Shedge")
