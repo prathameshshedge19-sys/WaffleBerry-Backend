@@ -111,11 +111,28 @@ MEMORY_EXTRACTION_RESPONSE_SCHEMA: dict[str, object] = {
                                     "birthplace",
                                 ],
                             },
+                            "identity_facts": {
+                                "type": "array",
+                                "maxItems": 20,
+                                "items": {
+                                    "type": "object",
+                                    "additionalProperties": False,
+                                    "properties": {
+                                        "fact_type": {"type": "string", "enum": ["full_name", "preferred_name", "spouse_name", "child_name", "parent_name", "sibling_name", "birth_date", "birthplace", "hometown", "occupation", "education"]},
+                                        "value": {"type": "string", "minLength": 1, "maxLength": 255},
+                                        "relationship": _NULLABLE_STRING,
+                                        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                                        "uncertainty_note": _NULLABLE_STRING,
+                                    },
+                                    "required": ["fact_type", "value", "relationship", "confidence", "uncertainty_note"],
+                                },
+                            },
                         },
                         "required": [
                             "temporal_references",
                             "places",
                             "semantic_attributes",
+                            "identity_facts",
                         ],
                     },
                     "emotional_significance": _NULLABLE_STRING,

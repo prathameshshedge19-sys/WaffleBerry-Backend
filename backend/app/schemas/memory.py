@@ -366,6 +366,34 @@ class MemorySemanticAttributes(BaseModel):
         return normalized or None
 
 
+IDENTITY_FACT_TYPES = (
+    "full_name", "preferred_name", "spouse_name", "child_name",
+    "parent_name", "sibling_name", "birth_date", "birthplace",
+    "hometown", "occupation", "education",
+)
+
+
+class IdentityFactClaim(BaseModel):
+    """One explicit stable identity claim supported by memory evidence."""
+
+    fact_type: Literal[
+        "full_name", "preferred_name", "spouse_name", "child_name",
+        "parent_name", "sibling_name", "birth_date", "birthplace",
+        "hometown", "occupation", "education",
+    ]
+    value: str = Field(..., min_length=1, max_length=255)
+    relationship: str | None = Field(default=None, max_length=100)
+    confidence: Decimal = Field(
+        default=Decimal("1"), ge=Decimal("0"), le=Decimal("1")
+    )
+    uncertainty_note: str | None = Field(default=None, max_length=500)
+
+    _normalize_value = field_validator("value", mode="before")(_strip_required)
+    _normalize_optional = field_validator(
+        "relationship", "uncertainty_note", mode="before"
+    )(_strip_required)
+
+
 class MemoryDetails(BaseModel):
     """Validated extensible details for non-universal memory attributes."""
 
@@ -373,6 +401,9 @@ class MemoryDetails(BaseModel):
     places: list[PlaceReference] = Field(default_factory=list)
     semantic_attributes: MemorySemanticAttributes = Field(
         default_factory=MemorySemanticAttributes
+    )
+    identity_facts: list[IdentityFactClaim] = Field(
+        default_factory=list, max_length=20
     )
 
     model_config = ConfigDict(extra="allow")

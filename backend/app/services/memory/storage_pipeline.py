@@ -27,6 +27,7 @@ from app.models.memory import (
 from app.models.user import Conversation, Message
 from app.services.memory.extractor import MemoryExtractionService
 from app.services.memory.fingerprint import build_memory_fingerprint
+from app.services.memory.identity_facts import IdentityFactProjectionService
 from app.services.memory.provenance import (
     ProvenanceSourceRecord,
     RegisteredProvenanceVerifier,
@@ -371,6 +372,8 @@ class MemoryStoragePipeline:
                     memory.review_status = MemoryReviewStatus.APPROVED
                     memory.reviewed_at = datetime.now(timezone.utc)
                     memory.reviewed_by_user_id = user_id
+                    db.flush()
+                    IdentityFactProjectionService().project_memory(db, memory)
             db.commit()
             db.refresh(memory)
         except IntegrityError:

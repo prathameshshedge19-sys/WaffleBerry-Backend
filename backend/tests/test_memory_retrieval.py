@@ -275,7 +275,12 @@ class MemoryRetrievalTests(unittest.TestCase):
         details = result["memories"][0]["details"]
         self.assertEqual(
             set(details),
-            {"temporal_references", "places", "semantic_attributes"},
+            {
+                "temporal_references",
+                "places",
+                "semantic_attributes",
+                "identity_facts",
+            },
         )
         self.assertEqual(
             set(details["semantic_attributes"]),

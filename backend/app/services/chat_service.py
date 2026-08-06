@@ -27,6 +27,11 @@ from app.services.ai.external_knowledge import (
 from app.services.ai.provider import ExternalKnowledgeMode
 from app.services.conversation_continuity import ConversationContinuity
 from app.services.memory.grounding import CompanionMemoryGrounding
+from app.services.memory.identity_retrieval import (
+    detect_identity_intent,
+    IdentityFactRetrievalService,
+    IdentityGroundingResult,
+)
 from app.services.memory.fidelity import (
     MemoryFidelityAnalyzer,
     MemoryFidelityService,
@@ -95,6 +100,7 @@ class ChatService:
         persona_profiles: PersonaProfileService | None = None,
         memory_fidelity: MemoryFidelityService | None = None,
         conversation_continuity: ConversationContinuity | None = None,
+        identity_retrieval: IdentityFactRetrievalService | None = None,
     ) -> None:
         self._ai_service = ai_service
         self._context_builder = context_builder
@@ -104,6 +110,9 @@ class ChatService:
         self._memory_fidelity = memory_fidelity or MemoryFidelityService()
         self._conversation_continuity = (
             conversation_continuity or ConversationContinuity()
+        )
+        self._identity_retrieval = (
+            identity_retrieval or IdentityFactRetrievalService()
         )
 
     def prepare_ai_input(
@@ -187,6 +196,19 @@ class ChatService:
                 db.rollback()
                 persona_profile = PersonaProfile()
             try:
+                identity_result = self._identity_retrieval.retrieve(
+                    db,
+                    user_id=conversation.user_id,
+                    legacy_id=legacy_id,
+                    query=user_message,
+                )
+            except SQLAlchemyError:
+                db.rollback()
+                identity_result = IdentityGroundingResult(
+                    detect_identity_intent(user_message),
+                    None,
+                )
+            try:
                 retrieval_query = self._conversation_continuity.build_retrieval_query(
                     history,
                     user_message,
@@ -252,6 +274,12 @@ class ChatService:
                     ranked.memories
                 )
                 grounding_context = selection.context
+                if identity_result.context is not None:
+                    grounding_context = (
+                        identity_result.context
+                        if grounding_context is None
+                        else f"{identity_result.context}\n\n{grounding_context}"
+                    )
                 if selection.memories:
                     memory_ids = tuple(
                         memory.memory_id for memory in selection.memories
@@ -305,6 +333,28 @@ class ChatService:
                     ],
                     grounding_context_created=grounding_context is not None,
                     provider_call_attempted=False,
+                )
+                _safe_log(
+                    logging.INFO,
+                    "companion_identity_retrieval",
+                    request_id=request_id,
+                    user_id=conversation.user_id,
+                    conversation_id=conversation.conversation_id,
+                    legacy_id=legacy_id,
+                    identity_intent_detected=(
+                        identity_result.fact_type is not None
+                    ),
+                    identity_fact_type=(
+                        identity_result.fact_type.value
+                        if identity_result.fact_type is not None
+                        else None
+                    ),
+                    identity_candidate_count=identity_result.candidate_count,
+                    identity_conflict_present=identity_result.conflict_present,
+                    identity_fallback_to_memory=(
+                        identity_result.fact_type is not None
+                        and identity_result.context is None
+                    ),
                 )
                 try:
                     fidelity_plan = self._memory_fidelity.analyze_selected(

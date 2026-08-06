@@ -10,6 +10,7 @@ from app.models.memory import (
     CompanionMemoryProvenance,
     Legacy,
     LegacyStatus,
+    LegacyIdentityFact,
     Memory,
     MemoryContradictionGroup,
     MemoryExtractionRun,
@@ -804,6 +805,9 @@ class MemoryCRUD:
         memory.review_status = MemoryReviewStatus.SUPERSEDED
         memory.reviewed_at = datetime.now(timezone.utc)
         memory.reviewed_by_user_id = user_id
+        db.query(LegacyIdentityFact).filter(
+            LegacyIdentityFact.source_memory_id == memory.memory_id
+        ).delete(synchronize_session=False)
         try:
             db.commit()
             db.refresh(memory)

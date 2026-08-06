@@ -79,6 +79,25 @@ class MemoryReviewStatus(str, enum.Enum):
     SUPERSEDED = "superseded"
 
 
+class IdentityFactStatus(str, enum.Enum):
+    ACTIVE = "active"
+    CONFLICTING = "conflicting"
+
+
+class IdentityFactType(str, enum.Enum):
+    FULL_NAME = "full_name"
+    PREFERRED_NAME = "preferred_name"
+    SPOUSE_NAME = "spouse_name"
+    CHILD_NAME = "child_name"
+    PARENT_NAME = "parent_name"
+    SIBLING_NAME = "sibling_name"
+    BIRTH_DATE = "birth_date"
+    BIRTHPLACE = "birthplace"
+    HOMETOWN = "hometown"
+    OCCUPATION = "occupation"
+    EDUCATION = "education"
+
+
 class Legacy(Base):
     """A person whose contributed life information is being preserved."""
 
@@ -664,6 +683,64 @@ class MemoryProvenance(Base):
     message = orm_relationship("Message")
     story_session = orm_relationship("StorySession")
     story_message = orm_relationship("StoryMessage")
+
+
+class LegacyIdentityFact(Base):
+    """Approved, Legacy-scoped projection of one source-grounded identity claim."""
+
+    __tablename__ = "legacy_identity_facts"
+    __table_args__ = (
+        CheckConstraint("length(trim(value)) > 0", name="ck_identity_facts_value_not_blank"),
+        UniqueConstraint(
+            "legacy_id", "fact_type", "normalized_value", "relationship",
+            name="uq_identity_facts_legacy_type_value_relationship",
+        ),
+        Index("ix_identity_facts_legacy_status_type", "legacy_id", "status", "fact_type"),
+    )
+
+    identity_fact_id = Column(Integer, primary_key=True, index=True)
+    legacy_id = Column(
+        ForeignKey("legacies.legacy_id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    fact_type = Column(
+        _enum_column(IdentityFactType, "identity_fact_type"), nullable=False, index=True
+    )
+    value = Column(String(255), nullable=False)
+    normalized_value = Column(String(255), nullable=False)
+    relationship = Column(String(100), nullable=False, default="", server_default="")
+    status = Column(
+        _enum_column(IdentityFactStatus, "identity_fact_status"),
+        nullable=False,
+        default=IdentityFactStatus.ACTIVE,
+        server_default=IdentityFactStatus.ACTIVE.value,
+    )
+    confidence = Column(Numeric(4, 3), nullable=False)
+    uncertainty_note = Column(String(500), nullable=True)
+    source_memory_id = Column(
+        ForeignKey("memories.memory_id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    source_provenance_id = Column(
+        ForeignKey("memory_provenance.provenance_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    contradiction_group_id = Column(
+        ForeignKey(
+            "memory_contradiction_groups.contradiction_group_id",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+        index=True,
+    )
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at = Column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    legacy = orm_relationship("Legacy")
+    source_memory = orm_relationship("Memory")
+    source_provenance = orm_relationship("MemoryProvenance")
+    contradiction_group = orm_relationship("MemoryContradictionGroup")
 
 
 class MemoryRevision(Base):

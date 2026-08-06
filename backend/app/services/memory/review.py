@@ -28,6 +28,7 @@ from app.schemas.memory import (
     RelatedMemoryReview,
 )
 from app.services.memory.fingerprint import build_memory_fingerprint
+from app.services.memory.identity_facts import IdentityFactProjectionService
 
 
 class MemoryReviewError(Exception):
@@ -285,6 +286,8 @@ class MemoryReviewService:
         memory.reviewed_at = datetime.now(timezone.utc)
         memory.reviewed_by_user_id = user_id
         memory.updated_at = datetime.now(timezone.utc)
+        db.flush()
+        IdentityFactProjectionService().project_memory(db, memory)
         db.commit()
         db.refresh(memory)
         return self._to_response(db, memory, legacy_id)
