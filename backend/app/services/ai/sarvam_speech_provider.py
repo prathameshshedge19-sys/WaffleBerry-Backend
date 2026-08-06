@@ -136,16 +136,22 @@ class SarvamBulbulProvider:
         text: str,
         standard_voice_profile: StandardVoiceProfile,
         language_code: str,
+        selected_voice: str | None = None,
         dictionary_id: str | None = None,
         pace: float | None = None,
         temperature: float | None = None,
     ) -> SpeechResult:
         if language_code not in _SUPPORTED_LANGUAGES:
             raise AIProviderError("Speech language is invalid.")
-        try:
-            speaker = self._speakers[standard_voice_profile]
-        except KeyError as exc:
-            raise AIProviderError("Speech speaker is invalid.") from exc
+        if selected_voice is not None:
+            speaker = selected_voice.strip().lower()
+            if speaker not in _SUPPORTED_SPEAKERS:
+                raise AIProviderError("Speech speaker is invalid.")
+        else:
+            try:
+                speaker = self._speakers[standard_voice_profile]
+            except KeyError as exc:
+                raise AIProviderError("Speech speaker is invalid.") from exc
         resolved_pace = self._pace if pace is None else pace
         resolved_temperature = (
             self._temperature if temperature is None else temperature

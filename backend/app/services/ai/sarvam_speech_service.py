@@ -78,6 +78,7 @@ class SarvamSpeechService:
         text: str,
         standard_voice_profile: StandardVoiceProfile,
         response_format: str | None,
+        selected_voice: str | None = None,
         preserve_text: bool = True,
     ) -> SpeechResult:
         del response_format, preserve_text
@@ -107,13 +108,18 @@ class SarvamSpeechService:
         )
         started = time.monotonic()
         try:
+            provider_options = {
+                "text": plan.provider_text,
+                "standard_voice_profile": standard_voice_profile,
+                "language_code": language_code,
+                "dictionary_id": dictionary_id,
+                "pace": plan.pace,
+                "temperature": plan.temperature,
+            }
+            if selected_voice is not None:
+                provider_options["selected_voice"] = selected_voice
             result = await self._provider.synthesize(
-                text=plan.provider_text,
-                standard_voice_profile=standard_voice_profile,
-                language_code=language_code,
-                dictionary_id=dictionary_id,
-                pace=plan.pace,
-                temperature=plan.temperature,
+                **provider_options,
             )
         except Exception as exc:
             logger.warning(
@@ -121,7 +127,7 @@ class SarvamSpeechService:
                 "language_mode=%s, emotion=%s, confidence=%s, pace=%.2f, "
                 "temperature=%.2f, prosody_shaping_applied=%s, "
                 "dictionary_applied=%s, elapsed_ms=%d, category=%s).",
-                standard_voice_profile.value,
+                selected_voice or standard_voice_profile.value,
                 language_mode.value,
                 plan.emotion.value,
                 plan.confidence.value,
@@ -138,7 +144,7 @@ class SarvamSpeechService:
             "language_mode=%s, emotion=%s, confidence=%s, pace=%.2f, "
             "temperature=%.2f, prosody_shaping_applied=%s, "
             "dictionary_applied=%s, elapsed_ms=%d, audio_bytes=%d).",
-            standard_voice_profile.value,
+            selected_voice or standard_voice_profile.value,
             language_mode.value,
             plan.emotion.value,
             plan.confidence.value,

@@ -3,7 +3,7 @@
 from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
-from app.models.user import User, VoiceProfile, VoiceSample, Conversation, Message, MessageRole
+from app.models.user import User, UserSettings, VoiceProfile, VoiceSample, Conversation, Message, MessageRole
 from app.models.memory import (
     CompanionMemoryProvenance,
     Legacy,
@@ -65,6 +65,27 @@ class UserCRUD:
     def get_users(db: Session, skip: int = 0, limit: int = 10) -> list[User]:
         """Get all users with pagination."""
         return db.query(User).offset(skip).limit(limit).all()
+
+    @staticmethod
+    def get_settings(db: Session, user_id: int) -> UserSettings | None:
+        return db.query(UserSettings).filter(
+            UserSettings.user_id == user_id
+        ).first()
+
+    @staticmethod
+    def set_preferred_voice(
+        db: Session,
+        user_id: int,
+        voice: str | None,
+    ) -> UserSettings:
+        settings = UserCRUD.get_settings(db, user_id)
+        if settings is None:
+            settings = UserSettings(user_id=user_id)
+            db.add(settings)
+        settings.preferred_voice = voice
+        db.commit()
+        db.refresh(settings)
+        return settings
 
 
 class VoiceProfileCRUD:

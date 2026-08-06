@@ -2,11 +2,13 @@
 
 from sqlalchemy.orm import Session
 
-from app.crud.user import ConversationCRUD, MessageCRUD
+from app.crud.user import ConversationCRUD, MessageCRUD, UserCRUD
 from app.models.user import MessageRole, User
 from app.services.ai.provider import SpeechResult
 from app.services.ai.message_speech_engine import MessageSpeechEngine
 from app.services.voice_profile_resolver import StandardVoiceResolver
+from app.services.personal_voice_speech_service import PersonalVoiceSpeechService
+from app.services.voice_catalogue import get_voice
 
 
 class MessageSpeechError(Exception):
@@ -28,10 +30,12 @@ class MessageSpeechService:
         voice_resolver: StandardVoiceResolver,
         *,
         max_text_characters: int,
+        personal_voice_service: PersonalVoiceSpeechService | None = None,
     ) -> None:
         self._speech_service = speech_service
         self._voice_resolver = voice_resolver
         self._max_text_characters = max_text_characters
+        self._personal_voice_service = personal_voice_service
 
     async def synthesize_assistant_message(
         self,
@@ -91,9 +95,21 @@ class MessageSpeechService:
         voice_profile = self._voice_resolver.resolve(
             getattr(legacy, "relationship", None)
         )
+        settings = UserCRUD.get_settings(db, current_user.user_id)
+        selected_voice = get_voice(
+            settings.preferred_voice if settings else None
+        )
 
         # End the read-only transaction before awaiting the external provider.
         db.rollback()
+        if selected_voice is not None:
+            if self._personal_voice_service is None:
+                raise RuntimeError("Personal voice routing is not configured.")
+            return await self._personal_voice_service.synthesize(
+                text=stored_text,
+                voice=selected_voice,
+                response_format=response_format,
+            )
         return await self._speech_service.synthesize(
             text=stored_text,
             standard_voice_profile=voice_profile,

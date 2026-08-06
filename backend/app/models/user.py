@@ -192,6 +192,14 @@ class UserSettings(Base):
     """User Settings model - user preferences."""
     
     __tablename__ = "user_settings"
+    __table_args__ = (
+        CheckConstraint(
+            "preferred_voice IS NULL OR preferred_voice IN ("
+            "'rohan','mani','shubh','varun','cedar',"
+            "'rupali','simran','ritu','suhani','marin')",
+            name="ck_user_settings_preferred_voice",
+        ),
+    )
     
     setting_id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, nullable=False, index=True, unique=True)
@@ -199,6 +207,7 @@ class UserSettings(Base):
     language = Column(String(50), default="English")
     speech_speed = Column(String(20), default="normal")  # slow, normal, fast
     ai_personality = Column(String(50), default="friendly")
+    preferred_voice = Column(String(20), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     

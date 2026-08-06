@@ -26,6 +26,7 @@ from app.services.pronunciation_dictionary_service import (
 )
 from app.services.message_speech_service import MessageSpeechService
 from app.services.voice_profile_resolver import StandardVoiceResolver
+from app.services.personal_voice_speech_service import PersonalVoiceSpeechService
 
 
 @lru_cache()
@@ -75,11 +76,9 @@ def get_speech_service() -> SpeechService:
 
 
 @lru_cache()
-def get_message_speech_service() -> MessageSpeechService:
-    """Return read-only stored-message speech orchestration."""
+def get_sarvam_message_speech_service() -> SarvamSpeechService:
     settings = get_settings()
-    return MessageSpeechService(
-        SarvamSpeechService(
+    return SarvamSpeechService(
             SarvamBulbulProvider(
                 api_key=settings.sarvam_api_key,
                 model=settings.sarvam_model,
@@ -99,9 +98,22 @@ def get_message_speech_service() -> MessageSpeechService:
             emotion_enabled=settings.speech_emotion_enabled,
             nonverbal_cues_enabled=settings.speech_nonverbal_cues_enabled,
             discourse_markers_enabled=settings.speech_discourse_markers_enabled,
-        ),
+        )
+
+
+@lru_cache()
+def get_message_speech_service() -> MessageSpeechService:
+    """Return read-only stored-message speech orchestration."""
+    settings = get_settings()
+    sarvam_service = get_sarvam_message_speech_service()
+    return MessageSpeechService(
+        sarvam_service,
         StandardVoiceResolver(settings.default_standard_voice_profile),
         max_text_characters=settings.sarvam_max_text_characters,
+        personal_voice_service=PersonalVoiceSpeechService(
+            sarvam_service=sarvam_service,
+            openai_service=get_speech_service(),
+        ),
     )
 
 

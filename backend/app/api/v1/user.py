@@ -15,7 +15,8 @@ from app.schemas.user import (
     UserCreate, UserLogin, UserResponse, LoginResponse, VoiceProfileCreate, VoiceProfileResponse, 
     VoiceProfileUpdate, VoiceSampleCreate, VoiceSampleResponse,
     ConversationCreate, ConversationUpdate, ConversationResponse,
-    MessageCreate, MessagePairResponse, MessageResponse, StoryGuideRequest
+    MessageCreate, MessagePairResponse, MessageResponse, StoryGuideRequest,
+    VoicePreferenceResponse, VoicePreferenceUpdate,
 )
 from app.schemas.audio import MessageSpeechRequest
 from app.crud.user import (
@@ -41,6 +42,7 @@ from app.services.message_speech_service import (
     MessageSpeechError,
     MessageSpeechService,
 )
+from app.services.voice_catalogue import public_catalogue
 
 logger = logging.getLogger(__name__)
 
@@ -273,6 +275,45 @@ async def read_current_user(
 ):
     """Return the user authenticated by the Bearer access token."""
     return current_user
+
+
+@router.get(
+    "/user/voice-preference",
+    response_model=VoicePreferenceResponse,
+)
+async def get_voice_preference(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Return provider-neutral voice choices and this user's preference."""
+    settings = UserCRUD.get_settings(db, current_user.user_id)
+    selected = settings.preferred_voice if settings else None
+    return {
+        "selected_voice": selected,
+        "is_explicit_selection": selected is not None,
+        "available_voices": public_catalogue(),
+    }
+
+
+@router.put(
+    "/user/voice-preference",
+    response_model=VoicePreferenceResponse,
+)
+async def update_voice_preference(
+    preference: VoicePreferenceUpdate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Persist only the authenticated user's selected provider-neutral ID."""
+    settings = UserCRUD.set_preferred_voice(
+        db,
+        current_user.user_id,
+        preference.voice,
+    )
+    return {
+        "selected_voice": settings.preferred_voice,
+        "is_explicit_selection": settings.preferred_voice is not None,
+    }
 
 @router.get("/users/{user_id}", response_model=UserResponse)
 async def get_user(user_id: int, db: Session = Depends(get_db)):

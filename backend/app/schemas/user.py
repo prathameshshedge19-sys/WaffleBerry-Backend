@@ -7,6 +7,12 @@ from typing import Literal, Optional
 from app.models.user import MessageRole
 
 
+VoiceId = Literal[
+    "rohan", "mani", "shubh", "varun", "cedar",
+    "rupali", "simran", "ritu", "suhani", "marin",
+]
+
+
 # ==================== USER SCHEMAS ====================
 
 class UserBase(BaseModel):
@@ -40,6 +46,28 @@ class LoginResponse(BaseModel):
     access_token: str
     token_type: Literal["bearer"]
     user: UserResponse
+
+
+class VoiceOptionResponse(BaseModel):
+    id: VoiceId
+    name: str
+    recommendation: str
+
+
+class AvailableVoicesResponse(BaseModel):
+    male: list[VoiceOptionResponse]
+    female: list[VoiceOptionResponse]
+
+
+class VoicePreferenceUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    voice: VoiceId | None
+
+
+class VoicePreferenceResponse(BaseModel):
+    selected_voice: VoiceId | None
+    is_explicit_selection: bool
+    available_voices: AvailableVoicesResponse | None = None
 
 
 # ==================== VOICE PROFILE SCHEMAS ====================

@@ -14,7 +14,7 @@ from app.db import Base, get_db
 from app.dependencies.auth import get_current_user
 from app.main import app
 from app.models.memory import Legacy
-from app.models.user import Conversation, Message, MessageRole, User
+from app.models.user import Conversation, Message, MessageRole, User, UserSettings
 from app.services.ai.exceptions import (
     AIProviderError,
     AIProviderUnavailableError,
@@ -62,6 +62,19 @@ class FakeSpeechService:
             content=b"persisted assistant speech",
             media_type=SPEECH_MEDIA_TYPES[resolved_format],
             file_extension=resolved_format,
+        )
+
+
+class FakePersonalVoiceService:
+    def __init__(self):
+        self.calls = []
+
+    async def synthesize(self, **kwargs):
+        self.calls.append(kwargs)
+        return SpeechResult(
+            content=b"selected voice speech",
+            media_type="audio/mpeg",
+            file_extension="mp3",
         )
 
 
@@ -158,10 +171,12 @@ class MessageSpeechTestCase(unittest.TestCase):
         )
 
         self.speech = FakeSpeechService()
+        self.personal_speech = FakePersonalVoiceService()
         self.service = MessageSpeechService(
             self.speech,
             StandardVoiceResolver("standard_female"),
             max_text_characters=4096,
+            personal_voice_service=self.personal_speech,
         )
         app.dependency_overrides[get_db] = lambda: self.session
         app.dependency_overrides[get_current_user] = lambda: self.owner
@@ -379,6 +394,21 @@ class MessageSpeechOptionsAndResponseTests(MessageSpeechTestCase):
             self.speech.calls[-1]["standard_voice_profile"],
             StandardVoiceProfile.MALE,
         )
+
+    def test_explicit_user_voice_overrides_relationship_resolution(self):
+        self.session.add(UserSettings(
+            user_id=self.owner.user_id,
+            preferred_voice="cedar",
+        ))
+        self.session.commit()
+        response = self.client.post(self.endpoint(), json={})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, b"selected voice speech")
+        self.assertEqual(
+            self.personal_speech.calls[-1]["voice"].id,
+            "cedar",
+        )
+        self.assertEqual(self.speech.calls, [])
 
     def test_supported_historical_relationships_and_fallback_are_resolved(self):
         cases = (
