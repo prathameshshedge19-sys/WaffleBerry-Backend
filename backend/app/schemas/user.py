@@ -36,6 +36,28 @@ class ResendOTPRequest(BaseModel):
 
     email: EmailStr
     
+class ForgotPasswordRequest(BaseModel):
+    """Request body for requesting a password reset."""
+
+    email: EmailStr
+
+
+class VerifyResetOTPRequest(BaseModel):
+    """Request body for verifying a password reset OTP."""
+
+    email: EmailStr
+    otp: str
+
+class ResetPasswordRequest(BaseModel):
+    """Request body for resetting the password."""
+
+    email: EmailStr
+    password: str = Field(
+        ...,
+        min_length=8,
+        description="Password must be at least 8 characters"
+    )
+    
 class UserResponse(UserBase):
     """Schema for user response."""
     user_id: int

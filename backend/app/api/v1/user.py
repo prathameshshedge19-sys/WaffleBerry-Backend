@@ -17,7 +17,8 @@ from app.schemas.user import (
     UserCreate, UserLogin, UserResponse, SignupResponse, LoginResponse, VoiceProfileCreate, VoiceProfileResponse, 
     VoiceProfileUpdate, VoiceSampleCreate, VoiceSampleResponse,
     ConversationCreate, ConversationUpdate, ConversationResponse,
-    MessageCreate, MessagePairResponse, MessageResponse, VerifyEmailRequest,ResendOTPRequest
+    MessageCreate, MessagePairResponse, MessageResponse, VerifyEmailRequest,ResendOTPRequest, ForgotPasswordRequest,
+    VerifyResetOTPRequest, ResetPasswordRequest
 )
 from app.crud.user import (
     UserCRUD, VoiceProfileCRUD, VoiceSampleCRUD, ConversationCRUD, MessageCRUD
@@ -281,15 +282,112 @@ async def resend_otp(
             detail="User not found",
         )
 
+    purpose = (
+        "password_reset"
+        if user.is_verified
+        else "email_verification"
+    )
+
     otp = EmailVerificationService.resend_otp(
         db=db,
         user_id=user.user_id,
+        purpose=purpose,
     )
 
     await EmailService.send_otp(user.email, otp)
 
     return {
         "message": "OTP resent successfully"
+    }
+    
+@router.post("/forgot-password")
+async def forgot_password(
+    request: ForgotPasswordRequest,
+    db: Session = Depends(get_db),
+):
+    """Send a password reset OTP."""
+
+    user = UserCRUD.get_user_by_email(db, request.email)
+
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found",
+        )
+
+    otp = EmailVerificationService.resend_otp(
+        db=db,
+        user_id=user.user_id,
+        purpose="password_reset",
+    )
+
+    try:
+        await EmailService.send_otp(user.email, otp)
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Unable to send reset code. Please try again.",
+        )
+
+    return {
+        "message": "Password reset OTP sent successfully."
+    }
+    
+@router.post("/verify-reset-otp")
+async def verify_reset_otp(
+    request: VerifyResetOTPRequest,
+    db: Session = Depends(get_db),
+):
+    """Verify password reset OTP."""
+
+    user = UserCRUD.get_user_by_email(db, request.email)
+
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found",
+        )
+
+    status_result = EmailVerificationService.verify_otp_status(
+        db=db,
+        user_id=user.user_id,
+        otp=request.otp,
+        purpose="password_reset",
+    )
+
+    if status_result != "verified":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or expired OTP",
+        )
+
+    return {
+        "message": "OTP verified successfully."
+    }
+
+@router.post("/reset-password")
+async def reset_password(
+    request: ResetPasswordRequest,
+    db: Session = Depends(get_db),
+):
+    """Reset a user's password."""
+
+    user = UserCRUD.get_user_by_email(db, request.email)
+
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found",
+        )
+
+    UserCRUD.update_password(
+        db,
+        user,
+        request.password
+    )
+
+    return {
+        "message": "Password reset successfully."
     }
     
 @router.get("/me", response_model=UserResponse)
