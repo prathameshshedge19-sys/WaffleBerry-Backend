@@ -37,6 +37,7 @@ from app.services.memory.fidelity import (
     MemoryFidelityService,
 )
 from app.services.memory.multilingual_retrieval import detect_query_language_mode
+from app.services.memory.name_resolution import NameResolution, ProperNameResolver
 from app.services.memory.retrieval import (
     MemoryRetrievalArchivedError,
     MemoryRetrievalNotFoundError,
@@ -101,6 +102,7 @@ class ChatService:
         memory_fidelity: MemoryFidelityService | None = None,
         conversation_continuity: ConversationContinuity | None = None,
         identity_retrieval: IdentityFactRetrievalService | None = None,
+        name_resolver: ProperNameResolver | None = None,
     ) -> None:
         self._ai_service = ai_service
         self._context_builder = context_builder
@@ -114,6 +116,7 @@ class ChatService:
         self._identity_retrieval = (
             identity_retrieval or IdentityFactRetrievalService()
         )
+        self._name_resolver = name_resolver or ProperNameResolver()
 
     def prepare_ai_input(
         self,
@@ -159,6 +162,7 @@ class ChatService:
         query_intent = query_classification.intent
         query_language_mode = detect_query_language_mode(user_message)
         knowledge_plan = ExternalKnowledgeClassifier.classify(user_message)
+        name_resolution = NameResolution()
         legacy_id = getattr(conversation, "legacy_id", None)
         if (
             legacy_id is not None
@@ -196,11 +200,31 @@ class ChatService:
                 db.rollback()
                 persona_profile = PersonaProfile()
             try:
-                identity_result = self._identity_retrieval.retrieve(
+                name_resolution = self._name_resolver.resolve(
                     db,
                     user_id=conversation.user_id,
                     legacy_id=legacy_id,
                     query=user_message,
+                )
+            except SQLAlchemyError:
+                db.rollback()
+                name_resolution = NameResolution()
+            try:
+                identity_arguments = {
+                    "user_id": conversation.user_id,
+                    "legacy_id": legacy_id,
+                    "query": user_message,
+                }
+                if name_resolution.fact_type is not None:
+                    identity_arguments["fact_type_override"] = (
+                        name_resolution.fact_type
+                    )
+                    identity_arguments["canonical_value_override"] = (
+                        name_resolution.canonical_value
+                    )
+                identity_result = self._identity_retrieval.retrieve(
+                    db,
+                    **identity_arguments,
                 )
             except SQLAlchemyError:
                 db.rollback()
@@ -213,6 +237,7 @@ class ChatService:
                     history,
                     user_message,
                 )
+                retrieval_query = name_resolution.expand_query(retrieval_query)
                 query_classification = MemoryRelevanceRanker.classify_query(
                     retrieval_query
                 )
@@ -355,6 +380,29 @@ class ChatService:
                         identity_result.fact_type is not None
                         and identity_result.context is None
                     ),
+                )
+                _safe_log(
+                    logging.INFO,
+                    "companion_name_resolution",
+                    request_id=request_id,
+                    user_id=conversation.user_id,
+                    conversation_id=conversation.conversation_id,
+                    legacy_id=legacy_id,
+                    name_resolution_attempted=True,
+                    candidate_count=name_resolution.candidate_count,
+                    resolution_method=(
+                        "deterministic_transliteration_context"
+                        if name_resolution.canonical_value is not None
+                        else None
+                    ),
+                    resolution_confidence_bucket=(
+                        "high" if name_resolution.confidence >= 0.90 else "none"
+                    ),
+                    relationship_context_used=(
+                        name_resolution.relationship_context_used
+                    ),
+                    ambiguous_resolution=name_resolution.ambiguous,
+                    fallback_used=(name_resolution.canonical_value is None),
                 )
                 try:
                     fidelity_plan = self._memory_fidelity.analyze_selected(

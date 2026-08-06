@@ -77,13 +77,22 @@ class IdentityGroundingResult:
 class IdentityFactRetrievalService:
     """Retrieve question-scoped identity facts after owner validation."""
 
-    def retrieve(self, db: Session, *, user_id: int, legacy_id: int, query: str) -> IdentityGroundingResult:
-        fact_type = detect_identity_intent(query)
+    def retrieve(
+        self,
+        db: Session,
+        *,
+        user_id: int,
+        legacy_id: int,
+        query: str,
+        fact_type_override: IdentityFactType | None = None,
+        canonical_value_override: str | None = None,
+    ) -> IdentityGroundingResult:
+        fact_type = fact_type_override or detect_identity_intent(query)
         if fact_type is None:
             return IdentityGroundingResult(None, None)
         if LegacyCRUD.get_user_legacy(db, legacy_id, user_id) is None:
             return IdentityGroundingResult(fact_type, None)
-        facts = db.query(LegacyIdentityFact).join(
+        query_builder = db.query(LegacyIdentityFact).join(
             Memory, Memory.memory_id == LegacyIdentityFact.source_memory_id
         ).filter(
             LegacyIdentityFact.legacy_id == legacy_id,
@@ -91,7 +100,14 @@ class IdentityFactRetrievalService:
             LegacyIdentityFact.status.in_((IdentityFactStatus.ACTIVE, IdentityFactStatus.CONFLICTING)),
             Memory.review_status == MemoryReviewStatus.APPROVED,
             Memory.superseded_by_memory_id.is_(None),
-        ).order_by(LegacyIdentityFact.identity_fact_id).all()
+        )
+        if canonical_value_override is not None:
+            query_builder = query_builder.filter(
+                LegacyIdentityFact.value == canonical_value_override
+            )
+        facts = query_builder.order_by(
+            LegacyIdentityFact.identity_fact_id
+        ).all()
         if not facts:
             return IdentityGroundingResult(fact_type, None)
         records = [
