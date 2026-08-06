@@ -173,7 +173,8 @@ class CompanionMemoryGroundingTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("examine every supplied memory", prompt)
         self.assertIn("synthesize multiple compatible memories", prompt)
         self.assertIn("do not append generic \"I don't remember more\"", prompt)
-        self.assertIn("identify the specific remaining uncertainty", prompt)
+        self.assertIn("state the supported part clearly", prompt)
+        self.assertIn("Never append uncertainty", prompt)
 
     def test_uncertainty_metadata_and_cautious_instruction_reach_prompt(self):
         memory = ranked_memory(
