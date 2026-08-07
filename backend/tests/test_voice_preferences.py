@@ -89,6 +89,27 @@ class VoicePreferenceAPITests(unittest.TestCase):
         app.dependency_overrides.pop(get_current_user)
         self.assertEqual(self.client.get("/api/v1/user/voice-preference").status_code, 401)
 
+    def test_conversation_preferences_defaults_save_allowlist_and_user_isolation(self):
+        initial = self.client.get("/api/v1/user/conversation-preferences")
+        self.assertEqual(initial.status_code, 200)
+        self.assertEqual(initial.json()["conversation_style"], "natural")
+        self.assertEqual(initial.json()["response_length"], "balanced")
+        saved = self.client.put("/api/v1/user/conversation-preferences", json={
+            "voice": "simran", "conversation_style": "gentle", "response_length": "short",
+        })
+        self.assertEqual(saved.status_code, 200)
+        self.assertEqual(saved.json()["selected_voice"], "simran")
+        self.assertEqual(saved.json()["conversation_style"], "gentle")
+        self.assertEqual(saved.json()["response_length"], "short")
+        self.assertEqual(self.client.put("/api/v1/user/conversation-preferences", json={
+            "voice": "simran", "conversation_style": "prompt injection",
+            "response_length": "short",
+        }).status_code, 422)
+        app.dependency_overrides[get_current_user] = lambda: self.other
+        other = self.client.get("/api/v1/user/conversation-preferences").json()
+        self.assertIsNone(other["selected_voice"])
+        self.assertEqual(other["conversation_style"], "natural")
+
 
 class FakeSelectedEngine:
     def __init__(self):

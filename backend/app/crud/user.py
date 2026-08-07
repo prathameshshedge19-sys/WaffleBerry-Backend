@@ -87,6 +87,22 @@ class UserCRUD:
         db.refresh(settings)
         return settings
 
+    @staticmethod
+    def set_conversation_preferences(
+        db: Session, user_id: int, *, voice: str | None,
+        conversation_style: str, response_length: str,
+    ) -> UserSettings:
+        settings = UserCRUD.get_settings(db, user_id)
+        if settings is None:
+            settings = UserSettings(user_id=user_id)
+            db.add(settings)
+        settings.preferred_voice = voice
+        settings.conversation_style = conversation_style
+        settings.response_length = response_length
+        db.commit()
+        db.refresh(settings)
+        return settings
+
 
 class VoiceProfileCRUD:
     """CRUD operations for voice profiles."""

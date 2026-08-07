@@ -39,7 +39,6 @@ LIVE_CALL_CLIENT_EVENTS = frozenset({
     "transcription.audio",
     "interrupt",
     "session.end",
-    "session.settings",
     "latency.playback_started",
     "latency.frontend_first_playable_chunk",
     "latency.client_turn",
@@ -61,7 +60,6 @@ LIVE_CALL_SERVER_EVENTS = frozenset({
     "response.completed",
     "response.interrupted",
     "session.ended",
-    "session.settings.updated",
     "error",
     "latency.commit_received",
 })
@@ -233,6 +231,8 @@ class LiveCallSessionStore:
         legacy_name: str,
         relationship: str,
         effective_voice: str,
+        conversation_style: str = "natural",
+        response_length: str = "balanced",
     ) -> LiveCallSession:
         now = datetime.now(timezone.utc)
         with self._lock:
@@ -252,6 +252,8 @@ class LiveCallSessionStore:
                 state="connecting",
                 created_at=now,
                 expires_at=now + SESSION_TTL,
+                conversation_style=conversation_style,
+                response_length=response_length,
             )
             self._sessions[session.session_id] = session
             self._runtime[session.session_id] = LiveCallRuntime()
@@ -301,31 +303,6 @@ class LiveCallSessionStore:
             connected = replace(session, state="connected")
             self._sessions[session_id] = connected
             return connected
-
-    def update_settings(
-        self,
-        session_id: str,
-        *,
-        conversation_style: str,
-        response_length: str,
-    ) -> LiveCallSession | None:
-        """Apply allowlisted call-only preferences to active ephemeral state."""
-        if (
-            conversation_style not in LIVE_CALL_STYLES
-            or response_length not in LIVE_CALL_RESPONSE_LENGTHS
-        ):
-            return None
-        with self._lock:
-            session = self._sessions.get(session_id)
-            if session is None or session.state == "ended":
-                return None
-            updated = replace(
-                session,
-                conversation_style=conversation_style,
-                response_length=response_length,
-            )
-            self._sessions[session_id] = updated
-            return updated
 
     def end(self, session_id: str, *, user_id: int) -> LiveCallSession | None:
         now = datetime.now(timezone.utc)

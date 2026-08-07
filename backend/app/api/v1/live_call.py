@@ -209,6 +209,7 @@ async def create_live_call_session(
     # Construct cached provider clients before the WebSocket greeting path.
     # This performs no transcription, generation, embedding, or synthesis call.
     get_live_call_turn_service()
+    preferences = UserCRUD.get_settings(db, current_user.user_id)
     session = live_call_sessions.create(
         user_id=current_user.user_id,
         legacy_id=legacy.legacy_id,
@@ -217,6 +218,8 @@ async def create_live_call_session(
         effective_voice=_effective_voice(
             db, current_user.user_id, legacy.relationship
         ),
+        conversation_style=(preferences.conversation_style if preferences else "natural"),
+        response_length=(preferences.response_length if preferences else "balanced"),
     )
     return LiveCallSessionResponse(
         session_id=session.session_id,
@@ -574,27 +577,6 @@ async def live_call_transport(
                     metrics.get("session_ready_to_greeting_audio_ms"),
                     metrics.get("session_ready_to_greeting_playback_ms"),
                 )
-                continue
-            if event_type == "session.settings":
-                if set(event) - {"version", "type", "conversation_style", "response_length"}:
-                    await send_error("invalid_session_settings")
-                    continue
-                style = event.get("conversation_style")
-                length = event.get("response_length")
-                updated = live_call_sessions.update_settings(
-                    session_id,
-                    conversation_style=style,
-                    response_length=length,
-                ) if isinstance(style, str) and isinstance(length, str) else None
-                if updated is None:
-                    await send_error("invalid_session_settings")
-                    continue
-                await websocket.send_json({
-                    "version": LIVE_CALL_EVENT_VERSION,
-                    "type": "session.settings.updated",
-                    "conversation_style": updated.conversation_style,
-                    "response_length": updated.response_length,
-                })
                 continue
             if event_type == "interrupt":
                 turn_id = event.get("turn_id")

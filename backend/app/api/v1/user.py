@@ -17,6 +17,7 @@ from app.schemas.user import (
     ConversationCreate, ConversationUpdate, ConversationResponse,
     MessageCreate, MessagePairResponse, MessageResponse, StoryGuideRequest,
     VoicePreferenceResponse, VoicePreferenceUpdate,
+    ConversationPreferenceResponse, ConversationPreferenceUpdate,
 )
 from app.schemas.audio import MessageSpeechRequest
 from app.crud.user import (
@@ -313,6 +314,39 @@ async def update_voice_preference(
     return {
         "selected_voice": settings.preferred_voice,
         "is_explicit_selection": settings.preferred_voice is not None,
+    }
+
+
+@router.get("/user/conversation-preferences", response_model=ConversationPreferenceResponse)
+async def get_conversation_preferences(
+    current_user: User = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    settings = UserCRUD.get_settings(db, current_user.user_id)
+    selected = settings.preferred_voice if settings else None
+    return {
+        "selected_voice": selected,
+        "is_explicit_selection": selected is not None,
+        "conversation_style": settings.conversation_style if settings else "natural",
+        "response_length": settings.response_length if settings else "balanced",
+        "available_voices": public_catalogue(),
+    }
+
+
+@router.put("/user/conversation-preferences", response_model=ConversationPreferenceResponse)
+async def update_conversation_preferences(
+    preference: ConversationPreferenceUpdate,
+    current_user: User = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    settings = UserCRUD.set_conversation_preferences(
+        db, current_user.user_id, voice=preference.voice,
+        conversation_style=preference.conversation_style,
+        response_length=preference.response_length,
+    )
+    return {
+        "selected_voice": settings.preferred_voice,
+        "is_explicit_selection": settings.preferred_voice is not None,
+        "conversation_style": settings.conversation_style,
+        "response_length": settings.response_length,
     }
 
 @router.get("/users/{user_id}", response_model=UserResponse)
@@ -696,12 +730,15 @@ async def create_message(
     _require_active_conversation_legacy(
         db, conversation, current_user.user_id
     )
+    preferences = UserCRUD.get_settings(db, current_user.user_id)
 
     try:
         generation = await get_chat_service().generate_response_with_provenance(
             db,
             conversation,
-            message.content
+            message.content,
+            conversation_style=(preferences.conversation_style if preferences else "natural"),
+            response_length=(preferences.response_length if preferences else "balanced"),
         )
     except AIServiceError as exc:
         logger.exception(
@@ -752,12 +789,15 @@ async def create_message_stream(
     _require_active_conversation_legacy(
         db, conversation, current_user.user_id
     )
+    preferences = UserCRUD.get_settings(db, current_user.user_id)
 
     try:
         stream_plan = get_chat_service().stream_response_with_provenance(
             db,
             conversation,
             message.content,
+            conversation_style=(preferences.conversation_style if preferences else "natural"),
+            response_length=(preferences.response_length if preferences else "balanced"),
         )
         response_stream = stream_plan.stream
     except AIServiceError as exc:

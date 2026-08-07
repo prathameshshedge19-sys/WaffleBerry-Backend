@@ -70,6 +70,21 @@ class VoicePreferenceResponse(BaseModel):
     available_voices: AvailableVoicesResponse | None = None
 
 
+class ConversationPreferenceUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    voice: VoiceId | None
+    conversation_style: Literal["natural", "gentle", "expressive"]
+    response_length: Literal["short", "balanced", "detailed"]
+
+
+class ConversationPreferenceResponse(BaseModel):
+    selected_voice: VoiceId | None
+    is_explicit_selection: bool
+    conversation_style: Literal["natural", "gentle", "expressive"]
+    response_length: Literal["short", "balanced", "detailed"]
+    available_voices: AvailableVoicesResponse | None = None
+
+
 # ==================== VOICE PROFILE SCHEMAS ====================
 
 class VoiceProfileBase(BaseModel):

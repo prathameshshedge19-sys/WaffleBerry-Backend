@@ -127,12 +127,15 @@ class ChatService:
         db: Session,
         conversation: Conversation,
         user_message: str,
+        *, conversation_style: str = "natural", response_length: str = "balanced",
     ) -> list[AIMessage]:
         """Return provider messages while retaining the established contract."""
         return self._prepare_companion_input(
             db,
             conversation,
             user_message,
+            conversation_style=conversation_style,
+            response_length=response_length,
         ).messages
 
     def _prepare_companion_input(
@@ -143,6 +146,8 @@ class ChatService:
         *,
         history_override: Iterable[ConversationMessage] | None = None,
         live_call: bool = False,
+        conversation_style: str = "natural",
+        response_length: str = "balanced",
     ) -> PreparedCompanionInput:
         """Prepare messages and internal grounding provenance together."""
         if history_override is None:
@@ -463,7 +468,7 @@ class ChatService:
                 provider_call_attempted=False,
             )
         return PreparedCompanionInput(
-            messages=self._context_builder.build_chat_messages(
+            messages=self._apply_presentation_preferences(self._context_builder.build_chat_messages(
                 history,
                 user_message,
                 grounding_context=grounding_context,
@@ -476,7 +481,7 @@ class ChatService:
                     knowledge_plan.query_mode != "autobiographical_memory"
                 ),
                 live_call=live_call,
-            ),
+            ), conversation_style, response_length, live_call),
             memory_ids=memory_ids,
             retrieved_at=retrieved_at,
             request_id=request_id,
@@ -516,12 +521,15 @@ class ChatService:
         db: Session,
         conversation: Conversation,
         user_message: str,
+        *, conversation_style: str = "natural", response_length: str = "balanced",
     ) -> CompanionGeneration:
         """Generate text and return internal supplied-memory provenance."""
         prepared = self._prepare_companion_input(
             db,
             conversation,
             user_message,
+            conversation_style=conversation_style,
+            response_length=response_length,
         )
         db.rollback()
         self._log_provider_attempt(prepared, conversation)
@@ -596,12 +604,15 @@ class ChatService:
         db: Session,
         conversation: Conversation,
         user_message: str,
+        *, conversation_style: str = "natural", response_length: str = "balanced",
     ) -> CompanionStreamPlan:
         """Prepare stream and provenance before provider iteration begins."""
         prepared = self._prepare_companion_input(
             db,
             conversation,
             user_message,
+            conversation_style=conversation_style,
+            response_length=response_length,
         )
         db.rollback()
         return CompanionStreamPlan(
@@ -636,6 +647,30 @@ class ChatService:
             fallback_reason=None,
             provider_tool_exception_type=None,
         )
+
+    @staticmethod
+    def _apply_presentation_preferences(
+        messages: list[AIMessage], conversation_style: str,
+        response_length: str, live_call: bool,
+    ) -> list[AIMessage]:
+        if live_call:
+            return messages
+        style = {
+            "natural": "Use the established natural conversational tone.",
+            "gentle": "Use calm, soft wording.",
+            "expressive": "Use slightly more energetic wording.",
+        }[conversation_style]
+        length = {
+            "short": "Keep the answer concise when supported facts permit it.",
+            "balanced": "Use the normal conversational level of detail.",
+            "detailed": "Give a more complete answer using only supported information.",
+        }[response_length]
+        messages.insert(1, AIMessage(
+            role="system",
+            content=("Presentation preferences only; never alter retrieval, identity, grounding, "
+                     f"contradiction handling, uncertainty, or factual content. {style} {length}"),
+        ))
+        return messages
 
     def prepare_live_call_input(
         self,

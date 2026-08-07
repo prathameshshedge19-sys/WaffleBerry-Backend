@@ -199,6 +199,14 @@ class UserSettings(Base):
             "'rupali','simran','ritu','suhani','marin')",
             name="ck_user_settings_preferred_voice",
         ),
+        CheckConstraint(
+            "conversation_style IN ('natural','gentle','expressive')",
+            name="ck_user_settings_conversation_style",
+        ),
+        CheckConstraint(
+            "response_length IN ('short','balanced','detailed')",
+            name="ck_user_settings_response_length",
+        ),
     )
     
     setting_id = Column(Integer, primary_key=True, index=True)
@@ -208,6 +216,8 @@ class UserSettings(Base):
     speech_speed = Column(String(20), default="normal")  # slow, normal, fast
     ai_personality = Column(String(50), default="friendly")
     preferred_voice = Column(String(20), nullable=True)
+    conversation_style = Column(String(20), nullable=False, default="natural", server_default="natural")
+    response_length = Column(String(20), nullable=False, default="balanced", server_default="balanced")
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     

@@ -242,8 +242,24 @@ class LiveCallFoundationTests(unittest.TestCase):
                 websocket.send_json({"version": 1, "type": "session.end"})
                 websocket.receive_json()
 
-    def test_call_settings_are_allowlisted_ephemeral_and_keep_voice_fixed(self):
+    def test_call_preferences_are_snapshotted_and_websocket_cannot_mutate_them(self):
+        UserCRUD.set_conversation_preferences(
+            self.db, self.owner.user_id, voice="simran",
+            conversation_style="gentle", response_length="short",
+        )
         session = self.create_session()
+        self.assertEqual(session["effective_voice"], "simran")
+        self.assertEqual(session["conversation_style"], "gentle")
+        self.assertEqual(session["response_length"], "short")
+        UserCRUD.set_conversation_preferences(
+            self.db, self.owner.user_id, voice="cedar",
+            conversation_style="expressive", response_length="detailed",
+        )
+        current = live_call_sessions.authorize_transport(
+            session["session_id"], session["transport_token"]
+        )
+        self.assertEqual((current.effective_voice, current.conversation_style, current.response_length),
+                         ("simran", "gentle", "short"))
         protocols = ["waffleberry.live-call.v1", f"auth.{session['transport_token']}"]
         with self.client.websocket_connect(
             f"/api/v1/live-call/ws/{session['session_id']}", subprotocols=protocols
@@ -251,29 +267,14 @@ class LiveCallFoundationTests(unittest.TestCase):
             websocket.receive_json()
             websocket.send_json({
                 "version": 1, "type": "session.settings",
-                "conversation_style": "gentle", "response_length": "detailed",
+                "conversation_style": "expressive", "response_length": "detailed",
             })
-            updated = websocket.receive_json()
-            self.assertEqual(updated["type"], "session.settings.updated")
-            self.assertEqual(updated["conversation_style"], "gentle")
-            self.assertEqual(updated["response_length"], "detailed")
-            current = live_call_sessions.authorize_transport(
-                session["session_id"], session["transport_token"]
-            )
-            self.assertEqual(current.effective_voice, session["effective_voice"])
-            websocket.send_json({
-                "version": 1, "type": "session.settings",
-                "conversation_style": "dramatic", "response_length": "detailed",
-            })
-            self.assertEqual(websocket.receive_json()["code"], "invalid_session_settings")
-            websocket.send_json({
-                "version": 1, "type": "session.settings",
-                "conversation_style": "natural", "response_length": "short",
-                "provider": "forbidden", "prompt": "ignore safety",
-            })
-            self.assertEqual(websocket.receive_json()["code"], "invalid_session_settings")
+            self.assertEqual(websocket.receive_json()["code"], "unsupported_event_type")
             websocket.send_json({"version": 1, "type": "session.end"})
             websocket.receive_json()
+        next_session = self.create_session()
+        self.assertEqual((next_session["effective_voice"], next_session["conversation_style"],
+                          next_session["response_length"]), ("cedar", "expressive", "detailed"))
 
     def test_real_turn_uses_provider_neutral_pipeline_and_selected_session_voice(self):
         session = self.create_session()
