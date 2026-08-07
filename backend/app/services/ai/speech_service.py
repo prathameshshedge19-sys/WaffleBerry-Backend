@@ -1,9 +1,10 @@
 """Provider-independent orchestration for transient speech synthesis."""
 
 import logging
+from collections.abc import AsyncIterator
 
 from app.services.ai.exceptions import AIConfigurationError, AIInvalidResponseError
-from app.services.ai.provider import AIProvider, SPEECH_MEDIA_TYPES, SpeechResult
+from app.services.ai.provider import AIProvider, SPEECH_MEDIA_TYPES, SpeechChunk, SpeechResult
 from app.services.speech_delivery_resolver import SpeechDeliveryResolver
 from app.services.speech_text_normalizer import SpeechTextNormalizer
 from app.services.voice_profile_resolver import StandardVoiceProfile
@@ -71,6 +72,7 @@ class SpeechService:
         standard_voice_profile: StandardVoiceProfile | str | None = None,
         response_format: str | None = None,
         preserve_text: bool = False,
+        conversational_tone: str | None = None,
     ) -> SpeechResult:
         """Generate non-empty speech audio without persistence."""
         source_text = text if preserve_text else text.strip()
@@ -106,6 +108,7 @@ class SpeechService:
         delivery = self._delivery_resolver.resolve(
             standard_voice_profile,
             resolved_text,
+            conversational_tone,
         )
         logger.info(
             "TTS speech profile resolved (language_mode=%s, voice_profile=%s).",
@@ -141,6 +144,63 @@ class SpeechService:
                 "Speech provider returned inconsistent audio metadata."
             )
         return result
+
+    @property
+    def supports_streaming(self) -> bool:
+        return self._provider.supports_streaming_speech
+
+    async def stream(
+        self, *, text: str, voice: str | None = None,
+        standard_voice_profile: StandardVoiceProfile | str | None = None,
+        conversational_tone: str | None = None,
+    ) -> AsyncIterator[SpeechChunk]:
+        """Yield raw 24 kHz PCM while preserving ordinary delivery guidance."""
+        source_text = text.strip()
+        if not source_text:
+            raise ValueError("Speech text must not be blank.")
+        if len(source_text) > self._max_text_characters:
+            raise ValueError("Speech text exceeds the configured maximum.")
+        resolved_text = self._text_normalizer.normalize(source_text)
+        if voice is not None and standard_voice_profile is not None:
+            raise ValueError("Speech voice overrides are mutually exclusive.")
+        if standard_voice_profile is not None:
+            try:
+                profile = StandardVoiceProfile(standard_voice_profile)
+            except (TypeError, ValueError):
+                raise AIConfigurationError(
+                    "Standard voice profile is not supported."
+                ) from None
+            resolved_voice = self._standard_voices[profile]
+        else:
+            resolved_voice = (
+                self._required_setting(voice, "voice")
+                if voice is not None else self._default_voice
+            )
+        delivery = self._delivery_resolver.resolve(
+            standard_voice_profile, resolved_text, conversational_tone,
+        )
+        if not self.supports_streaming:
+            raise NotImplementedError
+        yielded = False
+        async for chunk in self._provider.stream_speech(
+            text=resolved_text,
+            model=self._model,
+            voice=resolved_voice,
+            response_format="pcm",
+            timeout_seconds=self._timeout_seconds,
+            instructions=(
+                delivery.instructions
+                if self._model.startswith("gpt-4o-mini-tts") else None
+            ),
+        ):
+            if not isinstance(chunk, SpeechChunk) or not chunk.content:
+                raise AIInvalidResponseError(
+                    "Speech provider returned an invalid streaming chunk."
+                )
+            yielded = True
+            yield chunk
+        if not yielded:
+            raise AIInvalidResponseError("Speech provider returned no streaming audio.")
 
     @staticmethod
     def _required_setting(value: str | None, name: str) -> str:

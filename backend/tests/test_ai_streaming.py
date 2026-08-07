@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from app.services.ai.ai_service import AIService
 from app.services.ai.context_builder import ContextBuilder
 from app.services.ai.openai_provider import OpenAIProvider
-from app.services.ai.provider import AIMessage, AIProvider
+from app.services.ai.provider import AIMessage, AIProvider, GenerationOptions
 
 
 class FakeStreamingProvider(AIProvider):
@@ -110,6 +110,28 @@ class AIStreamingTests(unittest.IsolatedAsyncioTestCase):
         ]
 
         self.assertEqual(deltas, ["Hello", " Berry"])
+
+    async def test_live_call_output_budget_is_forwarded_to_openai_stream(self):
+        provider = object.__new__(OpenAIProvider)
+        provider._settings = SimpleNamespace(ai_model="test-model")
+        captured = {}
+
+        async def create(**kwargs):
+            captured.update(kwargs)
+            return FakeOpenAIEventStream()
+
+        provider._client = SimpleNamespace(
+            responses=SimpleNamespace(create=create)
+        )
+        options = GenerationOptions(max_output_tokens=240)
+        deltas = [
+            delta async for delta in provider.stream_response(
+                [AIMessage(role="user", content="Hello")],
+                generation_options=options,
+            )
+        ]
+        self.assertEqual(deltas, ["Hello", " Berry"])
+        self.assertEqual(captured["max_output_tokens"], 240)
 
     @staticmethod
     async def _create_sdk_style_stream(**_kwargs):

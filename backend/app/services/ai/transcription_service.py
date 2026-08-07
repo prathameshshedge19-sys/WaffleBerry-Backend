@@ -85,12 +85,28 @@ def validate_audio_upload(data: bytes, content_type: str | None) -> ValidatedAud
 class TranscriptionService:
     """Transcribe validated audio without persistence or database access."""
 
-    def __init__(self, provider: AIProvider, *, model: str) -> None:
+    def __init__(self, provider: AIProvider, *, model: str,
+                 streaming_model: str | None = None) -> None:
         normalized_model = model.strip() if isinstance(model, str) else ""
         if not normalized_model:
             raise ValueError("AUDIO_TRANSCRIPTION_MODEL must be configured.")
         self._provider = provider
         self._model = normalized_model
+        self._streaming_model = (
+            streaming_model.strip() if isinstance(streaming_model, str) else normalized_model
+        )
+
+    @property
+    def supports_streaming(self) -> bool:
+        return self._provider.supports_streaming_transcription
+
+    async def start_stream(self, content_type: str):
+        if not self.supports_streaming:
+            raise NotImplementedError
+        return await self._provider.start_transcription_stream(
+            model=self._streaming_model,
+            content_type=normalize_audio_content_type(content_type),
+        )
 
     async def transcribe(self, audio: ValidatedAudio) -> str:
         """Transcribe one validated in-memory upload, then release it."""

@@ -29,6 +29,7 @@ from app.services.pronunciation_dictionary_service import (
 from app.services.message_speech_service import MessageSpeechService
 from app.services.voice_profile_resolver import StandardVoiceResolver
 from app.services.personal_voice_speech_service import PersonalVoiceSpeechService
+from app.services.live_call import LiveCallTurnService
 
 
 @lru_cache()
@@ -70,6 +71,7 @@ def get_transcription_service() -> TranscriptionService:
     return TranscriptionService(
         get_ai_provider(),
         model=settings.audio_transcription_model,
+        streaming_model=settings.live_call_transcription_model,
     )
 
 
@@ -168,4 +170,22 @@ def get_memory_storage_pipeline() -> MemoryStoragePipeline:
     return MemoryStoragePipeline(
         get_memory_extraction_service(),
         MemoryValidationService(),
+    )
+
+
+@lru_cache()
+def get_live_call_turn_service() -> LiveCallTurnService:
+    """Return transient Live Call turn orchestration using existing providers."""
+    settings = get_settings()
+    standard_speech = get_sarvam_message_speech_service()
+    return LiveCallTurnService(
+        get_transcription_service(),
+        get_ai_service(),
+        ContextBuilder(max_context_messages=10),
+        standard_speech,
+        PersonalVoiceSpeechService(
+            sarvam_service=standard_speech,
+            openai_service=get_speech_service(),
+        ),
+        companion_context=get_chat_service(),
     )

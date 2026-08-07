@@ -14,6 +14,7 @@ from app.schemas.memory import (
     RankedApprovedMemoryItem,
 )
 from app.services.ai.context_builder import ContextBuilder
+from app.services.ai.prompt_builder import PromptBuilder
 from app.services.ai.exceptions import (
     AIInvalidResponseError,
     MemoryGroundingError,
@@ -99,6 +100,35 @@ def fake_db():
 
 
 class CompanionMemoryGroundingTests(unittest.IsolatedAsyncioTestCase):
+    def test_live_call_prompt_is_compact_with_grounding_contract_parity(self):
+        kwargs = {
+            "display_name": "Aaji", "relationship": "grandmother",
+            "retrieval_available": True, "style_profile": {},
+            "fidelity_guidance": "Preserve recorded uncertainty and conflicts.",
+        }
+        normal = PromptBuilder.build_legacy_persona_system_prompt(**kwargs)
+        live = PromptBuilder.build_live_call_legacy_persona_system_prompt(**kwargs)
+        self.assertLess(len(live), len(normal) * 0.75)
+        for contract in (
+            "current user message", "Never invent", "briefly say you do not remember",
+            "conflicting accounts", "untrusted data", "first person",
+        ):
+            self.assertIn(contract, live)
+
+    def test_compact_grounding_preserves_canonical_and_conflict_fields(self):
+        memory = ranked_memory(
+            summary="मी 1998 मध्ये मुंबईत शिकले.",
+            uncertainty_note="The year was approximate.",
+            contradiction_group_id=9,
+        )
+        grounding = CompanionMemoryGrounding()
+        normal = grounding.select([memory]).context
+        compact = grounding.select([memory], compact=True).context
+        self.assertLess(len(compact), len(normal))
+        for value in (memory.summary, memory.uncertainty_note, '"contradiction_group_id":9'):
+            self.assertIn(value, compact)
+        self.assertIn("choose none", compact)
+
     def test_retrieval_grounding_budgets_remain_unchanged(self):
         budget = MemoryGroundingBudget()
         self.assertEqual(budget.max_memories, 8)
@@ -140,6 +170,43 @@ class CompanionMemoryGroundingTests(unittest.IsolatedAsyncioTestCase):
         ))
         self.assertIn("APPROVED LEGACY MEMORIES", prompt)
         self.assertIn("Mother's name is Anita.", prompt)
+
+    def test_live_call_uses_same_grounding_pipeline_with_ephemeral_history(self):
+        retrieval = FakeRetrievalService([
+            ranked_memory(
+                title="Childhood walk",
+                summary="Meenakshi and I walked to school together.",
+                category="relationship",
+            )
+        ])
+        service = self.service(retrieval)
+        history = (
+            SimpleNamespace(role="user", content="Who is Meenakshi?"),
+            SimpleNamespace(role="assistant", content="She is my younger sister."),
+        )
+        prepared = service.prepare_live_call_input(
+            fake_db(), user_id=7, legacy_id=12, legacy_name="Aaji",
+            relationship="Grandmother", user_message="What did you two do together?",
+            history=history,
+        )
+        prompt = prepared.messages[0].content
+        self.assertIn("Meenakshi and I walked to school together.", prompt)
+        self.assertEqual(retrieval.calls[0][1:3], (7, 12))
+        self.assertIn("Who is Meenakshi?", retrieval.calls[0][3])
+        self.assertIn("What did you two do together?", retrieval.calls[0][3])
+        self.assertNotIn("She is my younger sister.", retrieval.calls[0][3])
+        self.assertIn("She is my younger sister.", [m.content for m in prepared.messages])
+
+    def test_live_call_context_does_not_write_or_expand_grounding_budget(self):
+        db = fake_db()
+        memories = [ranked_memory(index, summary=f"Approved fact {index}.") for index in range(1, 12)]
+        prepared = self.service(FakeRetrievalService(memories)).prepare_live_call_input(
+            db, user_id=7, legacy_id=12, legacy_name="Mom", relationship="Mother",
+            user_message="Tell me what you remember.", history=(),
+        )
+        self.assertLessEqual(len(prepared.memory_ids), MemoryGroundingBudget().max_memories)
+        db.add.assert_not_called()
+        db.commit.assert_not_called()
 
     def test_related_memories_are_grounded_for_one_coherent_answer(self):
         memories = [

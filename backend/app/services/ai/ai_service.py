@@ -4,7 +4,9 @@ import logging
 from collections.abc import AsyncIterator, Mapping, Sequence
 
 from app.services.ai.exceptions import AIResponseError
-from app.services.ai.provider import AIMessage, AIProvider, ExternalKnowledgeMode
+from app.services.ai.provider import (
+    AIMessage, AIProvider, ExternalKnowledgeMode, GenerationOptions,
+)
 from app.services.ai.retry import AIRetryPolicy
 
 
@@ -28,29 +30,25 @@ class AIService:
         *,
         structured_response_schema: Mapping[str, object] | None = None,
         external_knowledge_mode: ExternalKnowledgeMode | None = None,
+        generation_options: GenerationOptions | None = None,
     ) -> str:
         """Generate and validate assistant text through the configured provider."""
         retry_number = 0
         while True:
             try:
-                if structured_response_schema is None and external_knowledge_mode is None:
+                if (structured_response_schema is None
+                        and external_knowledge_mode is None
+                        and generation_options is None):
                     response = await self._provider.generate_response(messages)
-                elif external_knowledge_mode is None:
-                    response = await self._provider.generate_response(
-                        messages,
-                        structured_response_schema=structured_response_schema,
-                    )
-                elif structured_response_schema is None:
-                    response = await self._provider.generate_response(
-                        messages,
-                        external_knowledge_mode=external_knowledge_mode,
-                    )
                 else:
-                    response = await self._provider.generate_response(
-                        messages,
-                        structured_response_schema=structured_response_schema,
-                        external_knowledge_mode=external_knowledge_mode,
-                    )
+                    options = {}
+                    if structured_response_schema is not None:
+                        options["structured_response_schema"] = structured_response_schema
+                    if external_knowledge_mode is not None:
+                        options["external_knowledge_mode"] = external_knowledge_mode
+                    if generation_options is not None:
+                        options["generation_options"] = generation_options
+                    response = await self._provider.generate_response(messages, **options)
                 if not isinstance(response, str) or not response.strip():
                     raise AIResponseError(
                         "AI provider returned an empty response."
@@ -72,20 +70,19 @@ class AIService:
         messages: Sequence[AIMessage],
         *,
         external_knowledge_mode: ExternalKnowledgeMode | None = None,
+        generation_options: GenerationOptions | None = None,
     ) -> AsyncIterator[str]:
         """Yield validated plain-text deltas from the configured provider."""
         retry_number = 0
         while True:
             received_text = False
             try:
-                stream = (
-                    self._provider.stream_response(messages)
-                    if external_knowledge_mode is None
-                    else self._provider.stream_response(
-                        messages,
-                        external_knowledge_mode=external_knowledge_mode,
-                    )
-                )
+                options = {}
+                if external_knowledge_mode is not None:
+                    options["external_knowledge_mode"] = external_knowledge_mode
+                if generation_options is not None:
+                    options["generation_options"] = generation_options
+                stream = self._provider.stream_response(messages, **options)
                 async for delta in stream:
                     if not isinstance(delta, str):
                         raise AIResponseError(

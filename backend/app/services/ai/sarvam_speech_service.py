@@ -15,7 +15,9 @@ from app.services.voice_profile_resolver import StandardVoiceProfile
 from app.services.pronunciation_dictionary_service import (
     PronunciationDictionaryResolver,
 )
-from app.services.speech_emotion_analyzer import SpeechEmotionAnalyzer
+from app.services.speech_emotion_analyzer import (
+    EmotionConfidence, SpeechEmotion, SpeechEmotionAnalysis, SpeechEmotionAnalyzer,
+)
 from app.services.speech_prosody_planner import SpeechProsodyPlanner
 
 
@@ -80,6 +82,7 @@ class SarvamSpeechService:
         response_format: str | None,
         selected_voice: str | None = None,
         preserve_text: bool = True,
+        conversational_tone: str | None = None,
     ) -> SpeechResult:
         del response_format, preserve_text
         normalized = self._normalizer.normalize(text)
@@ -87,8 +90,19 @@ class SarvamSpeechService:
             raise ValueError("Speech text exceeds the provider limit.")
         language_mode = self._language_analyzer.detect(normalized)
         language_code = sarvam_language_code(language_mode)
-        analysis = self._emotion_analyzer.analyze(
-            normalized, language_mode=language_mode
+        tone_value = getattr(conversational_tone, "value", conversational_tone)
+        tone_emotion = {
+            "neutral": SpeechEmotion.NEUTRAL,
+            "warm": SpeechEmotion.WARM, "happy": SpeechEmotion.JOYFUL,
+            "excited": SpeechEmotion.EXCITED, "gentle": SpeechEmotion.PEACEFUL,
+            "comforting": SpeechEmotion.REASSURING,
+            "nostalgic": SpeechEmotion.NOSTALGIC, "serious": SpeechEmotion.SERIOUS,
+        }.get(tone_value)
+        analysis = (
+            SpeechEmotionAnalysis(tone_emotion, EmotionConfidence.MEDIUM)
+            if tone_emotion is not None else self._emotion_analyzer.analyze(
+                normalized, language_mode=language_mode
+            )
         )
         plan = self._prosody_planner.plan(
             canonical_text=normalized,

@@ -9,6 +9,7 @@ from app.api.v1.user import router as user_router
 from app.api.v1.memory import router as memory_router
 from app.api.v1.story_memory import router as story_memory_router
 from app.api.v1.audio import router as audio_router
+from app.api.v1.live_call import router as live_call_router
 from app.config import get_settings
 from app.services.ai.provider_registry import validate_ai_configuration
 
@@ -57,6 +58,11 @@ app.include_router(
     project_router,
     prefix=settings.api_v1_prefix,
     tags=["projects"]
+)
+app.include_router(
+    live_call_router,
+    prefix=settings.api_v1_prefix,
+    tags=["live-call"],
 )
 
 

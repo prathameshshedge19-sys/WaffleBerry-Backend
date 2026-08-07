@@ -132,6 +132,7 @@ class ContextBuilder:
         persona_style_profile: dict[str, list[str]] | None = None,
         persona_fidelity_guidance: str | None = None,
         external_knowledge_enabled: bool = False,
+        live_call: bool = False,
     ) -> list[AIMessage]:
         """Build chat context and require a valid latest user message."""
         if self._normalize_content(latest_user_message) is None:
@@ -139,7 +140,11 @@ class ContextBuilder:
                 "Latest user message must not be blank."
             )
         if persona_display_name and persona_relationship:
-            system_prompt = self._prompt_builder.build_legacy_persona_system_prompt(
+            prompt_method = (
+                self._prompt_builder.build_live_call_legacy_persona_system_prompt
+                if live_call else self._prompt_builder.build_legacy_persona_system_prompt
+            )
+            system_prompt = prompt_method(
                 display_name=persona_display_name,
                 relationship=persona_relationship,
                 retrieval_available=retrieval_available,

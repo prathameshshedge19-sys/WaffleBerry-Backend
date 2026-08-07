@@ -16,6 +16,17 @@ class SpeechDeliveryProfile:
     language_mode: SpeechLanguageMode
 
 
+EMOTIONAL_DELIVERY_INSTRUCTIONS = {
+    "warm": "Use restrained warmth and a gently familiar cadence.",
+    "happy": "Use positive, warm energy at a natural pace without sounding theatrical.",
+    "excited": "Use slightly quicker, lively delivery while remaining clear and controlled.",
+    "gentle": "Use a slightly slower, softer, calm delivery with restrained pauses.",
+    "comforting": "Use a slightly slower, quiet and supportive delivery without melodrama.",
+    "nostalgic": "Use a slightly slower, reflective cadence without implying extra memories.",
+    "serious": "Use measured, attentive delivery with calm emphasis.",
+}
+
+
 MALE_DELIVERY_INSTRUCTIONS = """Use a warm, relaxed, natural conversational voice.
 Sound emotionally present and familiar, as if speaking privately to a close family member.
 Use realistic pauses, varied rhythm, gentle emphasis, and natural sentence endings.
@@ -89,6 +100,7 @@ class SpeechDeliveryResolver:
         self,
         voice_profile: StandardVoiceProfile | str | None,
         text: str,
+        conversational_tone: str | None = None,
     ) -> SpeechDeliveryProfile:
         if voice_profile is None:
             warmth = NEUTRAL_DELIVERY_INSTRUCTIONS
@@ -105,11 +117,15 @@ class SpeechDeliveryResolver:
                 else FEMALE_DELIVERY_INSTRUCTIONS
             )
         language_mode = self._analyzer.detect(text)
+        tone_guidance = EMOTIONAL_DELIVERY_INSTRUCTIONS.get(
+            getattr(conversational_tone, "value", conversational_tone), ""
+        )
+        instruction_parts = [LANGUAGE_INSTRUCTIONS[language_mode], warmth]
+        if tone_guidance:
+            instruction_parts.append(tone_guidance)
+        instruction_parts.append(FINAL_FIDELITY_INSTRUCTIONS)
         return SpeechDeliveryProfile(
-            instructions=(
-                f"{LANGUAGE_INSTRUCTIONS[language_mode]}\n"
-                f"{warmth}\n{FINAL_FIDELITY_INSTRUCTIONS}"
-            ),
+            instructions="\n".join(instruction_parts),
             language_mode=language_mode,
         )
 

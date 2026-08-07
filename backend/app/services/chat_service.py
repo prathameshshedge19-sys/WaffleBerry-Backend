@@ -7,6 +7,7 @@ import logging
 import json
 import re
 from uuid import uuid4
+from types import SimpleNamespace
 
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError
@@ -71,6 +72,9 @@ class PreparedCompanionInput:
     query_mode: QueryKnowledgeMode = "autobiographical_memory"
     external_knowledge_mode: ExternalKnowledgeMode | None = None
     external_lookup_messages: tuple[AIMessage, ...] = ()
+    grounding_chars: int = 0
+    identity_context_chars: int = 0
+    identity_direct: bool = False
 
 
 @dataclass(frozen=True)
@@ -136,20 +140,28 @@ class ChatService:
         db: Session,
         conversation: Conversation,
         user_message: str,
+        *,
+        history_override: Iterable[ConversationMessage] | None = None,
+        live_call: bool = False,
     ) -> PreparedCompanionInput:
         """Prepare messages and internal grounding provenance together."""
-        history = (
-            db.query(Message)
-            .filter(Message.conversation_id == conversation.conversation_id)
-            .order_by(
-                Message.created_at.desc(),
-                Message.message_id.desc(),
+        if history_override is None:
+            history = (
+                db.query(Message)
+                .filter(Message.conversation_id == conversation.conversation_id)
+                .order_by(
+                    Message.created_at.desc(),
+                    Message.message_id.desc(),
+                )
+                .limit(self._context_builder.history_query_limit)
+                .all()
             )
-            .limit(self._context_builder.history_query_limit)
-            .all()
-        )
-        history.reverse()
+            history.reverse()
+        else:
+            history = list(history_override)[-self._context_builder.history_query_limit:]
         grounding_context = None
+        memory_grounding_context = None
+        identity_context = None
         request_id = uuid4().hex
         memory_ids: tuple[int, ...] = ()
         retrieved_at = None
@@ -295,15 +307,22 @@ class ChatService:
                     "Approved Legacy memories could not be prepared."
                 ) from exc
             else:
-                selection = self._memory_grounding.select(
-                    ranked.memories
+                selection = (
+                    self._memory_grounding.select(ranked.memories, compact=True)
+                    if live_call else self._memory_grounding.select(ranked.memories)
                 )
                 grounding_context = selection.context
-                if identity_result.context is not None:
+                memory_grounding_context = selection.context
+                identity_context = (
+                    identity_result.compact_context
+                    if live_call and identity_result.compact_context is not None
+                    else identity_result.context
+                )
+                if identity_context is not None:
                     grounding_context = (
-                        identity_result.context
+                        identity_context
                         if grounding_context is None
-                        else f"{identity_result.context}\n\n{grounding_context}"
+                        else f"{identity_context}\n\n{grounding_context}"
                     )
                 if selection.memories:
                     memory_ids = tuple(
@@ -456,6 +475,7 @@ class ChatService:
                 external_knowledge_enabled=(
                     knowledge_plan.query_mode != "autobiographical_memory"
                 ),
+                live_call=live_call,
             ),
             memory_ids=memory_ids,
             retrieved_at=retrieved_at,
@@ -468,6 +488,12 @@ class ChatService:
                 )
                 if knowledge_plan.web_search_requested
                 else ()
+            ),
+            grounding_chars=len(memory_grounding_context or ""),
+            identity_context_chars=len(identity_context or "") if legacy_id is not None else 0,
+            identity_direct=(
+                legacy_id is not None
+                and identity_result.compact_context is not None
             ),
         )
 
@@ -609,6 +635,36 @@ class ChatService:
             external_source_count=0,
             fallback_reason=None,
             provider_tool_exception_type=None,
+        )
+
+    def prepare_live_call_input(
+        self,
+        db: Session,
+        *,
+        user_id: int,
+        legacy_id: int,
+        legacy_name: str,
+        relationship: str,
+        user_message: str,
+        history: Iterable[ConversationMessage],
+    ) -> PreparedCompanionInput:
+        """Build read-only grounded context for an authorized ephemeral call."""
+        transient_conversation = SimpleNamespace(
+            conversation_id=None,
+            user_id=user_id,
+            legacy_id=legacy_id,
+            legacy=SimpleNamespace(
+                owner_user_id=user_id,
+                display_name=legacy_name,
+                relationship=relationship,
+            ),
+        )
+        return self._prepare_companion_input(
+            db,
+            transient_conversation,
+            user_message,
+            history_override=history,
+            live_call=True,
         )
 
     @staticmethod

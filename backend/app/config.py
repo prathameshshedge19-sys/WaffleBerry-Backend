@@ -53,6 +53,7 @@ class Settings(BaseSettings):
     ai_provider: str = "openai"
     ai_model: str = ""
     audio_transcription_model: str = "gpt-4o-mini-transcribe"
+    live_call_transcription_model: str = "gpt-live-transcribe"
     openai_tts_model: str = "gpt-4o-mini-tts"
     openai_tts_voice: str = "alloy"
     openai_tts_male_voice: str = "cedar"

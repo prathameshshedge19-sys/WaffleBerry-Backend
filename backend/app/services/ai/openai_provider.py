@@ -36,8 +36,10 @@ from app.services.ai.provider import (
     AIProvider,
     ExternalKnowledgeMode,
     SPEECH_MEDIA_TYPES,
-    SpeechResult,
+    SpeechResult, GenerationOptions,
+    SpeechChunk,
 )
+from app.services.ai.realtime_transcription_provider import RealtimeTranscriptionSession
 
 
 logger = logging.getLogger(__name__)
@@ -73,6 +75,7 @@ class OpenAIProvider(AIProvider):
         *,
         structured_response_schema: Mapping[str, object] | None = None,
         external_knowledge_mode: ExternalKnowledgeMode | None = None,
+        generation_options: GenerationOptions | None = None,
     ) -> str:
         """Return assistant text without exposing OpenAI SDK objects."""
         if not messages:
@@ -103,6 +106,8 @@ class OpenAIProvider(AIProvider):
             }
         if external_knowledge_mode == "web_search":
             request_options["tools"] = [{"type": "web_search"}]
+        if generation_options and generation_options.max_output_tokens is not None:
+            request_options["max_output_tokens"] = generation_options.max_output_tokens
 
         try:
             response = await self._client.responses.create(**request_options)
@@ -206,6 +211,51 @@ class OpenAIProvider(AIProvider):
             file_extension=response_format,
         )
 
+    @property
+    def supports_streaming_speech(self) -> bool:
+        return True
+
+    @property
+    def supports_streaming_transcription(self) -> bool:
+        return True
+
+    async def start_transcription_stream(self, *, model: str, content_type: str):
+        if content_type.lower() != "audio/l16":
+            raise ValueError("Realtime transcription requires PCM audio.")
+        return await RealtimeTranscriptionSession.create(
+            api_key=self._settings.openai_api_key, model=model,
+        )
+
+    async def stream_speech(
+        self, *, text: str, model: str, voice: str, response_format: str,
+        timeout_seconds: float, instructions: str | None = None,
+    ) -> AsyncIterator[SpeechChunk]:
+        """Yield chunked HTTP speech bytes without collecting the response."""
+        request = {
+            "input": text, "model": model, "voice": voice,
+            "response_format": response_format, "timeout": timeout_seconds,
+        }
+        if instructions is not None:
+            request["instructions"] = instructions
+        try:
+            async with self._client.audio.speech.with_streaming_response.create(
+                **request
+            ) as response:
+                async for content in response.iter_bytes(chunk_size=4096):
+                    if content:
+                        yield SpeechChunk(
+                            content=content,
+                            media_type=SPEECH_MEDIA_TYPES[response_format],
+                            file_extension=response_format,
+                            sample_rate=24000 if response_format == "pcm" else None,
+                        )
+        except OpenAIError as exc:
+            self._raise_provider_error(exc)
+        except (AttributeError, KeyError, TypeError, ValueError):
+            raise AIInvalidResponseError(
+                "OpenAI returned unreadable streaming speech audio."
+            ) from None
+
     @staticmethod
     def _citation_links(response: object) -> list[tuple[str, str]]:
         """Project URL annotations without exposing raw SDK tool payloads."""
@@ -230,6 +280,7 @@ class OpenAIProvider(AIProvider):
         messages: Sequence[AIMessage],
         *,
         external_knowledge_mode: ExternalKnowledgeMode | None = None,
+        generation_options: GenerationOptions | None = None,
     ) -> AsyncIterator[str]:
         """Yield only user-visible text deltas from the Responses API."""
         if not messages:
@@ -255,6 +306,8 @@ class OpenAIProvider(AIProvider):
             )
             if external_knowledge_mode == "web_search":
                 request_options["tools"] = [{"type": "web_search"}]
+            if generation_options and generation_options.max_output_tokens is not None:
+                request_options["max_output_tokens"] = generation_options.max_output_tokens
             stream = await self._client.responses.create(**request_options)
 
             async for event in stream:
