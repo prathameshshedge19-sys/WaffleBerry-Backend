@@ -203,6 +203,9 @@ def build_realtime_session_payload(settings: Settings, session: LiveCallSession)
             "instructions": session_instructions(session),
             "audio": {
                 "input": {
+                    "transcription": {
+                        "model": getattr(settings, "live_call_transcription_model", "gpt-live-transcribe"),
+                    },
                     "turn_detection": {
                         "type": "server_vad",
                         "threshold": settings.openai_realtime_vad_threshold,

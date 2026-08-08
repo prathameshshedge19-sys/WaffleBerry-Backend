@@ -37,6 +37,7 @@ MEMORY_CATEGORIES = frozenset(
 MemorySourceType = Literal[
     "conversation",
     "story_session",
+    "live_call",
     "voice",
     "photo",
     "video",
@@ -485,7 +486,7 @@ class MemoryCandidateCreate(BaseModel):
     memory_type: MemoryType
     category: str = Field(..., min_length=1, max_length=80)
     title: str = Field(..., min_length=1, max_length=255)
-    summary: str = Field(..., min_length=1)
+    summary: str = Field(..., min_length=1, max_length=2000)
     details: MemoryDetails | None = None
     emotional_significance: str | None = None
     importance: int | None = Field(default=None, ge=1, le=5)
@@ -720,7 +721,7 @@ class MemoryReviewActionRequest(BaseModel):
 class MemoryReviewEditRequest(BaseModel):
     expected_updated_at: datetime
     title: str | None = Field(default=None, min_length=1, max_length=255)
-    summary: str | None = Field(default=None, min_length=1)
+    summary: str | None = Field(default=None, min_length=1, max_length=2000)
     category: str | None = None
     memory_type: MemoryType | None = None
     details: MemoryDetails | None = None

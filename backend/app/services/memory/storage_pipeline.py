@@ -17,6 +17,9 @@ from app.crud.memory import (
 )
 from app.crud.user import MessageCRUD
 from app.models.memory import (
+    IdentityFactType,
+    Legacy,
+    LegacyIdentityFact,
     LegacyStatus,
     Memory,
     MemoryReviewStatus,
@@ -27,7 +30,10 @@ from app.models.memory import (
 from app.models.user import Conversation, Message
 from app.services.memory.extractor import MemoryExtractionService
 from app.services.memory.fingerprint import build_memory_fingerprint
-from app.services.memory.identity_facts import IdentityFactProjectionService
+from app.services.memory.identity_facts import (
+    IdentityFactProjectionService,
+    normalize_identity_value,
+)
 from app.services.memory.provenance import (
     ProvenanceSourceRecord,
     RegisteredProvenanceVerifier,
@@ -134,7 +140,6 @@ class MemoryStoragePipeline:
         metadata: dict[str, Any] | None = None,
     ) -> MemoryStorageReport:
         """Process one conversation owned by the user and linked to the legacy."""
-        del metadata
         started = perf_counter()
         legacy = self._require_legacy(db, legacy_id, user_id)
         conversation = (
@@ -160,6 +165,29 @@ class MemoryStoragePipeline:
             raise MemoryPipelineExtractionError(
                 "Memory extraction failed for the conversation."
             ) from exc
+        auto_learned = bool((metadata or {}).get("auto_learned"))
+        eligible_candidates = (
+            self._durable_candidates(candidates) if auto_learned else candidates
+        )
+        if auto_learned:
+            logger.info(
+                "MEMORY_LEARNING source=chat stage=extracted "
+                "candidate_count=%d saved_count=0",
+                len(candidates),
+            )
+            for candidate in candidates:
+                if candidate in eligible_candidates:
+                    continue
+                reason = (
+                    "low_confidence"
+                    if float(candidate.extraction_confidence or 0) < 0.85
+                    else "not_durable"
+                )
+                logger.info(
+                    "MEMORY_LEARNING source=chat stage=discarded "
+                    "candidate_count=1 saved_count=0 discard_reason=%s",
+                    reason,
+                )
         return self._process_candidates(
             db=db,
             user_id=user_id,
@@ -169,11 +197,37 @@ class MemoryStoragePipeline:
             source_id=conversation_id,
             extraction_run_id=None,
             story_session=None,
-            candidates=candidates,
+            candidates=(
+                self._mark_auto_learned(eligible_candidates)
+                if auto_learned else eligible_candidates
+            ),
             source_records=self._conversation_source_records(
                 legacy_id, conversation_id, messages
             ),
             started=started,
+            auto_approve=auto_learned,
+        )
+
+    async def process_live_call_turn(
+        self, db: Session, *, user_id: int, legacy_id: int,
+        session_safe_id: str, turn_id: int, user_text: str,
+    ) -> MemoryStorageReport:
+        """Process one final transcription outside the response/audio critical path."""
+        started = perf_counter()
+        legacy = self._require_legacy(db, legacy_id, user_id)
+        candidates = await self._extraction.extract_live_call_turn(
+            legacy, session_safe_id=session_safe_id, turn_id=turn_id, user_text=user_text,
+        )
+        locator = {"session_safe_id": session_safe_id, "turn_id": turn_id}
+        return self._process_candidates(
+            db=db, user_id=user_id, legacy_id=legacy_id, legacy_status=legacy.status,
+            source_type=MemoryPipelineSourceType.LIVE_CALL, source_id=turn_id,
+            extraction_run_id=None, story_session=None,
+            candidates=self._mark_auto_learned(self._durable_candidates(candidates)),
+            source_records=[ProvenanceSourceRecord(
+                source_type="live_call", legacy_id=legacy_id, speaker="user",
+                content=user_text, source_locator=locator,
+            )], started=started, auto_approve=True,
         )
 
     def _process_candidates(
@@ -190,6 +244,7 @@ class MemoryStoragePipeline:
         candidates: Sequence,
         source_records: list[ProvenanceSourceRecord],
         started: float,
+        auto_approve: bool = False,
     ) -> MemoryStorageReport:
         report = MemoryStorageReport(
             legacy_id=legacy_id,
@@ -232,6 +287,22 @@ class MemoryStoragePipeline:
                 validation_confidence=result.validation_confidence,
             )
 
+            if (
+                auto_approve
+                and source_type == MemoryPipelineSourceType.CONVERSATION
+                and self._is_protected_chat_identity_mutation(
+                    db, legacy_id, result.normalized_candidate
+                )
+            ):
+                item.error_code = "protected_identity_mutation"
+                report.items.append(item)
+                logger.info(
+                    "MEMORY_LEARNING source=chat stage=discarded "
+                    "candidate_count=1 saved_count=0 "
+                    "discard_reason=protected_identity_mutation"
+                )
+                continue
+
             if status == MemoryValidationStatus.DUPLICATE:
                 report.duplicates_skipped += 1
             elif (
@@ -261,6 +332,7 @@ class MemoryStoragePipeline:
                     item=item,
                     report=report,
                     existing=existing,
+                    auto_approve=auto_approve,
                 )
             report.items.append(item)
 
@@ -300,6 +372,7 @@ class MemoryStoragePipeline:
         item: MemoryPipelineItem,
         report: MemoryStorageReport,
         existing: list[Memory],
+        auto_approve: bool = False,
     ) -> None:
         candidate = result.normalized_candidate
         if candidate is None:
@@ -368,6 +441,7 @@ class MemoryStoragePipeline:
                     source_type=source_type,
                     story_session=story_session,
                     validation_status=result.status,
+                    auto_learned=auto_approve,
                 ):
                     memory.review_status = MemoryReviewStatus.APPROVED
                     memory.reviewed_at = datetime.now(timezone.utc)
@@ -428,12 +502,15 @@ class MemoryStoragePipeline:
         source_type: MemoryPipelineSourceType,
         story_session: StorySession | None,
         validation_status: MemoryValidationStatus,
+        auto_learned: bool = False,
     ) -> bool:
         return (
-            source_type == MemoryPipelineSourceType.STORY_SESSION
-            and story_session is not None
-            and story_session.status == StorySessionStatus.COMPLETED
-            and story_session.created_by_user_id == user_id
+            ((source_type == MemoryPipelineSourceType.STORY_SESSION
+              and story_session is not None
+              and story_session.status == StorySessionStatus.COMPLETED
+              and story_session.created_by_user_id == user_id)
+             or (source_type in {MemoryPipelineSourceType.CONVERSATION,
+                                 MemoryPipelineSourceType.LIVE_CALL} and auto_learned))
             and legacy_status == LegacyStatus.ACTIVE
             and validation_status in {
                 MemoryValidationStatus.ACCEPTED,
@@ -444,6 +521,97 @@ class MemoryStoragePipeline:
             and memory.review_status == MemoryReviewStatus.CANDIDATE
             and memory.superseded_by_memory_id is None
         )
+
+    @staticmethod
+    def _durable_candidates(candidates: Sequence) -> list:
+        """Conservatively admit only high-confidence, future-useful candidates."""
+        return [
+            candidate for candidate in candidates
+            if (candidate.importance or 0) >= 4
+            and float(candidate.extraction_confidence or 0) >= 0.85
+        ]
+
+    @staticmethod
+    def _protected_identity_claims(candidate) -> list[dict]:
+        if candidate is None:
+            return []
+        details = (
+            candidate.details.model_dump(mode="python")
+            if hasattr(candidate.details, "model_dump") else candidate.details
+        )
+        claims = details.get("identity_facts", []) if isinstance(details, dict) else []
+        protected = {
+            "full_name", "spouse_name", "child_name", "parent_name",
+            "sibling_name",
+        }
+        return [
+            claim for claim in claims
+            if isinstance(claim, dict)
+            and str(getattr(claim.get("fact_type"), "value", claim.get("fact_type")))
+            in protected
+        ]
+
+    @classmethod
+    def _is_protected_chat_identity_mutation(
+        cls, db: Session, legacy_id: int, candidate
+    ) -> bool:
+        """Protect established canonical names only during automatic Chat writes."""
+        claims = cls._protected_identity_claims(candidate)
+        if not claims:
+            return False
+        legacy = db.query(Legacy).filter(Legacy.legacy_id == legacy_id).first()
+        existing = db.query(LegacyIdentityFact).filter(
+            LegacyIdentityFact.legacy_id == legacy_id
+        ).all()
+        for claim in claims:
+            fact_type = str(getattr(
+                claim.get("fact_type"), "value", claim.get("fact_type")
+            ))
+            value = normalize_identity_value(str(claim.get("value") or ""))
+            relationship = normalize_identity_value(
+                str(claim.get("relationship") or "")
+            )
+            if not value:
+                continue
+            if (
+                fact_type == IdentityFactType.FULL_NAME.value
+                and legacy is not None
+                and normalize_identity_value(legacy.display_name) != value
+            ):
+                return True
+            matching = [
+                fact for fact in existing
+                if str(getattr(fact.fact_type, "value", fact.fact_type)) == fact_type
+            ]
+            if fact_type not in {
+                IdentityFactType.FULL_NAME.value,
+                IdentityFactType.SPOUSE_NAME.value,
+            }:
+                matching = [
+                    fact for fact in matching
+                    if normalize_identity_value(fact.relationship or "")
+                    == relationship
+                ]
+            if matching and all(
+                normalize_identity_value(fact.normalized_value) != value
+                for fact in matching
+            ):
+                return True
+        return False
+
+    @staticmethod
+    def _mark_auto_learned(candidates: Sequence) -> list:
+        """Retain canonical source types while distinguishing automatic provenance."""
+        marked = []
+        for candidate in candidates:
+            provenance = [
+                item.model_copy(update={
+                    "extractor_version": f"{item.extractor_version or 'memory-extractor-v1'}-auto"
+                })
+                for item in candidate.provenance
+            ]
+            marked.append(candidate.model_copy(update={"provenance": provenance}))
+        return marked
 
     @staticmethod
     def _record_persistence_error(

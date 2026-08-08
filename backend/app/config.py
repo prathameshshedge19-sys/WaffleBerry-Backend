@@ -102,6 +102,7 @@ class Settings(BaseSettings):
     ai_max_context_messages: int = Field(default=24, ge=2)
 
     memory_semantic_retrieval_enabled: bool = True
+    auto_memory_learning_enabled: bool = False
     memory_embedding_provider: str = "openai"
     memory_embedding_model: str = "text-embedding-3-small"
     memory_embedding_version: str = "v1"

@@ -196,6 +196,7 @@ class LiveCallRuntime:
     turn_stage: str | None = None
     greeting_claimed: bool = False
     greeting_completed: bool = False
+    memory_learning_turn_ids: set[int] = field(default_factory=set)
 
 
 @dataclass(frozen=True, slots=True)
@@ -494,6 +495,15 @@ class LiveCallSessionStore:
         with self._lock:
             runtime = self._runtime.get(session_id)
             return tuple(runtime.history) if runtime else ()
+
+    def claim_memory_learning_turn(self, session_id: str, turn_id: int) -> bool:
+        """Idempotently claim one bounded final user turn for background learning."""
+        with self._lock:
+            runtime = self._runtime.get(session_id)
+            if runtime is None or turn_id in runtime.memory_learning_turn_ids:
+                return False
+            runtime.memory_learning_turn_ids.add(turn_id)
+            return True
 
     def recovery_state(self, session_id: str) -> dict[str, object] | None:
         """Return privacy-safe, ephemeral turn reconciliation metadata."""

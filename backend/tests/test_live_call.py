@@ -540,7 +540,8 @@ class LiveCallFoundationTests(unittest.TestCase):
         self.assertIn("Persona affects grammatical perspective only", payload["instructions"])
         self.assertNotIn("Companion for Aaji", payload["instructions"])
         self.assertEqual(payload["output_modalities"], ["audio"])
-        self.assertEqual(set(payload["audio"]["input"]), {"turn_detection"})
+        self.assertEqual(set(payload["audio"]["input"]), {"turn_detection", "transcription"})
+        self.assertEqual(payload["audio"]["input"]["transcription"]["model"], "gpt-live-transcribe")
         vad = payload["audio"]["input"]["turn_detection"]
         self.assertEqual(vad, {
             "type": "server_vad", "threshold": 0.60, "prefix_padding_ms": 400,

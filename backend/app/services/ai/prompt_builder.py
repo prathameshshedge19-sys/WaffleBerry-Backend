@@ -247,6 +247,19 @@ provenance timestamps. Return only one JSON object matching the supplied output
 contract, with no Markdown or explanatory text.
 """.strip()
 
+CHAT_AUTO_MEMORY_EXTRACTION_ADDENDUM = """
+For normal Chat automatic learning, preserve both major events and small facts
+when they are personal, stable beyond the current moment, and likely to help a
+future conversation. Pet names, species, breeds and ownership; durable
+preferences; recurring habits; hobbies; occupations; schools; relationship
+facts; and location history can qualify without emotional significance or a
+story. Set importance to at least 4 when an explicit fact is durable, personal,
+and future-useful. Keep extraction confidence tied only to correct source
+interpretation. Continue returning no memory for temporary moods or needs,
+greetings, filler, weather, connection or website complaints, voice complaints,
+and conversation controls.
+""".strip()
+
 
 class PromptBuilder:
     """Build system prompts used by the provider-independent AI layer."""
@@ -416,6 +429,13 @@ class PromptBuilder:
         )
 
     @staticmethod
-    def build_memory_extraction_system_prompt() -> str:
+    def build_memory_extraction_system_prompt(
+        *, source_type: str | None = None,
+    ) -> str:
         """Return the dedicated provider-neutral extraction instructions."""
+        if source_type == "conversation":
+            return (
+                f"{MEMORY_EXTRACTION_SYSTEM_PROMPT}\n\n"
+                f"{CHAT_AUTO_MEMORY_EXTRACTION_ADDENDUM}"
+            )
         return MEMORY_EXTRACTION_SYSTEM_PROMPT

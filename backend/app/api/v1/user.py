@@ -44,6 +44,7 @@ from app.services.message_speech_service import (
     MessageSpeechService,
 )
 from app.services.voice_catalogue import public_catalogue
+from app.services.memory.auto_learning import schedule_conversation_learning
 
 logger = logging.getLogger(__name__)
 
@@ -732,6 +733,12 @@ async def create_message(
     )
     preferences = UserCRUD.get_settings(db, current_user.user_id)
 
+    # Capture post-commit values before SQLAlchemy can expire/detach ORM state.
+    learning_user_id = int(current_user.user_id)
+    learning_legacy_id = int(conversation.legacy_id)
+    learning_conversation_id = int(conversation.conversation_id)
+    learning_user_text = str(message.content)
+
     try:
         generation = await get_chat_service().generate_response_with_provenance(
             db,
@@ -756,6 +763,11 @@ async def create_message(
         generation.content,
         grounded_memory_ids=generation.memory_ids,
         memories_retrieved_at=generation.retrieved_at,
+    )
+    schedule_conversation_learning(
+        user_id=learning_user_id, legacy_id=learning_legacy_id,
+        conversation_id=learning_conversation_id,
+        user_text=learning_user_text,
     )
     return MessagePairResponse(
         user_message=user_message,
@@ -790,6 +802,13 @@ async def create_message_stream(
         db, conversation, current_user.user_id
     )
     preferences = UserCRUD.get_settings(db, current_user.user_id)
+
+    # Streaming continues across transaction commits and response yields. Capture
+    # every late-lifecycle value before SQLAlchemy can expire/detach ORM state.
+    learning_user_id = int(current_user.user_id)
+    learning_legacy_id = int(conversation.legacy_id)
+    learning_conversation_id = int(conversation.conversation_id)
+    learning_user_text = str(message.content)
 
     try:
         stream_plan = get_chat_service().stream_response_with_provenance(
@@ -854,6 +873,21 @@ async def create_message_stream(
                     memories_retrieved_at=stream_plan.retrieved_at,
                 )
             )
+            # Generation and assistant persistence are complete. Create only the
+            # detached task before terminal SSE; the expensive work stays async.
+            try:
+                schedule_conversation_learning(
+                    user_id=learning_user_id,
+                    legacy_id=learning_legacy_id,
+                    conversation_id=learning_conversation_id,
+                    user_text=learning_user_text,
+                )
+            except Exception:
+                # Optional task creation cannot revoke successful Chat.
+                logger.exception(
+                    "MEMORY_LEARNING source=chat stage=error "
+                    "candidate_count=0 saved_count=0"
+                )
             yield _sse_event(
                 "complete",
                 {

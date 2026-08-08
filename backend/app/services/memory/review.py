@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session, joinedload
 from app.crud.memory import LegacyCRUD
 from app.models.memory import (
     LegacyStatus,
+    LegacyIdentityFact,
     Memory,
     MemoryLink,
     MemoryParticipant,
@@ -183,7 +184,7 @@ class MemoryReviewService:
         edit: MemoryReviewEditRequest,
     ) -> MemoryReviewResponse:
         self._require_legacy(db, legacy_id, user_id, require_active=True)
-        memory = self._locked_candidate(db, legacy_id, memory_id)
+        memory = self._locked_editable(db, legacy_id, memory_id)
         self._require_fresh(memory, edit.expected_updated_at)
         snapshot = self._editable_snapshot(memory)
         fields = edit.model_fields_set - {
@@ -258,7 +259,18 @@ class MemoryReviewService:
             )
         )
         memory.normalized_fingerprint = fingerprint
+        memory.embedding = None
+        memory.embedding_model = None
+        memory.embedding_version = None
+        memory.embedding_dimensions = None
+        memory.embedded_at = None
         memory.updated_at = datetime.now(timezone.utc)
+        if memory.review_status == MemoryReviewStatus.APPROVED:
+            db.query(LegacyIdentityFact).filter(
+                LegacyIdentityFact.source_memory_id == memory.memory_id
+            ).delete(synchronize_session=False)
+            db.flush()
+            IdentityFactProjectionService().project_memory(db, memory)
         try:
             db.commit()
             db.refresh(memory)
@@ -268,6 +280,17 @@ class MemoryReviewService:
                 "An equivalent memory already exists for this legacy."
             ) from exc
         return self._to_response(db, memory, legacy_id)
+
+    def delete(
+        self, db: Session, *, user_id: int, legacy_id: int, memory_id: int,
+    ) -> None:
+        """Delete one owner-scoped memory and all cascading retrieval projections."""
+        self._require_legacy(db, legacy_id, user_id, require_active=True)
+        memory = self._get_memory(db, legacy_id, memory_id)
+        if memory is None:
+            raise MemoryReviewNotFoundError("Legacy or memory was not found.")
+        db.delete(memory)
+        db.commit()
 
     def _transition(
         self,
@@ -329,6 +352,23 @@ class MemoryReviewService:
             raise MemoryReviewConflictError(
                 "This memory has already been reviewed."
             )
+        return memory
+
+    def _locked_editable(
+        self, db: Session, legacy_id: int, memory_id: int
+    ) -> Memory:
+        memory = (
+            db.query(Memory)
+            .filter(Memory.legacy_id == legacy_id, Memory.memory_id == memory_id)
+            .with_for_update()
+            .first()
+        )
+        if memory is None:
+            raise MemoryReviewNotFoundError("Legacy or memory was not found.")
+        if memory.review_status not in {
+            MemoryReviewStatus.CANDIDATE, MemoryReviewStatus.APPROVED,
+        }:
+            raise MemoryReviewConflictError("This memory cannot be edited.")
         return memory
 
     @staticmethod

@@ -284,3 +284,23 @@ def edit_memory(
         MemoryReviewConflictError,
     ) as exc:
         raise _safe_review_error(exc) from None
+
+
+@router.delete(
+    "/legacies/{legacy_id}/memories/{memory_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+def delete_memory(
+    legacy_id: int,
+    memory_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    service: MemoryReviewService = Depends(get_memory_review_service),
+):
+    try:
+        service.delete(
+            db, user_id=current_user.user_id, legacy_id=legacy_id,
+            memory_id=memory_id,
+        )
+    except (MemoryReviewNotFoundError, MemoryReviewConflictError) as exc:
+        raise _safe_review_error(exc) from None

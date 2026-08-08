@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class LiveCallSessionCreate(BaseModel):
@@ -39,6 +39,46 @@ class LiveCallSessionResponse(BaseModel):
 class LiveCallSessionEndResponse(BaseModel):
     session_id: str
     state: Literal["ended"] = "ended"
+
+
+class LiveCallOperationalEvent(BaseModel):
+    """Privacy-safe, bounded client observations for one authenticated call."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    event: Literal["call_started", "call_ended"]
+    outcome: Literal[
+        "started", "startup_failed", "completed_normally", "transport_failed",
+        "provider_failed", "session_expired", "user_ended",
+    ]
+    failure_category: Literal[
+        "none", "session_creation", "bootstrap", "microphone", "peer_connection",
+        "sdp_exchange", "data_channel", "remote_audio", "external_renderer",
+        "provider_rate_limited", "provider_quota_exhausted",
+        "provider_transient_failure", "provider_unknown_failure",
+        "session_expired", "transport", "unknown",
+    ] = "none"
+    duration_ms: int = Field(default=0, ge=0, le=86_400_000)
+    turn_started_count: int = Field(default=0, ge=0, le=10_000)
+    turn_completed_count: int = Field(default=0, ge=0, le=10_000)
+    turn_failed_count: int = Field(default=0, ge=0, le=10_000)
+    turn_recovered_count: int = Field(default=0, ge=0, le=10_000)
+    recovery_count: int = Field(default=0, ge=0, le=1_000)
+    response_failure_count: int = Field(default=0, ge=0, le=10_000)
+    external_tts_failure_count: int = Field(default=0, ge=0, le=10_000)
+    memory_route_count: int = Field(default=0, ge=0, le=10_000)
+    memory_supported_count: int = Field(default=0, ge=0, le=10_000)
+    memory_unsupported_count: int = Field(default=0, ge=0, le=10_000)
+    memory_error_count: int = Field(default=0, ge=0, le=10_000)
+    memory_timeout_count: int = Field(default=0, ge=0, le=10_000)
+
+
+class LiveCallMemoryTurn(BaseModel):
+    """One final committed user transcription; ownership comes from the session."""
+
+    model_config = ConfigDict(extra="forbid")
+    turn_id: int = Field(gt=0, le=10_000)
+    text: str = Field(min_length=1, max_length=4000)
 
 
 class RealtimeBootstrapResponse(BaseModel):

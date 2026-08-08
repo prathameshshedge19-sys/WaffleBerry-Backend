@@ -25,7 +25,7 @@ from app.services.memory.exceptions import (
 
 
 MEMORY_EXTRACTOR_VERSION = "memory-extractor-v1"
-ExtractionSourceType = Literal["story_session", "conversation"]
+ExtractionSourceType = Literal["story_session", "conversation", "live_call"]
 logger = logging.getLogger(__name__)
 
 _EDUCATION_PROFESSION_TERMS = frozenset(
@@ -58,7 +58,7 @@ MEMORY_EXTRACTION_RESPONSE_SCHEMA: dict[str, object] = {
                         ],
                     },
                     "title": {"type": "string", "minLength": 1, "maxLength": 255},
-                    "summary": {"type": "string", "minLength": 1},
+                    "summary": {"type": "string", "minLength": 1, "maxLength": 2000},
                     "details": {
                         "type": "object",
                         "additionalProperties": False,
@@ -262,6 +262,21 @@ class MemoryExtractionService:
             messages=prepared,
         )
 
+    async def extract_live_call_turn(
+        self, legacy: Legacy, *, session_safe_id: str, turn_id: int, user_text: str,
+    ) -> list[MemoryCandidateCreate]:
+        """Extract only one final committed user turn; no raw audio is accepted."""
+        if legacy.legacy_id is None or not session_safe_id or turn_id < 1:
+            raise MemoryExtractionSourceError("Live Call source is invalid.")
+        text = user_text.strip()
+        if not text or len(text) > 4000:
+            return []
+        return await self._extract(
+            legacy=legacy, source_type="live_call", source_container_id=turn_id,
+            chapter=None, messages=[_SourceMessage(turn_id, "user", text)],
+            source_locator={"session_safe_id": session_safe_id, "turn_id": turn_id},
+        )
+
     async def _extract(
         self,
         *,
@@ -270,6 +285,7 @@ class MemoryExtractionService:
         source_container_id: int,
         chapter: str | None,
         messages: list[_SourceMessage],
+        source_locator: dict | None = None,
     ) -> list[MemoryCandidateCreate]:
         """Call the shared AI service, parse output, and build provenance."""
         eligible_messages = {
@@ -306,7 +322,9 @@ class MemoryExtractionService:
                 role="system",
                 content=(
                     self._prompt_builder
-                    .build_memory_extraction_system_prompt()
+                    .build_memory_extraction_system_prompt(
+                        source_type=source_type
+                    )
                 ),
             ),
             AIMessage(
@@ -334,6 +352,7 @@ class MemoryExtractionService:
                         source_container_id=source_container_id,
                         chapter=chapter,
                         eligible_messages=eligible_messages,
+                        source_locator=source_locator,
                     )
                 )
             except MemoryExtractionResponseError as exc:
@@ -457,6 +476,7 @@ class MemoryExtractionService:
         source_container_id: int,
         chapter: str | None,
         eligible_messages: dict[int, _SourceMessage],
+        source_locator: dict | None = None,
     ) -> MemoryCandidateCreate:
         """Attach server-verified provenance to one model-produced candidate."""
         provenance: list[MemoryProvenanceCreate] = []
@@ -488,13 +508,15 @@ class MemoryExtractionService:
                         "story_message_id": evidence.source_message_id,
                     }
                 )
-            else:
+            elif source_type == "conversation":
                 source_values.update(
                     {
                         "conversation_id": source_container_id,
                         "message_id": evidence.source_message_id,
                     }
                 )
+            else:
+                source_values["source_locator"] = source_locator
             provenance.append(MemoryProvenanceCreate(**source_values))
 
         if not provenance:

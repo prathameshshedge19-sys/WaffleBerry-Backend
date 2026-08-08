@@ -34,7 +34,7 @@ class ExtractedMemory(BaseModel):
     memory_type: MemoryType
     category: str = Field(..., min_length=1, max_length=80)
     title: str = Field(..., min_length=1, max_length=255)
-    summary: str = Field(..., min_length=1)
+    summary: str = Field(..., min_length=1, max_length=2000)
     details: MemoryDetails = Field(default_factory=MemoryDetails)
     emotional_significance: str | None = None
     importance: int = Field(..., ge=1, le=5)

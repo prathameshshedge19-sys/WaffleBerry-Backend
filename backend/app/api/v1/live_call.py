@@ -3,6 +3,7 @@
 import asyncio
 import base64
 import binascii
+import hashlib
 import json
 import logging
 from time import monotonic
@@ -16,6 +17,8 @@ from app.db import get_db
 from app.dependencies.auth import get_current_user
 from app.models.user import User
 from app.schemas.live_call import (
+    LiveCallOperationalEvent,
+    LiveCallMemoryTurn,
     LiveCallSessionCreate,
     LiveCallSessionEndResponse,
     LiveCallSessionResponse,
@@ -48,6 +51,7 @@ from app.services.realtime_live_call import (
     RealtimeToolService,
     choose_live_call_delivery,
 )
+from app.services.memory.auto_learning import schedule_live_call_learning
 
 
 router = APIRouter()
@@ -56,6 +60,11 @@ console_logger = logging.getLogger("uvicorn.error")
 STREAMING_STT_START_TIMEOUT_SECONDS = 10
 STREAMING_STT_CHUNK_TIMEOUT_SECONDS = 2
 STREAMING_STT_FINAL_TIMEOUT_SECONDS = 30
+
+
+def _safe_session_id(session_id: str) -> str:
+    """Return a non-reusable correlation label; never log transport credentials."""
+    return hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:12]
 
 
 def _log_turn_latency(
@@ -411,6 +420,54 @@ async def end_live_call_session(
     return LiveCallSessionEndResponse(session_id=session.session_id)
 
 
+@router.post("/live-call/session/{session_id}/operational-event", status_code=204)
+async def record_live_call_operational_event(
+    session_id: str,
+    event: LiveCallOperationalEvent,
+    current_user: User = Depends(get_current_user),
+):
+    """Emit allowlisted aggregate telemetry without conversation or provider payloads."""
+    session = live_call_sessions.authorize_user(session_id, current_user.user_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Call session was not found.")
+    logger.info(
+        "LIVE_CALL_OPERATIONAL event=%s session_safe_id=%s engine=%s renderer=%s "
+        "voice=%s status=%s failure_category=%s duration_ms=%s "
+        "turn_started_count=%s turn_completed_count=%s turn_failed_count=%s "
+        "turn_recovered_count=%s recovery_count=%s response_failure_count=%s "
+        "external_tts_failure_count=%s memory_route_count=%s "
+        "memory_supported_count=%s memory_unsupported_count=%s "
+        "memory_error_count=%s memory_timeout_count=%s",
+        event.event, _safe_session_id(session_id), session.engine,
+        session.speech_renderer, session.effective_voice, event.outcome,
+        event.failure_category, event.duration_ms, event.turn_started_count,
+        event.turn_completed_count, event.turn_failed_count,
+        event.turn_recovered_count, event.recovery_count,
+        event.response_failure_count, event.external_tts_failure_count,
+        event.memory_route_count, event.memory_supported_count,
+        event.memory_unsupported_count, event.memory_error_count,
+        event.memory_timeout_count,
+    )
+
+
+@router.post("/live-call/realtime/{session_id}/memory-turn", status_code=202)
+async def learn_realtime_memory_turn(
+    session_id: str,
+    turn: LiveCallMemoryTurn,
+    current_user: User = Depends(get_current_user),
+):
+    session = live_call_sessions.authorize_user(session_id, current_user.user_id)
+    if session is None or session.engine != "realtime":
+        raise HTTPException(status_code=404, detail="Call session was not found.")
+    if live_call_sessions.claim_memory_learning_turn(session_id, turn.turn_id):
+        schedule_live_call_learning(
+            user_id=session.user_id, legacy_id=session.legacy_id,
+            session_safe_id=_safe_session_id(session_id), turn_id=turn.turn_id,
+            user_text=turn.text,
+        )
+    return {"accepted": True}
+
+
 def _transport_token(websocket: WebSocket) -> str | None:
     for protocol in websocket.scope.get("subprotocols", []):
         if protocol.startswith("auth."):
@@ -591,6 +648,11 @@ async def live_call_transport(
                 await safe_send({"version": 1, "type": "audio.chunk", "turn_id": turn_id, "data": base64.b64encode(speech.content).decode("ascii"), "mime_type": speech.media_type, "final": True, "chunk_index": 0})
             if not live_call_sessions.complete_turn(session_id, turn_id, transcript, response):
                 return
+            schedule_live_call_learning(
+                user_id=active_session.user_id, legacy_id=active_session.legacy_id,
+                session_safe_id=_safe_session_id(session_id), turn_id=turn_id,
+                user_text=transcript,
+            )
             if trace:
                 trace.mark("response_completed")
             await safe_send({

@@ -14,6 +14,7 @@ from app.services.memory.validation_contracts import (
 class MemoryPipelineSourceType(str, enum.Enum):
     STORY_SESSION = "story_session"
     CONVERSATION = "conversation"
+    LIVE_CALL = "live_call"
 
 
 class MemoryPipelineItem(BaseModel):
