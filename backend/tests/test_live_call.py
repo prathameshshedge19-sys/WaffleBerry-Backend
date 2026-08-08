@@ -31,6 +31,7 @@ from app.services.realtime_live_call import (
     OpenAIRealtimeBootstrapProvider,
     REALTIME_TOOLS,
     RealtimeBootstrapError,
+    RealtimeMemoryState,
     RealtimeToolService,
     build_realtime_session_payload,
     choose_live_call_engine,
@@ -509,6 +510,7 @@ class LiveCallFoundationTests(unittest.TestCase):
             "interrupt_response": False,
         })
         self.assertEqual(payload["audio"]["output"]["voice"], "marin")
+        self.assertEqual(payload["tool_choice"], "required")
 
         captured = {}
         class CapturingChatService:
@@ -735,6 +737,71 @@ class LiveCallFoundationTests(unittest.TestCase):
         ))
         self.assertIn("Use the identity tool only for a direct single identity fact", instructions)
         self.assertIn("especially broad family, life, childhood, or trip", instructions)
+
+    def test_realtime_memory_routing_is_deterministic_and_overrides_model_choice(self):
+        service = RealtimeToolService(SimpleNamespace())
+        empty = RealtimeMemoryState()
+        family_routes = [service._route("Tell me about your family", empty) for _ in range(20)]
+        trip_routes = [service._route("Tell me about your trips", empty) for _ in range(20)]
+        self.assertEqual(family_routes, ["broad_memory"] * 20)
+        self.assertEqual(trip_routes, ["broad_memory"] * 20)
+        self.assertEqual(service._route("Tell me about the Kashmir trip", empty), "episode")
+        self.assertEqual(service._route("What happened in Goa?", empty), "episode")
+        self.assertEqual(service._route("Who is your husband?", empty), "identity")
+        self.assertEqual(service._route("Who is Meenakshi?", empty), "identity")
+        self.assertEqual(service._route("How are you?", empty), "social")
+        self.assertEqual(service._route("I passed my exam!", empty), "social")
+        family_state = RealtimeMemoryState(last_query="Tell me about your family")
+        trip_state = RealtimeMemoryState(last_query="Tell me about your trips")
+        self.assertEqual(service._route("Who else?", family_state), "followup")
+        self.assertEqual(service._route("Who went with you?", trip_state), "followup")
+
+        calls = []
+        class RoutedChat:
+            def retrieve_live_call_identity(self, _db, **kwargs):
+                calls.append(("identity", kwargs["query"]))
+                return (
+                    SimpleNamespace(records=({"fact_type": "spouse_name", "value": "Rohan",
+                        "relationship": "husband", "conflicting": False,
+                        "uncertainty_note": None},), candidate_count=1,
+                        conflict_present=False),
+                    SimpleNamespace(canonical_value="Rohan"),
+                )
+            def prepare_live_call_input(self, _db, **kwargs):
+                calls.append(("memory", kwargs["user_message"]))
+                supported = "unknown" not in kwargs["user_message"].casefold()
+                return SimpleNamespace(
+                    memory_ids=(1,) if supported else (), identity_direct=False,
+                    identity_evidence=(), identity_count=0, conflict_count=0,
+                    has_uncertainty=False, resolved_entities=(),
+                    memory_evidence=({"memory_id": 1, "summary": "Kashmir"},) if supported else (),
+                    query_intent="family", matched_candidate_count=int(supported),
+                    grounding_chars=20 if supported else 0, identity_context_chars=0,
+                )
+
+        routed = RealtimeToolService(RoutedChat())
+        session = SimpleNamespace(session_id="routing-session", user_id=1, legacy_id=2,
+                                  legacy_name="Aaji", relationship="grandmother")
+        family = routed.execute(self.db, session, "get_legacy_identity_context",
+                                {"query": "Tell me about your family"}, "family-call")
+        self.assertEqual(calls[-1][0], "memory")
+        self.assertEqual(family["status"], "supported")
+        husband = routed.execute(self.db, session, "retrieve_legacy_memory_context",
+                                 {"query": "Who is your husband?"}, "husband-call")
+        self.assertEqual(calls[-1][0], "identity")
+        self.assertEqual(husband["identity"][0]["value"], "Rohan")
+        before_social = len(calls)
+        social = routed.execute(self.db, session, "retrieve_legacy_memory_context",
+                                {"query": "How are you?"}, "social-call")
+        self.assertEqual((social["status"], len(calls)), ("not_required", before_social))
+        unsupported = routed.execute(self.db, session, "get_legacy_identity_context",
+                                     {"query": "Tell me about unknown trips"}, "unknown-call")
+        self.assertEqual(unsupported["status"], "unsupported")
+        call_count = len(calls)
+        duplicate = routed.execute(self.db, session, "get_legacy_identity_context",
+                                   {"query": "Tell me about unknown trips"}, "unknown-call")
+        self.assertEqual(duplicate, unsupported)
+        self.assertEqual(len(calls), call_count)
 
     def test_realtime_identity_adapter_preserves_conflict_and_unsupported_status(self):
         class IdentityChat:

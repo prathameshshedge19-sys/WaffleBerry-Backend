@@ -3,6 +3,7 @@
 import hashlib
 import json
 import logging
+import re
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from threading import RLock
@@ -15,6 +16,8 @@ from sqlalchemy.orm import Session
 from app.config import Settings
 from app.services.chat_service import ChatService
 from app.services.live_call import LiveCallSession
+from app.services.memory.identity_retrieval import detect_identity_intent
+from app.services.memory.retrieval_ranking import MemoryRelevanceRanker
 from app.services.persona_profile import PersonaProfile
 from app.services.voice_catalogue import VoiceProvider, get_voice
 
@@ -213,7 +216,7 @@ def build_realtime_session_payload(settings: Settings, session: LiveCallSession)
                    if not external_renderer else {}),
             },
             "tools": REALTIME_TOOLS,
-            "tool_choice": "auto",
+            "tool_choice": "required",
         }
     }
 
@@ -290,7 +293,7 @@ class RealtimeMemoryState:
     last_resolved_entities: tuple[str, ...] = ()
     last_identity_entities: tuple[str, ...] = ()
     last_tool_type: str | None = None
-    last_call_signature: tuple[str, str] | None = None
+    last_call_signature: tuple[str, str, str] | None = None
     last_call_result: dict | None = None
 
 
@@ -323,6 +326,36 @@ class RealtimeToolService:
         return normalized
 
     @staticmethod
+    def _route(query: str, state: RealtimeMemoryState) -> str:
+        """Classify one Realtime turn without model or network inference."""
+        normalized = " ".join(query.casefold().split())
+        words = set(re.findall(r"[^\W_]+", normalized, re.UNICODE))
+        direct_identity = detect_identity_intent(query) is not None or bool(
+            re.match(r"^(who|what) (is|was|are|were)\b", normalized)
+        )
+        if direct_identity:
+            return "identity"
+        if state.last_query is not None and words & {
+            "did", "else", "he", "her", "him", "it", "next", "that", "then",
+            "there", "they", "what", "when", "where", "who", "why",
+        }:
+            return "followup"
+        classification = MemoryRelevanceRanker.classify_query(query)
+        broad_topics = {"family", "trip", "trips", "childhood", "life", "work", "friend", "friends", "school"}
+        if classification.broad or (
+            words & broad_topics
+            and bool(re.search(r"\b(tell me about|what do you remember)\b", normalized))
+            and not (words - broad_topics - {"tell", "me", "about", "your", "my", "the", "do", "you", "remember"})
+        ):
+            return "broad_memory"
+        if (
+            words & {"trip", "trips", "travel", "journey", "episode", "memory"}
+            or re.search(r"\bwhat happened (in|at|during)\b", normalized)
+        ):
+            return "episode"
+        return "social"
+
+    @staticmethod
     def _diagnostics(tool: str, query_type: str, started: float, result: dict) -> dict:
         total_ms = max(0, round((monotonic() - started) * 1000))
         diagnostics = {
@@ -349,15 +382,47 @@ class RealtimeToolService:
         )
         return diagnostics
 
-    def execute(self, db: Session, session: LiveCallSession, name: str, arguments: dict) -> dict:
+    def execute(
+        self, db: Session, session: LiveCallSession, name: str, arguments: dict,
+        call_id: str | None = None,
+    ) -> dict:
         started = monotonic()
         state = self._state(session.session_id)
         query = self._query(arguments)
-        call_signature = (name, query.casefold())
+        route = self._route(query, state)
+        routed_name = (
+            "get_legacy_identity_context" if route == "identity"
+            else "retrieve_legacy_memory_context" if route != "social"
+            else "none"
+        )
+        call_signature = (call_id or "", routed_name, query.casefold())
         with self._lock:
             if call_signature == state.last_call_signature and state.last_call_result is not None:
-                return dict(state.last_call_result)
-        if name == "get_legacy_identity_context":
+                cached = dict(state.last_call_result)
+                logger.debug(
+                    "REALTIME_MEMORY_ROUTE intent_class=%s forced_authoritative_retrieval=%s "
+                    "model_tool_requested=true model_tool_name=%s deduplicated=true "
+                    "authoritative_result=%s",
+                    route, route != "social", name, cached.get("status", "error"),
+                )
+                return cached
+        if route == "social":
+            result = {
+                "status": "not_required", "identity": [], "memories": [],
+                "memory_count": 0, "identity_count": 0, "conflict_count": 0,
+                "followup_context": "none", "uncertain": False,
+            }
+            result["diagnostics"] = self._diagnostics(name, "social", started, result)
+            logger.debug(
+                "REALTIME_MEMORY_ROUTE intent_class=social forced_authoritative_retrieval=false "
+                "model_tool_requested=true model_tool_name=%s deduplicated=false "
+                "authoritative_result=unsupported", name,
+            )
+            with self._lock:
+                state.last_call_signature = call_signature
+                state.last_call_result = result
+            return result
+        if routed_name == "get_legacy_identity_context":
             identity, resolution = self.chat_service.retrieve_live_call_identity(
                 db, user_id=session.user_id, legacy_id=session.legacy_id, query=query,
             )
@@ -389,13 +454,16 @@ class RealtimeToolService:
             state.last_identity_entities = tuple(item["value"] for item in identity.records)[:8]
             state.last_resolved_entities = tuple(result["resolved_entities"])
             state.last_tool_type = "identity"
-            result["diagnostics"] = self._diagnostics(name, "identity", started, result)
+            result["diagnostics"] = self._diagnostics(routed_name, "identity", started, result)
+            logger.debug(
+                "REALTIME_MEMORY_ROUTE intent_class=identity forced_authoritative_retrieval=true "
+                "model_tool_requested=true model_tool_name=%s deduplicated=false "
+                "authoritative_result=%s", name, status,
+            )
             with self._lock:
                 state.last_call_signature = call_signature
                 state.last_call_result = result
             return result
-        if name != "retrieve_legacy_memory_context":
-            raise ValueError("Unsupported realtime tool.")
         history = (() if state.last_query is None else (
             SimpleNamespace(role="user", content=state.last_query),
         ))
@@ -447,13 +515,18 @@ class RealtimeToolService:
             len(result["identity"]) + len(result["memories"]),
             prepared.grounding_chars + prepared.identity_context_chars,
         )
-        query_type = "followup" if state.last_query else "memory"
+        query_type = "followup" if route == "followup" else "memory"
         state.last_query = query
         state.last_memory_ids = prepared.memory_ids
         state.last_memory_topic = query
         state.last_resolved_entities = prepared.resolved_entities
         state.last_tool_type = "memory"
-        result["diagnostics"] = self._diagnostics(name, query_type, started, result)
+        result["diagnostics"] = self._diagnostics(routed_name, query_type, started, result)
+        logger.debug(
+            "REALTIME_MEMORY_ROUTE intent_class=%s forced_authoritative_retrieval=true "
+            "model_tool_requested=true model_tool_name=%s deduplicated=false "
+            "authoritative_result=%s", route, name, status,
+        )
         with self._lock:
             state.last_call_signature = call_signature
             state.last_call_result = result

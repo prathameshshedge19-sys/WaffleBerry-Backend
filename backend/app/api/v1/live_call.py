@@ -338,7 +338,8 @@ async def execute_realtime_tool(
     try:
         result = await asyncio.wait_for(
             asyncio.to_thread(
-                tools.execute, db, session, request.name, request.arguments
+                tools.execute, db, session, request.name, request.arguments,
+                request.call_id,
             ),
             timeout=get_settings().live_call_realtime_tool_timeout_seconds,
         )
