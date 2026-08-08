@@ -10,29 +10,46 @@ from app.models.memory import (
     Memory,
     MemoryReviewStatus,
 )
-from app.schemas.user import UserCreate, VoiceProfileCreate, VoiceProfileUpdate, VoiceSampleCreate
-import app.services.email_verification_service as evs
+from app.schemas.user import VoiceProfileCreate, VoiceProfileUpdate, VoiceSampleCreate
 import hashlib
 import hmac
+import secrets
 
 
 def hash_password(password: str) -> str:
-    """Simple password hashing using SHA256."""
-    return hashlib.sha256(password.encode()).hexdigest()
+    """Hash a password with a unique salt and memory-hard scrypt."""
+    salt = secrets.token_bytes(16)
+    digest = hashlib.scrypt(password.encode(), salt=salt, n=2**14, r=8, p=1)
+    return f"scrypt$16384$8$1${salt.hex()}${digest.hex()}"
+
+
+def verify_password(password: str, stored_hash: str) -> tuple[bool, bool]:
+    """Return match status and whether a legacy SHA-256 hash needs upgrade."""
+    if stored_hash.startswith("scrypt$"):
+        try:
+            _, n, r, p, salt, expected = stored_hash.split("$", 5)
+            actual = hashlib.scrypt(
+                password.encode(), salt=bytes.fromhex(salt),
+                n=int(n), r=int(r), p=int(p),
+            ).hex()
+            return hmac.compare_digest(actual, expected), False
+        except (ValueError, TypeError):
+            return False, False
+    legacy = hashlib.sha256(password.encode()).hexdigest()
+    return hmac.compare_digest(legacy, stored_hash), True
 
 
 class UserCRUD:
     """CRUD operations for users."""
     
     @staticmethod
-    def create_user(db: Session, user: UserCreate) -> User:
-        """Create a new user."""
-        password_hash = hash_password(user.password)
-        
+    def create_user(db: Session, *, full_name: str, email: str, password: str) -> User:
+        """Create a verified user after registration authorization is consumed."""
         db_user = User(
-            full_name=user.full_name,
-            email=user.email,
-            password_hash=password_hash
+            full_name=full_name.strip(),
+            email=email.strip().casefold(),
+            password_hash=hash_password(password),
+            is_verified=True,
         )
         db.add(db_user)
         db.commit()
@@ -43,7 +60,7 @@ class UserCRUD:
     @staticmethod
     def get_user_by_email(db: Session, email: str) -> User | None:
         """Get user by email."""
-        return db.query(User).filter(User.email == email).first()
+        return db.query(User).filter(User.email == email.strip().casefold()).first()
 
     @staticmethod
     def update_password(
@@ -64,13 +81,17 @@ class UserCRUD:
         if not user:
             return None
 
-        password_hash = hash_password(password)
-        if not hmac.compare_digest(password_hash, user.password_hash):
+        matches, needs_upgrade = verify_password(password, user.password_hash)
+        if not matches:
             return None
         
         if not user.is_verified:
             return None
         
+        if needs_upgrade:
+            user.password_hash = hash_password(password)
+            db.commit()
+            db.refresh(user)
         return user
     
     @staticmethod

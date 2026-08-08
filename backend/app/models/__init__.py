@@ -5,6 +5,7 @@ Importing this package registers every mapped class on the shared metadata.
 """
 
 from app.models.project import Project
+from app.models.auth_challenge import AuthChallenge
 from app.models.user import (
     Consent,
     Conversation,
@@ -39,6 +40,7 @@ from app.models.memory import (
 )
 
 __all__ = [
+    "AuthChallenge",
     "CompanionMemoryProvenance",
     "Consent",
     "Conversation",

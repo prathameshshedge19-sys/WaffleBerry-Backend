@@ -20,6 +20,7 @@ validate_ai_configuration(settings)
 # Import models so SQLAlchemy registers them
 from app.models.user import *
 from app.models.verification import *
+from app.models.auth_challenge import *
 
 print("Registered tables:")
 print(list(Base.metadata.tables.keys()))

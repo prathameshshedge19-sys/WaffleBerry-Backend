@@ -5,7 +5,9 @@ import json
 import logging
 
 from app.services.email_service import EmailService
-from app.services.email_verification_service import EmailVerificationService
+from app.services.auth_challenge_service import (
+    AuthChallengeService, EMAIL_VERIFICATION, PASSWORD_RESET, normalize_email,
+)
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
@@ -14,12 +16,12 @@ from app.dependencies.auth import get_current_user
 from app.dependencies.ai import get_chat_service, get_message_speech_service
 from app.models.user import User
 from app.schemas.user import (
-    UserCreate, UserLogin, UserResponse, SignupResponse, LoginResponse, VoiceProfileCreate, VoiceProfileResponse, 
+    UserCreate, CompleteRegistrationRequest, UserLogin, UserResponse, SignupResponse, LoginResponse, VoiceProfileCreate, VoiceProfileResponse,
     VoiceProfileUpdate, VoiceSampleCreate, VoiceSampleResponse,
     ConversationCreate, ConversationUpdate, ConversationResponse,
     MessageCreate, MessagePairResponse, MessageResponse, VerifyEmailRequest,ResendOTPRequest, ForgotPasswordRequest,
-    VerifyResetOTPRequest, ResetPasswordRequest
-    MessageCreate, MessagePairResponse, MessageResponse, StoryGuideRequest,
+    VerifyResetOTPRequest, ResetPasswordRequest, AuthorizationResponse,
+    StoryGuideRequest,
     VoicePreferenceResponse, VoicePreferenceUpdate,
     ConversationPreferenceResponse, ConversationPreferenceUpdate,
 )
@@ -239,83 +241,49 @@ def _ai_http_exception(exc: AIServiceError) -> HTTPException:
 
 @router.post("/users", response_model=SignupResponse, status_code=status.HTTP_201_CREATED)
 async def create_user(user: UserCreate, db: Session = Depends(get_db)):
-    """Create a new user account.
-    
-    - **full_name**: User's full name
-    - **email**: User's email (must be unique)
-    - **password**: Password (minimum 8 characters)
-    """
-    logger.info("[signup] Received account creation request.")
-
-    # Check if email already exists
-    existing_user = UserCRUD.get_user_by_email(db, user.email)
-    if existing_user:
-        if existing_user.is_verified:
-            logger.info("[signup] Email is already registered.")
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Email already registered"
-            )
-
-        logger.info(
-            "[signup] Resending OTP for unverified user (user_id=%d).",
-            existing_user.user_id,
-        )
-        otp = EmailVerificationService.resend_otp(
-            db=db,
-            user_id=existing_user.user_id,
-        )
-
-        try:
-            await EmailService.send_otp(existing_user.email, otp)
-        except TimeoutError as exc:
-            logger.exception("[signup] OTP resend timed out.")
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Unable to send the verification email. Please try again.",
-            ) from exc
-        except Exception as exc:
-            logger.exception("[signup] OTP resend failed.")
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Unable to send the verification email. Please try again.",
-            ) from exc
-
-        response = SignupResponse.model_validate(existing_user)
-        return response.model_copy(
-            update={"verification_resent": True}
-        )
-    
-    db_user = UserCRUD.create_user(db, user)
-    logger.info("[signup] User record created (user_id=%d).", db_user.user_id)
-    otp = EmailVerificationService.generate_otp()
-    otp_hash = EmailVerificationService.hash_otp(otp)
-
-    logger.info("[signup] Creating OTP verification record.")
-    EmailVerificationService.create_verification(
-        db=db,
-        user_id=db_user.user_id,
-        otp_hash=otp_hash,
-    )
-
-    logger.info("[signup] Sending OTP email.")
+    """Begin registration without storing an account or password."""
+    email = normalize_email(str(user.email))
+    existing = UserCRUD.get_user_by_email(db, email)
+    if existing and existing.is_verified:
+        raise HTTPException(status_code=409, detail="Email already registered")
     try:
-        await EmailService.send_otp(db_user.email, otp)
-    except TimeoutError as exc:
-        logger.exception("[signup] OTP email delivery timed out.")
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Unable to send the verification email. Please try again.",
-        ) from exc
+        _, otp = AuthChallengeService.issue(
+            db, email=email, full_name=user.full_name,
+            purpose=EMAIL_VERIFICATION,
+        )
+    except RuntimeError:
+        raise HTTPException(status_code=429, detail="Please wait before requesting another code.")
+    try:
+        await EmailService.send_otp(email, otp, EMAIL_VERIFICATION)
     except Exception as exc:
-        logger.exception("[signup] OTP email delivery failed.")
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Unable to send the verification email. Please try again.",
-        ) from exc
+        logger.exception("Registration email delivery failed.")
+        raise HTTPException(status_code=503, detail="Unable to send the verification email. Please try again.") from exc
+    return {"message": "Verification code sent."}
 
-    logger.info("[signup] OTP email sent; returning account creation response.")
-    return db_user
+
+@router.post("/complete-registration", response_model=UserResponse, status_code=201)
+async def complete_registration(request: CompleteRegistrationRequest, db: Session = Depends(get_db)):
+    """Create an account only with a valid, single-use OTP authorization."""
+    challenge = AuthChallengeService.consume_authorization(
+        db, authorization=request.verification_token, purpose=EMAIL_VERIFICATION,
+    )
+    if not challenge:
+        raise HTTPException(status_code=400, detail="Invalid or expired verification authorization.")
+    existing = UserCRUD.get_user_by_email(db, challenge.email)
+    if existing:
+        if existing.is_verified:
+            db.rollback()
+            raise HTTPException(status_code=409, detail="Email already registered")
+        db.delete(existing)
+        db.flush()
+    try:
+        return UserCRUD.create_user(
+            db, full_name=challenge.full_name, email=challenge.email, password=request.password,
+        )
+    except Exception:
+        db.rollback()
+        logger.exception("Account completion failed.")
+        raise HTTPException(status_code=409, detail="Unable to create account.")
 
 
 @router.post("/login", response_model=LoginResponse)
@@ -354,39 +322,19 @@ async def login(user: UserLogin, db: Session = Depends(get_db)):
         "user": authenticated_user,
     }
     
-@router.post("/verify-email")
+@router.post("/verify-email", response_model=AuthorizationResponse)
 async def verify_email(
     request: VerifyEmailRequest,
     db: Session = Depends(get_db)
 ):
     """Verify email using OTP."""
 
-    user = UserCRUD.get_user_by_email(db, request.email)
-
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="User not found"
-        )
-
-    is_valid = EmailVerificationService.verify_otp(
-        db=db,
-        user_id=user.user_id,
-        otp=request.otp
+    result, authorization = AuthChallengeService.verify(
+        db, email=str(request.email), otp=request.otp, purpose=EMAIL_VERIFICATION,
     )
-
-    if not is_valid:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid or expired OTP"
-        )
-
-    user.is_verified = True
-    db.commit()
-
-    return {
-        "message": "Email verified successfully"
-    }
+    if result != "verified":
+        raise HTTPException(status_code=400, detail="Invalid or expired OTP")
+    return {"message": "Email verified successfully", "authorization": authorization}
     
 @router.post("/resend-otp")
 async def resend_otp(
@@ -395,27 +343,31 @@ async def resend_otp(
 ):
     """Generate and send a new OTP."""
 
-    user = UserCRUD.get_user_by_email(db, request.email)
-
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="User not found",
+    email = normalize_email(str(request.email))
+    user = UserCRUD.get_user_by_email(db, email)
+    if request.purpose == EMAIL_VERIFICATION and user:
+        raise HTTPException(status_code=409, detail="Email already registered")
+    if request.purpose == PASSWORD_RESET and (not user or not user.is_verified):
+        return {"message": "If the account exists, a reset code will be sent."}
+    latest = None
+    if request.purpose == EMAIL_VERIFICATION:
+        from app.models.auth_challenge import AuthChallenge
+        latest = db.query(AuthChallenge).filter(
+            AuthChallenge.email == email, AuthChallenge.purpose == EMAIL_VERIFICATION,
+        ).order_by(AuthChallenge.challenge_id.desc()).first()
+        if not latest:
+            raise HTTPException(status_code=400, detail="Start registration first.")
+    try:
+        _, otp = AuthChallengeService.issue(
+            db, email=email, purpose=request.purpose,
+            full_name=latest.full_name if latest else None,
         )
-
-    purpose = (
-        "password_reset"
-        if user.is_verified
-        else "email_verification"
-    )
-
-    otp = EmailVerificationService.resend_otp(
-        db=db,
-        user_id=user.user_id,
-        purpose=purpose,
-    )
-
-    await EmailService.send_otp(user.email, otp)
+        await EmailService.send_otp(email, otp, request.purpose)
+    except RuntimeError:
+        raise HTTPException(status_code=429, detail="Please wait before requesting another code.")
+    except Exception as exc:
+        logger.exception("OTP resend failed.")
+        raise HTTPException(status_code=503, detail="Unable to send code. Please try again.") from exc
 
     return {
         "message": "OTP resent successfully"
@@ -428,63 +380,32 @@ async def forgot_password(
 ):
     """Send a password reset OTP."""
 
-    user = UserCRUD.get_user_by_email(db, request.email)
-
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="User not found",
-        )
-
-    otp = EmailVerificationService.resend_otp(
-        db=db,
-        user_id=user.user_id,
-        purpose="password_reset",
-    )
-
-    try:
-        await EmailService.send_otp(user.email, otp)
-    except Exception:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Unable to send reset code. Please try again.",
-        )
-
-    return {
-        "message": "Password reset OTP sent successfully."
-    }
+    email = normalize_email(str(request.email))
+    user = UserCRUD.get_user_by_email(db, email)
+    if user and user.is_verified:
+        try:
+            _, otp = AuthChallengeService.issue(db, email=email, purpose=PASSWORD_RESET)
+            await EmailService.send_otp(email, otp, PASSWORD_RESET)
+        except RuntimeError:
+            return {"message": "If the account exists, a reset code will be sent."}
+        except Exception as exc:
+            logger.exception("Password reset email delivery failed.")
+            raise HTTPException(status_code=503, detail="Unable to send reset code. Please try again.") from exc
+    return {"message": "If the account exists, a reset code will be sent."}
     
-@router.post("/verify-reset-otp")
+@router.post("/verify-reset-otp", response_model=AuthorizationResponse)
 async def verify_reset_otp(
     request: VerifyResetOTPRequest,
     db: Session = Depends(get_db),
 ):
     """Verify password reset OTP."""
 
-    user = UserCRUD.get_user_by_email(db, request.email)
-
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="User not found",
-        )
-
-    status_result = EmailVerificationService.verify_otp_status(
-        db=db,
-        user_id=user.user_id,
-        otp=request.otp,
-        purpose="password_reset",
+    result, authorization = AuthChallengeService.verify(
+        db, email=str(request.email), otp=request.otp, purpose=PASSWORD_RESET,
     )
-
-    if status_result != "verified":
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid or expired OTP",
-        )
-
-    return {
-        "message": "OTP verified successfully."
-    }
+    if result != "verified":
+        raise HTTPException(status_code=400, detail="Invalid or expired OTP")
+    return {"message": "OTP verified successfully.", "authorization": authorization}
 
 @router.post("/reset-password")
 async def reset_password(
@@ -493,19 +414,15 @@ async def reset_password(
 ):
     """Reset a user's password."""
 
-    user = UserCRUD.get_user_by_email(db, request.email)
-
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="User not found",
-        )
-
-    UserCRUD.update_password(
-        db,
-        user,
-        request.password
+    challenge = AuthChallengeService.consume_authorization(
+        db, authorization=request.reset_token, purpose=PASSWORD_RESET,
+        email=str(request.email),
     )
+    user = UserCRUD.get_user_by_email(db, str(request.email))
+    if not challenge or not user or not user.is_verified:
+        db.rollback()
+        raise HTTPException(status_code=400, detail="Invalid or expired reset authorization.")
+    UserCRUD.update_password(db, user, request.password)
 
     return {
         "message": "Password reset successfully."

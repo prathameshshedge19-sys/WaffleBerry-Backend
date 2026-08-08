@@ -22,8 +22,24 @@ class UserBase(BaseModel):
 
 
 class UserCreate(UserBase):
-    """Schema for creating a user."""
-    password: str = Field(..., min_length=8, description="Password must be at least 8 characters")
+    """Begin registration without collecting a password."""
+
+
+class PasswordFields(BaseModel):
+    password: str = Field(..., min_length=8, max_length=128)
+
+    @field_validator("password")
+    @classmethod
+    def validate_password_strength(cls, value: str) -> str:
+        if not any(character.isalpha() for character in value):
+            raise ValueError("Password must contain a letter.")
+        if not any(character.isdigit() for character in value):
+            raise ValueError("Password must contain a number.")
+        return value
+
+
+class CompleteRegistrationRequest(PasswordFields):
+    verification_token: str = Field(..., min_length=20, max_length=500)
 
 
 class UserLogin(BaseModel):
@@ -41,6 +57,7 @@ class ResendOTPRequest(BaseModel):
     """Request body for resending OTP."""
 
     email: EmailStr
+    purpose: Literal["email_verification", "password_reset"]
     
 class ForgotPasswordRequest(BaseModel):
     """Request body for requesting a password reset."""
@@ -54,15 +71,16 @@ class VerifyResetOTPRequest(BaseModel):
     email: EmailStr
     otp: str
 
-class ResetPasswordRequest(BaseModel):
+class ResetPasswordRequest(PasswordFields):
     """Request body for resetting the password."""
 
     email: EmailStr
-    password: str = Field(
-        ...,
-        min_length=8,
-        description="Password must be at least 8 characters"
-    )
+    reset_token: str = Field(..., min_length=20, max_length=500)
+
+
+class AuthorizationResponse(BaseModel):
+    message: str
+    authorization: str
     
 class UserResponse(UserBase):
     """Schema for user response."""
@@ -73,10 +91,10 @@ class UserResponse(UserBase):
         from_attributes = True
 
 
-class SignupResponse(UserResponse):
-    """Schema returned after creating or resuming signup."""
+class SignupResponse(BaseModel):
+    """Safe response after beginning registration."""
 
-    verification_resent: bool = False
+    message: str
 
 
 class LoginResponse(BaseModel):
