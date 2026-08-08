@@ -70,5 +70,11 @@ class AIInvalidResponseError(AIServiceError):
     code = "invalid_response"
 
 
+class MemoryGroundingError(AIServiceError):
+    """Raised when required Legacy grounding cannot be prepared safely."""
+
+    code = "memory_grounding_failed"
+
+
 # Backwards-compatible name retained for existing integrations.
 AIResponseError = AIInvalidResponseError

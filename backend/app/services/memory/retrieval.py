@@ -1,0 +1,114 @@
+"""Owner-scoped approved-memory retrieval foundation."""
+
+from sqlalchemy.orm import Session
+
+from app.crud.memory import LegacyCRUD, MemoryCRUD
+from app.schemas.memory import (
+    ApprovedMemorySearchResponse,
+    ApprovedMemoryRetrievalItem,
+    ApprovedMemoryRetrievalResponse,
+)
+from app.services.memory.retrieval_ranking import MemoryRelevanceRanker
+from app.services.memory.embedding import MemoryEmbeddingService
+from app.models.memory import LegacyStatus
+
+
+class MemoryRetrievalNotFoundError(Exception):
+    """Raised for missing and non-owned Legacies alike."""
+
+
+class MemoryRetrievalArchivedError(Exception):
+    """Raised when active Companion grounding targets an archived Legacy."""
+
+
+class MemoryRetrievalService:
+    """Retrieve normalized approved memories without ranking or prompting."""
+
+    def __init__(
+        self, embedding_service: MemoryEmbeddingService | None = None
+    ) -> None:
+        self._embedding_service = embedding_service
+
+    def retrieve_approved(
+        self,
+        db: Session,
+        *,
+        user_id: int,
+        legacy_id: int,
+        allow_archived: bool = False,
+    ) -> ApprovedMemoryRetrievalResponse:
+        legacy = LegacyCRUD.get_user_legacy(db, legacy_id, user_id)
+        if legacy is None:
+            raise MemoryRetrievalNotFoundError(
+                "Legacy was not found."
+            )
+        if legacy.status == LegacyStatus.ARCHIVED and not allow_archived:
+            raise MemoryRetrievalArchivedError(
+                "Restore this Legacy before continuing."
+            )
+        memories = MemoryCRUD.list_approved_for_retrieval(db, legacy_id)
+        items = []
+        for memory in memories:
+            item = ApprovedMemoryRetrievalItem.model_validate(memory)
+            item.participant_names = [
+                participant.name for participant in memory.participants
+            ]
+            item.participant_relationships = [
+                participant.relationship
+                for participant in memory.participants
+                if participant.relationship
+            ]
+            item.participant_roles = [
+                participant.role for participant in memory.participants
+            ]
+            item.tags = [
+                link.tag.name for link in memory.tag_links if link.tag
+            ]
+            item.source_topics = [
+                source.chapter for source in memory.provenance if source.chapter
+            ]
+            items.append(item)
+        return ApprovedMemoryRetrievalResponse(
+            legacy_id=legacy_id,
+            approved_memory_count=len(items),
+            memories=items,
+        )
+
+    def search_approved(
+        self,
+        db: Session,
+        *,
+        user_id: int,
+        legacy_id: int,
+        query: str,
+        allow_archived: bool = False,
+    ) -> ApprovedMemorySearchResponse:
+        """Rank only approved memories after enforcing Legacy ownership."""
+        retrieved = self.retrieve_approved(
+            db,
+            user_id=user_id,
+            legacy_id=legacy_id,
+            allow_archived=allow_archived,
+        )
+        semantic_scores = None
+        semantic_route_used = False
+        if self._embedding_service is not None:
+            semantic_result = self._embedding_service.score(
+                db, retrieved.memories, query
+            )
+            semantic_scores = semantic_result.scores
+            semantic_route_used = semantic_result.route_used
+        memories = MemoryRelevanceRanker().rank(
+            retrieved.memories,
+            query,
+            semantic_scores=semantic_scores,
+        )
+        response = ApprovedMemorySearchResponse(
+            legacy_id=legacy_id,
+            matched_memory_count=len(memories),
+            memories=memories,
+        )
+        response._approved_memory_count = retrieved.approved_memory_count
+        response._semantic_route_used = semantic_route_used
+        response._semantic_candidate_count = len(semantic_scores or {})
+        return response

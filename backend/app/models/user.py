@@ -24,6 +24,11 @@ class User(Base):
         back_populates="user",
         cascade="all, delete-orphan"
     )
+    legacies = relationship(
+        "Legacy",
+        back_populates="owner",
+        cascade="all, delete-orphan",
+    )
     
     def __repr__(self):
         return f"<User(user_id={self.user_id}, email={self.email})>"
@@ -92,11 +97,17 @@ class Conversation(Base):
         nullable=False,
         index=True
     )
+    legacy_id = Column(
+        ForeignKey("legacies.legacy_id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     title = Column(String(255), nullable=False, default="New Chat")
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
     user = relationship("User", back_populates="conversations")
+    legacy = relationship("Legacy", back_populates="conversations")
     messages = relationship(
         "Message",
         back_populates="conversation",
@@ -182,6 +193,22 @@ class UserSettings(Base):
     """User Settings model - user preferences."""
     
     __tablename__ = "user_settings"
+    __table_args__ = (
+        CheckConstraint(
+            "preferred_voice IS NULL OR preferred_voice IN ("
+            "'rohan','mani','shubh','varun','cedar',"
+            "'rupali','simran','ritu','suhani','marin')",
+            name="ck_user_settings_preferred_voice",
+        ),
+        CheckConstraint(
+            "conversation_style IN ('natural','gentle','expressive')",
+            name="ck_user_settings_conversation_style",
+        ),
+        CheckConstraint(
+            "response_length IN ('short','balanced','detailed')",
+            name="ck_user_settings_response_length",
+        ),
+    )
     
     setting_id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, nullable=False, index=True, unique=True)
@@ -189,6 +216,9 @@ class UserSettings(Base):
     language = Column(String(50), default="English")
     speech_speed = Column(String(20), default="normal")  # slow, normal, fast
     ai_personality = Column(String(50), default="friendly")
+    preferred_voice = Column(String(20), nullable=True)
+    conversation_style = Column(String(20), nullable=False, default="natural", server_default="natural")
+    response_length = Column(String(20), nullable=False, default="balanced", server_default="balanced")
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     

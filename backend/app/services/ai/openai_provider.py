@@ -3,7 +3,7 @@
 import logging
 from collections.abc import AsyncIterator
 from collections.abc import Mapping
-from typing import NoReturn, Sequence
+from typing import BinaryIO, NoReturn, Sequence
 
 import httpx
 from openai import (
@@ -31,7 +31,15 @@ from app.services.ai.exceptions import (
     AIRateLimitError,
     AITimeoutError,
 )
-from app.services.ai.provider import AIMessage, AIProvider
+from app.services.ai.provider import (
+    AIMessage,
+    AIProvider,
+    ExternalKnowledgeMode,
+    SPEECH_MEDIA_TYPES,
+    SpeechResult, GenerationOptions,
+    SpeechChunk,
+)
+from app.services.ai.realtime_transcription_provider import RealtimeTranscriptionSession
 
 
 logger = logging.getLogger(__name__)
@@ -64,6 +72,10 @@ class OpenAIProvider(AIProvider):
     async def generate_response(
         self,
         messages: Sequence[AIMessage],
+        *,
+        structured_response_schema: Mapping[str, object] | None = None,
+        external_knowledge_mode: ExternalKnowledgeMode | None = None,
+        generation_options: GenerationOptions | None = None,
     ) -> str:
         """Return assistant text without exposing OpenAI SDK objects."""
         if not messages:
@@ -79,11 +91,26 @@ class OpenAIProvider(AIProvider):
             for message in messages
         ]
 
+        request_options = {
+            "model": self._settings.ai_model.strip(),
+            "input": request_messages,
+        }
+        if structured_response_schema is not None:
+            request_options["text"] = {
+                "format": {
+                    "type": "json_schema",
+                    "name": "structured_response",
+                    "schema": dict(structured_response_schema),
+                    "strict": True,
+                }
+            }
+        if external_knowledge_mode == "web_search":
+            request_options["tools"] = [{"type": "web_search"}]
+        if generation_options and generation_options.max_output_tokens is not None:
+            request_options["max_output_tokens"] = generation_options.max_output_tokens
+
         try:
-            response = await self._client.responses.create(
-                model=self._settings.ai_model.strip(),
-                input=request_messages,
-            )
+            response = await self._client.responses.create(**request_options)
         except OpenAIError as exc:
             self._raise_provider_error(exc)
 
@@ -99,11 +126,161 @@ class OpenAIProvider(AIProvider):
                 "OpenAI returned an empty response."
             )
 
-        return assistant_text.strip()
+        assistant_text = assistant_text.strip()
+        if external_knowledge_mode == "web_search":
+            citations = self._citation_links(response)
+            if citations:
+                assistant_text = (
+                    f"{assistant_text}\n\nSources:\n"
+                    + "\n".join(
+                        f"- [{title}]({url})" for title, url in citations
+                    )
+                )
+        return assistant_text
+
+    async def transcribe_audio(
+        self,
+        audio: BinaryIO,
+        *,
+        filename: str,
+        content_type: str,
+        model: str,
+    ) -> str:
+        """Transcribe bounded in-memory audio with the OpenAI Audio API."""
+        try:
+            audio.seek(0)
+            response = await self._client.audio.transcriptions.create(
+                model=model,
+                file=(filename, audio, content_type),
+                response_format="json",
+            )
+        except OpenAIError as exc:
+            self._raise_provider_error(exc)
+
+        transcript = getattr(response, "text", None)
+        if not isinstance(transcript, str) or not transcript.strip():
+            raise AIInvalidResponseError(
+                "OpenAI returned an empty transcription."
+            )
+        return transcript.strip()
+
+    async def synthesize_speech(
+        self,
+        *,
+        text: str,
+        model: str,
+        voice: str,
+        response_format: str,
+        timeout_seconds: float,
+        instructions: str | None = None,
+    ) -> SpeechResult:
+        """Generate speech audio in memory with the OpenAI Audio API."""
+        try:
+            request = {
+                "input": text,
+                "model": model,
+                "voice": voice,
+                "response_format": response_format,
+                "timeout": timeout_seconds,
+            }
+            if instructions is not None:
+                request["instructions"] = instructions
+            response = await self._client.audio.speech.create(
+                **request,
+            )
+            content = getattr(response, "content", None)
+        except OpenAIError as exc:
+            self._raise_provider_error(exc)
+        except (AttributeError, TypeError, ValueError):
+            raise AIInvalidResponseError(
+                "OpenAI returned unreadable speech audio."
+            ) from None
+
+        if not isinstance(content, bytes) or not content:
+            raise AIInvalidResponseError(
+                "OpenAI returned empty speech audio."
+            )
+        media_type = SPEECH_MEDIA_TYPES.get(response_format)
+        if media_type is None:
+            raise AIInvalidResponseError(
+                "OpenAI returned an unsupported speech format."
+            )
+        return SpeechResult(
+            content=content,
+            media_type=media_type,
+            file_extension=response_format,
+        )
+
+    @property
+    def supports_streaming_speech(self) -> bool:
+        return True
+
+    @property
+    def supports_streaming_transcription(self) -> bool:
+        return True
+
+    async def start_transcription_stream(self, *, model: str, content_type: str):
+        if content_type.lower() != "audio/l16":
+            raise ValueError("Realtime transcription requires PCM audio.")
+        return await RealtimeTranscriptionSession.create(
+            api_key=self._settings.openai_api_key, model=model,
+        )
+
+    async def stream_speech(
+        self, *, text: str, model: str, voice: str, response_format: str,
+        timeout_seconds: float, instructions: str | None = None,
+    ) -> AsyncIterator[SpeechChunk]:
+        """Yield chunked HTTP speech bytes without collecting the response."""
+        request = {
+            "input": text, "model": model, "voice": voice,
+            "response_format": response_format, "timeout": timeout_seconds,
+        }
+        if instructions is not None:
+            request["instructions"] = instructions
+        try:
+            async with self._client.audio.speech.with_streaming_response.create(
+                **request
+            ) as response:
+                async for content in response.iter_bytes(chunk_size=4096):
+                    if content:
+                        yield SpeechChunk(
+                            content=content,
+                            media_type=SPEECH_MEDIA_TYPES[response_format],
+                            file_extension=response_format,
+                            sample_rate=24000 if response_format == "pcm" else None,
+                        )
+        except OpenAIError as exc:
+            self._raise_provider_error(exc)
+        except (AttributeError, KeyError, TypeError, ValueError):
+            raise AIInvalidResponseError(
+                "OpenAI returned unreadable streaming speech audio."
+            ) from None
+
+    @staticmethod
+    def _citation_links(response: object) -> list[tuple[str, str]]:
+        """Project URL annotations without exposing raw SDK tool payloads."""
+        links: list[tuple[str, str]] = []
+        seen: set[str] = set()
+        for output in getattr(response, "output", ()) or ():
+            if getattr(output, "type", None) != "message":
+                continue
+            for content in getattr(output, "content", ()) or ():
+                for annotation in getattr(content, "annotations", ()) or ():
+                    if getattr(annotation, "type", None) != "url_citation":
+                        continue
+                    url = getattr(annotation, "url", None)
+                    title = getattr(annotation, "title", None)
+                    if isinstance(url, str) and url and url not in seen:
+                        links.append((title or url, url))
+                        seen.add(url)
+        return links
 
     async def stream_response(
         self,
         messages: Sequence[AIMessage],
+        *,
+        external_knowledge_mode: ExternalKnowledgeMode | None = None,
+        generation_options: GenerationOptions | None = None,
     ) -> AsyncIterator[str]:
         """Yield only user-visible text deltas from the Responses API."""
         if not messages:
@@ -122,11 +299,16 @@ class OpenAIProvider(AIProvider):
         completed = False
 
         try:
-            stream = await self._client.responses.create(
+            request_options = dict(
                 model=self._settings.ai_model.strip(),
                 input=request_messages,
                 stream=True,
             )
+            if external_knowledge_mode == "web_search":
+                request_options["tools"] = [{"type": "web_search"}]
+            if generation_options and generation_options.max_output_tokens is not None:
+                request_options["max_output_tokens"] = generation_options.max_output_tokens
+            stream = await self._client.responses.create(**request_options)
 
             async for event in stream:
                 event_type = getattr(event, "type", None)

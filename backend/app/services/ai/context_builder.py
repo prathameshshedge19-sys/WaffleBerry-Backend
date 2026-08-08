@@ -6,6 +6,7 @@ from typing import Protocol
 from app.services.ai.exceptions import AIInvalidResponseError
 from app.services.ai.prompt_builder import PromptBuilder
 from app.services.ai.provider import AIMessage, AIMessageRole
+from app.services.ai.external_knowledge import EXTERNAL_KNOWLEDGE_BOUNDARY
 
 
 class ConversationMessage(Protocol):
@@ -39,11 +40,16 @@ class ContextBuilder:
         self,
         history: Iterable[ConversationMessage],
         latest_user_message: str | None,
+        *,
+        grounding_context: str | None = None,
     ) -> list[AIMessage]:
         """Return one system prompt, recent history, and the latest user."""
+        system_prompt = self._prompt_builder.build_berry_system_prompt()
+        if grounding_context:
+            system_prompt = f"{system_prompt}\n\n{grounding_context}"
         system_message = AIMessage(
             role="system",
-            content=self._prompt_builder.build_berry_system_prompt(),
+            content=system_prompt,
         )
         latest = self._normalize_content(latest_user_message)
         history_budget = self.max_context_messages - 1 - bool(latest)
@@ -118,11 +124,108 @@ class ContextBuilder:
         self,
         history: Iterable[ConversationMessage],
         latest_user_message: str,
+        *,
+        grounding_context: str | None = None,
+        persona_display_name: str | None = None,
+        persona_relationship: str | None = None,
+        retrieval_available: bool = True,
+        persona_style_profile: dict[str, list[str]] | None = None,
+        persona_fidelity_guidance: str | None = None,
+        external_knowledge_enabled: bool = False,
+        live_call: bool = False,
     ) -> list[AIMessage]:
         """Build chat context and require a valid latest user message."""
         if self._normalize_content(latest_user_message) is None:
             raise AIInvalidResponseError(
                 "Latest user message must not be blank."
             )
-        messages = self.build_messages(history, latest_user_message)
+        if persona_display_name and persona_relationship:
+            prompt_method = (
+                self._prompt_builder.build_live_call_legacy_persona_system_prompt
+                if live_call else self._prompt_builder.build_legacy_persona_system_prompt
+            )
+            system_prompt = prompt_method(
+                display_name=persona_display_name,
+                relationship=persona_relationship,
+                retrieval_available=retrieval_available,
+                style_profile=persona_style_profile,
+                fidelity_guidance=persona_fidelity_guidance,
+            )
+            if grounding_context:
+                system_prompt = f"{system_prompt}\n\n{grounding_context}"
+            if external_knowledge_enabled:
+                system_prompt = (
+                    f"{system_prompt}\n\n{EXTERNAL_KNOWLEDGE_BOUNDARY}"
+                )
+            latest = self._normalize_content(latest_user_message)
+            valid_history = [
+                normalized
+                for message in history
+                if (normalized := self._normalize_stored_message(message))
+                is not None
+            ]
+            selected = self._select_recent_history(
+                valid_history,
+                self.max_context_messages - 2,
+            )
+            messages = [
+                AIMessage(role="system", content=system_prompt),
+                *selected,
+                AIMessage(role="user", content=latest),
+            ]
+        else:
+            messages = self.build_messages(
+                history,
+                latest_user_message,
+                grounding_context=grounding_context,
+            )
+            if external_knowledge_enabled:
+                messages[0] = AIMessage(
+                    role="system",
+                    content=(
+                        f"{messages[0].content}\n\n"
+                        f"{EXTERNAL_KNOWLEDGE_BOUNDARY}"
+                    ),
+                )
         return messages
+
+    def build_story_messages(
+        self,
+        history: Iterable[ConversationMessage],
+        *,
+        chapter: str,
+        relationship: str,
+        display_name: str,
+    ) -> list[AIMessage]:
+        """Build bounded Story Guide context without database persistence."""
+        system_message = AIMessage(
+            role="system",
+            content=self._prompt_builder.build_story_guide_system_prompt(
+                chapter=chapter,
+                relationship=relationship,
+                display_name=display_name,
+            ),
+        )
+        valid_history = [
+            normalized
+            for message in history
+            if (
+                normalized := self._normalize_stored_message(message)
+            ) is not None
+        ]
+        selected = self._select_recent_history(
+            valid_history,
+            self.max_context_messages - 1,
+        )
+        if not selected:
+            selected = [
+                AIMessage(
+                    role="user",
+                    content=(
+                        "Open this chapter naturally with a brief, warm "
+                        "introduction, then invite the person to share one "
+                        "memory. Do not begin with a cold direct prompt."
+                    ),
+                )
+            ]
+        return [system_message, *selected]

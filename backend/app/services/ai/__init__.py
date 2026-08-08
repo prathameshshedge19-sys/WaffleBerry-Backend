@@ -14,6 +14,7 @@ from app.services.ai.exceptions import (
     AIResponseError,
     AIServiceError,
     AITimeoutError,
+    MemoryGroundingError,
 )
 from app.services.ai.openai_provider import OpenAIProvider
 from app.services.ai.provider import AIMessage, AIProvider
@@ -38,6 +39,7 @@ __all__ = [
     "AIServiceError",
     "AIAuthenticationError",
     "AITimeoutError",
+    "MemoryGroundingError",
     "create_ai_provider",
     "OpenAIProvider",
     "validate_ai_configuration",

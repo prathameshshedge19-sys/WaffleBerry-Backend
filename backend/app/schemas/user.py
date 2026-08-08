@@ -7,6 +7,12 @@ from typing import Literal, Optional
 from app.models.user import MessageRole
 
 
+VoiceId = Literal[
+    "rohan", "mani", "shubh", "varun", "cedar",
+    "rupali", "simran", "ritu", "suhani", "marin",
+]
+
+
 # ==================== USER SCHEMAS ====================
 
 class UserBase(BaseModel):
@@ -80,6 +86,43 @@ class LoginResponse(BaseModel):
     user: UserResponse
 
 
+class VoiceOptionResponse(BaseModel):
+    id: VoiceId
+    name: str
+    recommendation: str
+
+
+class AvailableVoicesResponse(BaseModel):
+    male: list[VoiceOptionResponse]
+    female: list[VoiceOptionResponse]
+
+
+class VoicePreferenceUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    voice: VoiceId | None
+
+
+class VoicePreferenceResponse(BaseModel):
+    selected_voice: VoiceId | None
+    is_explicit_selection: bool
+    available_voices: AvailableVoicesResponse | None = None
+
+
+class ConversationPreferenceUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    voice: VoiceId | None
+    conversation_style: Literal["natural", "gentle", "expressive"]
+    response_length: Literal["short", "balanced", "detailed"]
+
+
+class ConversationPreferenceResponse(BaseModel):
+    selected_voice: VoiceId | None
+    is_explicit_selection: bool
+    conversation_style: Literal["natural", "gentle", "expressive"]
+    response_length: Literal["short", "balanced", "detailed"]
+    available_voices: AvailableVoicesResponse | None = None
+
+
 # ==================== VOICE PROFILE SCHEMAS ====================
 
 class VoiceProfileBase(BaseModel):
@@ -146,6 +189,7 @@ class VoiceSampleResponse(VoiceSampleBase):
 class ConversationCreate(BaseModel):
     """Schema for creating a conversation."""
     title: Optional[str] = Field(None, max_length=255)
+    legacy_id: Optional[int] = Field(None, gt=0)
 
     @field_validator("title", mode="before")
     @classmethod
@@ -183,6 +227,7 @@ class ConversationResponse(BaseModel):
     """Schema for conversation metadata returned by the API."""
     conversation_id: int
     user_id: int
+    legacy_id: Optional[int] = None
     title: str
     created_at: datetime
     updated_at: datetime
@@ -226,6 +271,20 @@ class MessagePairResponse(BaseModel):
     user_message: MessageResponse
     assistant_message: MessageResponse
     conversation: ConversationResponse
+
+
+class StoryGuideMessage(BaseModel):
+    """One temporary provider-neutral Story Guide history item."""
+    role: Literal["user", "assistant"]
+    content: str = Field(..., min_length=1, max_length=12000)
+
+
+class StoryGuideRequest(BaseModel):
+    """Frontend-owned Story Guide context for one streamed response."""
+    current_chapter: str = Field(..., min_length=1, max_length=120)
+    relationship: str = Field(..., min_length=1, max_length=100)
+    display_name: str = Field(..., min_length=1, max_length=80)
+    history: list[StoryGuideMessage] = Field(default_factory=list, max_length=50)
 
 
 # ==================== CONSENT SCHEMAS ====================

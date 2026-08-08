@@ -1,7 +1,7 @@
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -27,6 +27,22 @@ class Settings(BaseSettings):
     
     # API settings
     api_v1_prefix: str = "/api/v1"
+    cors_origins: str = (
+        "http://127.0.0.1:4173,http://localhost:4173,"
+        "http://127.0.0.1:5500,http://localhost:5500"
+    )
+
+    @property
+    def allowed_cors_origins(self) -> list[str]:
+        """Return explicit browser origins configured for CORS."""
+        origins = [
+            origin.strip().rstrip("/")
+            for origin in self.cors_origins.split(",")
+            if origin.strip()
+        ]
+        if "*" in origins:
+            raise ValueError("CORS_ORIGINS must contain explicit origins, not '*'.")
+        return origins
 
     # JWT settings
     jwt_secret_key: str
@@ -36,6 +52,46 @@ class Settings(BaseSettings):
     # AI settings
     ai_provider: str = "openai"
     ai_model: str = ""
+    audio_transcription_model: str = "gpt-4o-mini-transcribe"
+    live_call_transcription_model: str = "gpt-live-transcribe"
+    openai_tts_model: str = "gpt-4o-mini-tts"
+    openai_tts_voice: str = "alloy"
+    openai_tts_male_voice: str = "cedar"
+    openai_tts_female_voice: str = "marin"
+    default_standard_voice_profile: str = "standard_female"
+    openai_tts_format: str = "mp3"
+    tts_max_text_characters: int = Field(default=4096, ge=1, le=4096)
+    tts_timeout_seconds: float = Field(default=60.0, gt=0)
+    message_speech_engine: str = "tts"
+    openai_realtime_model: str = "gpt-realtime-2.1"
+    openai_realtime_vad_threshold: float = Field(default=0.60, ge=0.0, le=1.0)
+    live_call_realtime_enabled: bool = False
+    live_call_external_voice_realtime_enabled: bool = False
+    live_call_realtime_strict: bool = False
+    openai_realtime_session_url: str = "https://api.openai.com/v1/realtime/client_secrets"
+    live_call_realtime_tool_timeout_seconds: float = Field(default=6.0, gt=0, le=15)
+    openai_realtime_timeout_seconds: float = Field(default=60.0, gt=0)
+    openai_realtime_max_audio_bytes: int = Field(
+        default=25 * 1024 * 1024,
+        ge=1,
+    )
+    openai_realtime_output_format: str = "audio/pcm"
+    realtime_fallback_to_tts: bool = True
+    sarvam_api_key: str | None = None
+    sarvam_model: str = "bulbul:v3"
+    sarvam_speaker_male: str = "shubh"
+    sarvam_speaker_female: str = "priya"
+    sarvam_output_format: str = "wav"
+    sarvam_timeout_seconds: float = Field(default=60.0, gt=0)
+    sarvam_max_text_characters: int = Field(default=2500, ge=1, le=2500)
+    sarvam_max_audio_bytes: int = Field(default=25 * 1024 * 1024, ge=1)
+    sarvam_pace: float = Field(default=0.92, ge=0.5, le=2.0)
+    sarvam_temperature: float = Field(default=0.6, ge=0.01, le=2.0)
+    sarvam_pronunciation_dictionary_id: str | None = None
+    sarvam_pronunciation_dictionary_required: bool = False
+    speech_emotion_enabled: bool = True
+    speech_nonverbal_cues_enabled: bool = False
+    speech_discourse_markers_enabled: bool = False
     openai_api_key: str | None = None
     ai_connect_timeout_seconds: float = Field(default=10.0, gt=0)
     ai_read_timeout_seconds: float = Field(default=90.0, gt=0)
@@ -44,6 +100,43 @@ class Settings(BaseSettings):
     ai_retry_max_delay_seconds: float = Field(default=2.0, gt=0)
     ai_retry_jitter_seconds: float = Field(default=0.15, ge=0)
     ai_max_context_messages: int = Field(default=24, ge=2)
+
+    memory_semantic_retrieval_enabled: bool = True
+    auto_memory_learning_enabled: bool = False
+    memory_embedding_provider: str = "openai"
+    memory_embedding_model: str = "text-embedding-3-small"
+    memory_embedding_version: str = "v1"
+    memory_embedding_dimensions: int = Field(default=1536, ge=1)
+    memory_semantic_threshold: float = Field(default=0.35, ge=-1, le=1)
+
+    # Companion approved-memory grounding budget
+    memory_grounding_max_memories: int = Field(default=8, ge=1, le=100)
+    memory_grounding_max_estimated_tokens: int = Field(
+        default=1500,
+        ge=1,
+    )
+    memory_grounding_max_characters: int = Field(default=6000, ge=1)
+
+    @model_validator(mode="after")
+    def reject_production_sqlite_fallback(self):
+        """Production must explicitly select PostgreSQL persistence."""
+        if not self.debug and self.database_url.lower().startswith("sqlite"):
+            raise ValueError(
+                "DATABASE_URL must use PostgreSQL when DEBUG is false."
+            )
+        if self.memory_semantic_retrieval_enabled and any(
+            not value.strip()
+            for value in (
+                self.memory_embedding_provider,
+                self.memory_embedding_model,
+                self.memory_embedding_version,
+            )
+        ):
+            raise ValueError(
+                "Semantic memory retrieval requires embedding provider, "
+                "model, and version configuration."
+            )
+        return self
 
 
 @lru_cache()

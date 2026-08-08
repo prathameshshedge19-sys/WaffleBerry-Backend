@@ -1,0 +1,45 @@
+ssh waffleberry@89.167.14.211
+
+
+PGPASSWORD='WaffleBerry@321' psql \
+-h 127.0.0.1 \
+-U waffleberry \
+-d waffleberry
+
+
+BEGIN TRANSACTION READ ONLY;
+.
+.
+.
+.
+ROLLBACK;
+
+
+Hwo to run backend commands on the server:
+
+1. SSH into the server using the command:
+ssh waffleberry@89.167.14.211
+
+2. Navigate to the backend directory:
+cd /home/waffleberry/WaffleBerry-Backend
+
+3. Pull the latest changes from the repository:
+git pull origin main
+
+4. Enter backed directory:
+cd backend
+
+5. Activate the virtual environment:
+source venv/bin/activate
+
+6. Install any new dependencies if required:
+pip install -r requirements.txt
+
+7. Run database migrations if there are any:
+alembic upgrade head
+
+8. Restart the backend server to apply changes:
+sudo systemctl restart waffleberry-backend
+
+9. Verify that the backend server is running correctly by checking the status:
+sudo systemctl status waffleberry-backend

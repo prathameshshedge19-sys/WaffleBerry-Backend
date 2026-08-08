@@ -3,7 +3,13 @@
 from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
-from app.models.user import User, VoiceProfile, VoiceSample, Conversation, Message, MessageRole
+from app.models.user import User, UserSettings, VoiceProfile, VoiceSample, Conversation, Message, MessageRole
+from app.models.memory import (
+    CompanionMemoryProvenance,
+    Legacy,
+    Memory,
+    MemoryReviewStatus,
+)
 from app.schemas.user import UserCreate, VoiceProfileCreate, VoiceProfileUpdate, VoiceSampleCreate
 import app.services.email_verification_service as evs
 import hashlib
@@ -76,6 +82,43 @@ class UserCRUD:
     def get_users(db: Session, skip: int = 0, limit: int = 10) -> list[User]:
         """Get all users with pagination."""
         return db.query(User).offset(skip).limit(limit).all()
+
+    @staticmethod
+    def get_settings(db: Session, user_id: int) -> UserSettings | None:
+        return db.query(UserSettings).filter(
+            UserSettings.user_id == user_id
+        ).first()
+
+    @staticmethod
+    def set_preferred_voice(
+        db: Session,
+        user_id: int,
+        voice: str | None,
+    ) -> UserSettings:
+        settings = UserCRUD.get_settings(db, user_id)
+        if settings is None:
+            settings = UserSettings(user_id=user_id)
+            db.add(settings)
+        settings.preferred_voice = voice
+        db.commit()
+        db.refresh(settings)
+        return settings
+
+    @staticmethod
+    def set_conversation_preferences(
+        db: Session, user_id: int, *, voice: str | None,
+        conversation_style: str, response_length: str,
+    ) -> UserSettings:
+        settings = UserCRUD.get_settings(db, user_id)
+        if settings is None:
+            settings = UserSettings(user_id=user_id)
+            db.add(settings)
+        settings.preferred_voice = voice
+        settings.conversation_style = conversation_style
+        settings.response_length = response_length
+        db.commit()
+        db.refresh(settings)
+        return settings
 
 
 class VoiceProfileCRUD:
@@ -171,12 +214,14 @@ class ConversationCRUD:
     def create_conversation(
         db: Session,
         user_id: int,
-        title: str = "New Chat"
+        title: str = "New Chat",
+        legacy_id: int | None = None,
     ) -> Conversation:
         """Create a conversation belonging to a user."""
         db_conversation = Conversation(
             user_id=user_id,
-            title=title
+            title=title,
+            legacy_id=legacy_id,
         )
         db.add(db_conversation)
         db.commit()
@@ -253,6 +298,73 @@ class MessageCRUD:
     AUTO_TITLE_MAX_LENGTH = 45
 
     @staticmethod
+    def get_conversation_message(
+        db: Session,
+        conversation_id: int,
+        message_id: int,
+    ) -> Message | None:
+        """Return a message only when both scoped identifiers match."""
+        return (
+            db.query(Message)
+            .filter(
+                Message.message_id == message_id,
+                Message.conversation_id == conversation_id,
+            )
+            .first()
+        )
+
+    @staticmethod
+    def _add_grounding_provenance(
+        db: Session,
+        *,
+        conversation: Conversation,
+        assistant_message: Message,
+        memory_ids: tuple[int, ...],
+        retrieved_at: datetime | None,
+    ) -> None:
+        """Defensively validate and stage ordered internal provenance."""
+        if not memory_ids:
+            return
+        if retrieved_at is None or len(set(memory_ids)) != len(memory_ids):
+            raise ValueError("Invalid Companion grounding provenance.")
+        legacy_id = conversation.legacy_id
+        owned_legacy = (
+            db.query(Legacy.legacy_id)
+            .filter(
+                Legacy.legacy_id == legacy_id,
+                Legacy.owner_user_id == conversation.user_id,
+            )
+            .scalar()
+        )
+        if owned_legacy is None:
+            raise ValueError("Invalid Companion grounding ownership.")
+        approved_ids = {
+            memory_id
+            for (memory_id,) in (
+                db.query(Memory.memory_id)
+                .filter(
+                    Memory.legacy_id == legacy_id,
+                    Memory.review_status == MemoryReviewStatus.APPROVED,
+                    Memory.memory_id.in_(memory_ids),
+                )
+                .all()
+            )
+        }
+        if approved_ids != set(memory_ids):
+            raise ValueError("Invalid Companion grounding memories.")
+        db.add_all(
+            [
+                CompanionMemoryProvenance(
+                    assistant_message_id=assistant_message.message_id,
+                    memory_id=memory_id,
+                    retrieval_order=order,
+                    retrieved_at=retrieved_at,
+                )
+                for order, memory_id in enumerate(memory_ids)
+            ]
+        )
+
+    @staticmethod
     def generate_conversation_title(content: str) -> str:
         """Create a short deterministic title from a user's first message."""
         normalized_content = " ".join(content.split())
@@ -285,7 +397,10 @@ class MessageCRUD:
         db: Session,
         conversation: Conversation,
         content: str,
-        assistant_content: str
+        assistant_content: str,
+        *,
+        grounded_memory_ids: tuple[int, ...] = (),
+        memories_retrieved_at: datetime | None = None,
     ) -> tuple[Message, Message, Conversation]:
         """Store a user message and generated assistant response atomically."""
         conversation = (
@@ -328,6 +443,14 @@ class MessageCRUD:
                 conversation.title = MessageCRUD.generate_conversation_title(
                     content
                 )
+            db.flush()
+            MessageCRUD._add_grounding_provenance(
+                db,
+                conversation=conversation,
+                assistant_message=assistant_message,
+                memory_ids=grounded_memory_ids,
+                retrieved_at=memories_retrieved_at,
+            )
             db.flush()
             db.refresh(user_message)
             db.refresh(assistant_message)
@@ -395,6 +518,9 @@ class MessageCRUD:
         db: Session,
         conversation: Conversation,
         content: str,
+        *,
+        grounded_memory_ids: tuple[int, ...] = (),
+        memories_retrieved_at: datetime | None = None,
     ) -> tuple[Message, Conversation]:
         """Store one completed streaming assistant message."""
         conversation = (
@@ -415,6 +541,14 @@ class MessageCRUD:
         try:
             db.add(assistant_message)
             conversation.updated_at = datetime.now(timezone.utc)
+            db.flush()
+            MessageCRUD._add_grounding_provenance(
+                db,
+                conversation=conversation,
+                assistant_message=assistant_message,
+                memory_ids=grounded_memory_ids,
+                retrieved_at=memories_retrieved_at,
+            )
             db.flush()
             db.refresh(assistant_message)
             db.refresh(conversation)

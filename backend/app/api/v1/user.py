@@ -11,7 +11,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 from app.db import get_db
 from app.dependencies.auth import get_current_user
-from app.dependencies.ai import get_chat_service
+from app.dependencies.ai import get_chat_service, get_message_speech_service
 from app.models.user import User
 from app.schemas.user import (
     UserCreate, UserLogin, UserResponse, SignupResponse, LoginResponse, VoiceProfileCreate, VoiceProfileResponse, 
@@ -19,10 +19,16 @@ from app.schemas.user import (
     ConversationCreate, ConversationUpdate, ConversationResponse,
     MessageCreate, MessagePairResponse, MessageResponse, VerifyEmailRequest,ResendOTPRequest, ForgotPasswordRequest,
     VerifyResetOTPRequest, ResetPasswordRequest
+    MessageCreate, MessagePairResponse, MessageResponse, StoryGuideRequest,
+    VoicePreferenceResponse, VoicePreferenceUpdate,
+    ConversationPreferenceResponse, ConversationPreferenceUpdate,
 )
+from app.schemas.audio import MessageSpeechRequest
 from app.crud.user import (
     UserCRUD, VoiceProfileCRUD, VoiceSampleCRUD, ConversationCRUD, MessageCRUD
 )
+from app.crud.memory import LegacyCRUD
+from app.models.memory import LegacyStatus
 
 from app.services.token_service import create_access_token
 from app.services.ai.exceptions import (
@@ -36,6 +42,13 @@ from app.services.ai.exceptions import (
     AIServiceError,
     AITimeoutError,
 )
+from app.api.v1.speech_http import speech_audio_response, speech_http_error
+from app.services.message_speech_service import (
+    MessageSpeechError,
+    MessageSpeechService,
+)
+from app.services.voice_catalogue import public_catalogue
+from app.services.memory.auto_learning import schedule_conversation_learning
 
 logger = logging.getLogger(__name__)
 
@@ -43,10 +56,118 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+def get_message_speech_service_for_request() -> MessageSpeechService:
+    """Resolve message speech lazily with safe configuration errors."""
+    try:
+        return get_message_speech_service()
+    except Exception as exc:
+        raise speech_http_error(exc) from None
+
+
+def _require_active_conversation_legacy(
+    db: Session,
+    conversation,
+    user_id: int,
+) -> None:
+    """Block new Companion messages for archived linked Legacies."""
+    if conversation.legacy_id is None:
+        return
+    legacy = LegacyCRUD.get_user_legacy(
+        db,
+        conversation.legacy_id,
+        user_id,
+    )
+    if legacy is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Conversation not found.",
+        )
+    if legacy.status == LegacyStatus.ARCHIVED:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "legacy_archived",
+                "message": "Restore this Legacy before continuing.",
+            },
+        )
+
+
 def _sse_event(event: str, payload: dict) -> str:
     """Serialize one safely framed server-sent event."""
     data = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     return f"event: {event}\ndata: {data}\n\n"
+
+
+@router.post("/stories/stream")
+async def stream_story_guide(
+    story: StoryGuideRequest,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+):
+    """Stream one temporary Story Guide response without persistence."""
+    del current_user
+    try:
+        response_stream = get_chat_service().stream_story_response(
+            story.history,
+            chapter=story.current_chapter,
+            relationship=story.relationship,
+            display_name=story.display_name,
+        )
+    except AIServiceError as exc:
+        raise _ai_http_exception(exc) from None
+
+    async def event_stream():
+        chunks: list[str] = []
+        try:
+            yield _sse_event("start", {})
+            async for delta in response_stream:
+                if await request.is_disconnected():
+                    return
+                chunks.append(delta)
+                yield _sse_event("delta", {"text": delta})
+
+            assistant_content = "".join(chunks).strip()
+            if not assistant_content:
+                raise AIInvalidResponseError(
+                    "AI provider returned an empty Story Guide response."
+                )
+            yield _sse_event("complete", {"text": assistant_content})
+        except asyncio.CancelledError:
+            raise
+        except AIServiceError as exc:
+            if not await request.is_disconnected():
+                _, code, safe_message = _safe_ai_error(exc)
+                yield _sse_event(
+                    "error",
+                    {"code": code, "message": safe_message},
+                )
+        except Exception:
+            logger.exception("Unexpected Story Guide stream failure.")
+            if not await request.is_disconnected():
+                yield _sse_event(
+                    "error",
+                    {
+                        "code": "stream_interrupted",
+                        "message": (
+                            "Berry's response was interrupted. "
+                            "Please try again."
+                        ),
+                    },
+                )
+        finally:
+            close_stream = getattr(response_stream, "aclose", None)
+            if close_stream is not None:
+                await close_stream()
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 def _safe_ai_error(exc: AIServiceError) -> tuple[int, str, str]:
@@ -397,6 +518,78 @@ async def read_current_user(
     """Return the user authenticated by the Bearer access token."""
     return current_user
 
+
+@router.get(
+    "/user/voice-preference",
+    response_model=VoicePreferenceResponse,
+)
+async def get_voice_preference(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Return provider-neutral voice choices and this user's preference."""
+    settings = UserCRUD.get_settings(db, current_user.user_id)
+    selected = settings.preferred_voice if settings else None
+    return {
+        "selected_voice": selected,
+        "is_explicit_selection": selected is not None,
+        "available_voices": public_catalogue(),
+    }
+
+
+@router.put(
+    "/user/voice-preference",
+    response_model=VoicePreferenceResponse,
+)
+async def update_voice_preference(
+    preference: VoicePreferenceUpdate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Persist only the authenticated user's selected provider-neutral ID."""
+    settings = UserCRUD.set_preferred_voice(
+        db,
+        current_user.user_id,
+        preference.voice,
+    )
+    return {
+        "selected_voice": settings.preferred_voice,
+        "is_explicit_selection": settings.preferred_voice is not None,
+    }
+
+
+@router.get("/user/conversation-preferences", response_model=ConversationPreferenceResponse)
+async def get_conversation_preferences(
+    current_user: User = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    settings = UserCRUD.get_settings(db, current_user.user_id)
+    selected = settings.preferred_voice if settings else None
+    return {
+        "selected_voice": selected,
+        "is_explicit_selection": selected is not None,
+        "conversation_style": settings.conversation_style if settings else "natural",
+        "response_length": settings.response_length if settings else "balanced",
+        "available_voices": public_catalogue(),
+    }
+
+
+@router.put("/user/conversation-preferences", response_model=ConversationPreferenceResponse)
+async def update_conversation_preferences(
+    preference: ConversationPreferenceUpdate,
+    current_user: User = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    settings = UserCRUD.set_conversation_preferences(
+        db, current_user.user_id, voice=preference.voice,
+        conversation_style=preference.conversation_style,
+        response_length=preference.response_length,
+    )
+    return {
+        "selected_voice": settings.preferred_voice,
+        "is_explicit_selection": settings.preferred_voice is not None,
+        "conversation_style": settings.conversation_style,
+        "response_length": settings.response_length,
+    }
+
 @router.get("/users/{user_id}", response_model=UserResponse)
 async def get_user(user_id: int, db: Session = Depends(get_db)):
     """Get user details by ID."""
@@ -590,11 +783,32 @@ async def create_conversation(
         if conversation and conversation.title is not None
         else "New Chat"
     )
+    legacy_id = conversation.legacy_id if conversation else None
+    if legacy_id is not None:
+        legacy = LegacyCRUD.get_user_legacy(
+            db,
+            legacy_id,
+            current_user.user_id,
+        )
+        if legacy is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Legacy not found.",
+            )
+        if legacy.status == LegacyStatus.ARCHIVED:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "legacy_archived",
+                    "message": "Restore this Legacy before continuing.",
+                },
+            )
 
     return ConversationCRUD.create_conversation(
         db,
         current_user.user_id,
-        title
+        title,
+        legacy_id,
     )
 
 
@@ -693,6 +907,45 @@ async def delete_conversation(
 # ==================== MESSAGE ENDPOINTS ====================
 
 @router.post(
+    "/conversations/{conversation_id}/messages/{message_id}/speech",
+    response_class=Response,
+)
+async def synthesize_message_speech(
+    conversation_id: int,
+    message_id: int,
+    options: MessageSpeechRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    service: MessageSpeechService = Depends(
+        get_message_speech_service_for_request
+    ),
+) -> Response:
+    """Generate speech from an owned persisted assistant message."""
+    try:
+        result = await service.synthesize_assistant_message(
+            db=db,
+            current_user=current_user,
+            conversation_id=conversation_id,
+            message_id=message_id,
+            response_format=options.response_format,
+        )
+    except MessageSpeechError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail={
+                "code": exc.code,
+                "message": exc.safe_message,
+            },
+        ) from None
+    except Exception as exc:
+        raise speech_http_error(exc) from None
+
+    return speech_audio_response(
+        result,
+        filename_stem="berry-response",
+    )
+
+@router.post(
     "/conversations/{conversation_id}/messages",
     response_model=MessagePairResponse,
     status_code=status.HTTP_201_CREATED
@@ -715,11 +968,24 @@ async def create_message(
             detail="Conversation not found."
         )
 
+    _require_active_conversation_legacy(
+        db, conversation, current_user.user_id
+    )
+    preferences = UserCRUD.get_settings(db, current_user.user_id)
+
+    # Capture post-commit values before SQLAlchemy can expire/detach ORM state.
+    learning_user_id = int(current_user.user_id)
+    learning_legacy_id = int(conversation.legacy_id)
+    learning_conversation_id = int(conversation.conversation_id)
+    learning_user_text = str(message.content)
+
     try:
-        assistant_content = await get_chat_service().generate_response(
+        generation = await get_chat_service().generate_response_with_provenance(
             db,
             conversation,
-            message.content
+            message.content,
+            conversation_style=(preferences.conversation_style if preferences else "natural"),
+            response_length=(preferences.response_length if preferences else "balanced"),
         )
     except AIServiceError as exc:
         logger.exception(
@@ -734,7 +1000,14 @@ async def create_message(
         db,
         conversation,
         message.content,
-        assistant_content
+        generation.content,
+        grounded_memory_ids=generation.memory_ids,
+        memories_retrieved_at=generation.retrieved_at,
+    )
+    schedule_conversation_learning(
+        user_id=learning_user_id, legacy_id=learning_legacy_id,
+        conversation_id=learning_conversation_id,
+        user_text=learning_user_text,
     )
     return MessagePairResponse(
         user_message=user_message,
@@ -765,12 +1038,27 @@ async def create_message_stream(
             detail="Conversation not found.",
         )
 
+    _require_active_conversation_legacy(
+        db, conversation, current_user.user_id
+    )
+    preferences = UserCRUD.get_settings(db, current_user.user_id)
+
+    # Streaming continues across transaction commits and response yields. Capture
+    # every late-lifecycle value before SQLAlchemy can expire/detach ORM state.
+    learning_user_id = int(current_user.user_id)
+    learning_legacy_id = int(conversation.legacy_id)
+    learning_conversation_id = int(conversation.conversation_id)
+    learning_user_text = str(message.content)
+
     try:
-        response_stream = get_chat_service().stream_response(
+        stream_plan = get_chat_service().stream_response_with_provenance(
             db,
             conversation,
             message.content,
+            conversation_style=(preferences.conversation_style if preferences else "natural"),
+            response_length=(preferences.response_length if preferences else "balanced"),
         )
+        response_stream = stream_plan.stream
     except AIServiceError as exc:
         logger.exception(
             "AI stream setup failed (category=%s, conversation_id=%d).",
@@ -821,8 +1109,25 @@ async def create_message_stream(
                     db,
                     conversation,
                     assistant_content,
+                    grounded_memory_ids=stream_plan.memory_ids,
+                    memories_retrieved_at=stream_plan.retrieved_at,
                 )
             )
+            # Generation and assistant persistence are complete. Create only the
+            # detached task before terminal SSE; the expensive work stays async.
+            try:
+                schedule_conversation_learning(
+                    user_id=learning_user_id,
+                    legacy_id=learning_legacy_id,
+                    conversation_id=learning_conversation_id,
+                    user_text=learning_user_text,
+                )
+            except Exception:
+                # Optional task creation cannot revoke successful Chat.
+                logger.exception(
+                    "MEMORY_LEARNING source=chat stage=error "
+                    "candidate_count=0 saved_count=0"
+                )
             yield _sse_event(
                 "complete",
                 {

@@ -1,10 +1,12 @@
 """Provider-independent AI orchestration."""
 
 import logging
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
 
 from app.services.ai.exceptions import AIResponseError
-from app.services.ai.provider import AIMessage, AIProvider
+from app.services.ai.provider import (
+    AIMessage, AIProvider, ExternalKnowledgeMode, GenerationOptions,
+)
 from app.services.ai.retry import AIRetryPolicy
 
 
@@ -25,12 +27,28 @@ class AIService:
     async def generate_response(
         self,
         messages: Sequence[AIMessage],
+        *,
+        structured_response_schema: Mapping[str, object] | None = None,
+        external_knowledge_mode: ExternalKnowledgeMode | None = None,
+        generation_options: GenerationOptions | None = None,
     ) -> str:
         """Generate and validate assistant text through the configured provider."""
         retry_number = 0
         while True:
             try:
-                response = await self._provider.generate_response(messages)
+                if (structured_response_schema is None
+                        and external_knowledge_mode is None
+                        and generation_options is None):
+                    response = await self._provider.generate_response(messages)
+                else:
+                    options = {}
+                    if structured_response_schema is not None:
+                        options["structured_response_schema"] = structured_response_schema
+                    if external_knowledge_mode is not None:
+                        options["external_knowledge_mode"] = external_knowledge_mode
+                    if generation_options is not None:
+                        options["generation_options"] = generation_options
+                    response = await self._provider.generate_response(messages, **options)
                 if not isinstance(response, str) or not response.strip():
                     raise AIResponseError(
                         "AI provider returned an empty response."
@@ -50,13 +68,22 @@ class AIService:
     async def stream_response(
         self,
         messages: Sequence[AIMessage],
+        *,
+        external_knowledge_mode: ExternalKnowledgeMode | None = None,
+        generation_options: GenerationOptions | None = None,
     ) -> AsyncIterator[str]:
         """Yield validated plain-text deltas from the configured provider."""
         retry_number = 0
         while True:
             received_text = False
             try:
-                async for delta in self._provider.stream_response(messages):
+                options = {}
+                if external_knowledge_mode is not None:
+                    options["external_knowledge_mode"] = external_knowledge_mode
+                if generation_options is not None:
+                    options["generation_options"] = generation_options
+                stream = self._provider.stream_response(messages, **options)
+                async for delta in stream:
                     if not isinstance(delta, str):
                         raise AIResponseError(
                             "AI provider returned an invalid stream delta."

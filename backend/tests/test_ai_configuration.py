@@ -7,7 +7,10 @@ from unittest.mock import patch
 from pydantic import ValidationError
 
 from app.config import Settings
-from app.services.ai.exceptions import AIConfigurationError
+from app.services.ai.exceptions import (
+    AIConfigurationError,
+    AIInvalidResponseError,
+)
 from app.services.ai.openai_provider import OpenAIProvider
 from app.services.ai.provider import AIMessage
 from app.services.ai.provider_registry import (
@@ -31,13 +34,34 @@ def settings_for_test(**overrides) -> Settings:
 class FakeResponses:
     def __init__(self):
         self.model = None
+        self.kwargs = None
 
     async def create(self, **kwargs):
+        self.kwargs = kwargs
         self.model = kwargs["model"]
         return SimpleNamespace(output_text="Configured response")
 
 
 class AIConfigurationTests(unittest.IsolatedAsyncioTestCase):
+    def test_realtime_boolean_environment_syntax(self):
+        for value in ("true", "True", "1"):
+            with self.subTest(value=value):
+                settings = settings_for_test(live_call_realtime_enabled=value)
+                self.assertTrue(settings.live_call_realtime_enabled)
+
+    def test_realtime_strict_defaults_off_and_parses_true(self):
+        self.assertFalse(settings_for_test().live_call_realtime_strict)
+        self.assertTrue(settings_for_test(live_call_realtime_strict="true").live_call_realtime_strict)
+
+    def test_realtime_vad_threshold_defaults_conservatively_and_is_bounded(self):
+        self.assertEqual(settings_for_test().openai_realtime_vad_threshold, 0.60)
+        self.assertEqual(
+            settings_for_test(openai_realtime_vad_threshold="0.65").openai_realtime_vad_threshold,
+            0.65,
+        )
+        with self.assertRaises(ValidationError):
+            settings_for_test(openai_realtime_vad_threshold=1.1)
+
     def test_valid_configuration(self):
         settings = settings_for_test()
 
@@ -123,6 +147,83 @@ class AIConfigurationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             responses.model,
             "model-from-environment",
+        )
+        self.assertNotIn("text", responses.kwargs)
+
+    async def test_structured_schema_is_sent_only_when_requested(self):
+        provider = object.__new__(OpenAIProvider)
+        responses = FakeResponses()
+        responses.create = self._structured_response(responses)
+        provider._settings = settings_for_test()
+        provider._client = SimpleNamespace(responses=responses)
+        schema = {
+            "type": "object",
+            "properties": {"memories": {"type": "array"}},
+            "required": ["memories"],
+            "additionalProperties": False,
+        }
+
+        result = await provider.generate_response(
+            [AIMessage(role="user", content="Extract")],
+            structured_response_schema=schema,
+        )
+
+        self.assertEqual(result, '{"memories":[]}')
+        self.assertEqual(
+            responses.kwargs["text"],
+            {
+                "format": {
+                    "type": "json_schema",
+                    "name": "structured_response",
+                    "schema": schema,
+                    "strict": True,
+                }
+            },
+        )
+
+    async def test_empty_structured_output_is_a_safe_provider_error(self):
+        provider = object.__new__(OpenAIProvider)
+        provider._settings = settings_for_test()
+        provider._client = SimpleNamespace(
+            responses=SimpleNamespace(create=self._empty_response)
+        )
+
+        with self.assertRaises(AIInvalidResponseError):
+            await provider.generate_response(
+                [AIMessage(role="user", content="Extract")],
+                structured_response_schema={"type": "object"},
+            )
+
+    async def test_refusal_without_output_is_a_safe_provider_error(self):
+        provider = object.__new__(OpenAIProvider)
+        provider._settings = settings_for_test()
+        provider._client = SimpleNamespace(
+            responses=SimpleNamespace(create=self._refusal_response)
+        )
+
+        with self.assertRaises(AIInvalidResponseError):
+            await provider.generate_response(
+                [AIMessage(role="user", content="Extract")],
+                structured_response_schema={"type": "object"},
+            )
+
+    @staticmethod
+    def _structured_response(responses):
+        async def create(**kwargs):
+            responses.kwargs = kwargs
+            return SimpleNamespace(output_text='{"memories":[]}')
+
+        return create
+
+    @staticmethod
+    async def _empty_response(**_kwargs):
+        return SimpleNamespace(output_text="")
+
+    @staticmethod
+    async def _refusal_response(**_kwargs):
+        return SimpleNamespace(
+            output_text="",
+            output=[SimpleNamespace(type="refusal")],
         )
 
 
