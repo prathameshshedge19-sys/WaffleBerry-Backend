@@ -64,6 +64,12 @@ class Settings(BaseSettings):
     tts_timeout_seconds: float = Field(default=60.0, gt=0)
     message_speech_engine: str = "tts"
     openai_realtime_model: str = "gpt-realtime-2.1"
+    openai_realtime_vad_threshold: float = Field(default=0.60, ge=0.0, le=1.0)
+    live_call_realtime_enabled: bool = False
+    live_call_external_voice_realtime_enabled: bool = False
+    live_call_realtime_strict: bool = False
+    openai_realtime_session_url: str = "https://api.openai.com/v1/realtime/client_secrets"
+    live_call_realtime_tool_timeout_seconds: float = Field(default=6.0, gt=0, le=15)
     openai_realtime_timeout_seconds: float = Field(default=60.0, gt=0)
     openai_realtime_max_audio_bytes: int = Field(
         default=25 * 1024 * 1024,

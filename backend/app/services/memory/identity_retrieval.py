@@ -108,6 +108,7 @@ class IdentityGroundingResult:
     candidate_count: int = 0
     conflict_present: bool = False
     compact_context: str | None = None
+    records: tuple[dict, ...] = ()
 
 
 class IdentityFactRetrievalService:
@@ -192,4 +193,5 @@ class IdentityFactRetrievalService:
             )
         return IdentityGroundingResult(
             fact_type, context, len(facts), conflict_present, compact_context,
+            tuple(records),
         )

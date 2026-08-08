@@ -87,11 +87,33 @@ class LiveCallEmotionTests(unittest.TestCase):
         self.assertIn("lively but controlled energy", prompt)
         self.assertIn("Never invent, infer, embellish, or fill gaps", prompt)
         self.assertEqual(speech.calls[0]["standard_voice_profile"].value, "standard_female")
-        self.assertEqual(speech.calls[0]["conversational_tone"], LiveCallTone.EXCITED)
+        self.assertEqual(speech.calls[0]["conversational_tone"], LiveCallTone.NEUTRAL)
 
-    def test_optional_emotional_delivery_failure_retries_neutral_same_voice(self):
+    def test_greeting_and_emotional_response_share_identity_delivery_profile(self):
+        ai, speech = FakeAI(), FakeSpeech()
+        service = LiveCallTurnService(
+            FakeTranscription("I got the job!"), ai, ContextBuilder(10), speech, speech
+        )
+        session = self.session("standard_female")
+        asyncio.run(service.greeting(session=session))
+        asyncio.run(service.process(
+            session=session, audio=b"voice", content_type="audio/webm", history=(),
+        ))
+        greeting, response = speech.calls
+        self.assertEqual(session.base_delivery_profile, "identity_neutral_v1")
+        self.assertEqual(greeting["standard_voice_profile"], response["standard_voice_profile"])
+        self.assertEqual(greeting["conversational_tone"], LiveCallTone.NEUTRAL)
+        self.assertEqual(response["conversational_tone"], LiveCallTone.NEUTRAL)
+
+    def test_identity_neutral_delivery_failure_retries_same_voice_and_profile(self):
         ai = FakeAI("That is wonderful news.")
-        speech = FakeSpeech(fail_tone=LiveCallTone.EXCITED)
+        class FailOnceSpeech(FakeSpeech):
+            async def synthesize(self, **kwargs):
+                self.calls.append(kwargs)
+                if len(self.calls) == 1:
+                    raise RuntimeError("transient delivery failure")
+                return SpeechResult(b"audio", "audio/mpeg", "mp3")
+        speech = FailOnceSpeech()
         service = LiveCallTurnService(
             FakeTranscription("I passed!"), ai, ContextBuilder(10), speech, speech
         )
@@ -100,6 +122,7 @@ class LiveCallEmotionTests(unittest.TestCase):
         ))
         self.assertEqual(len(speech.calls), 2)
         self.assertEqual(speech.calls[0]["standard_voice_profile"], speech.calls[1]["standard_voice_profile"])
+        self.assertEqual(speech.calls[0]["conversational_tone"], LiveCallTone.NEUTRAL)
         self.assertEqual(speech.calls[1]["conversational_tone"], LiveCallTone.NEUTRAL)
 
     def test_turn_uses_session_scoped_shared_companion_context(self):
@@ -144,7 +167,7 @@ class LiveCallEmotionTests(unittest.TestCase):
         self.assertIn("APPROVED LEGACY MEMORIES: trusted fact", prompt)
         self.assertIn("Continue with supported detail after the short direct first sentence", prompt)
         self.assertIn("Emotional safety overrides style", prompt)
-        self.assertEqual(speech.calls[0]["conversational_tone"], LiveCallTone.COMFORTING)
+        self.assertEqual(speech.calls[0]["conversational_tone"], LiveCallTone.NEUTRAL)
 
     @staticmethod
     def session(voice):

@@ -58,6 +58,9 @@ class MemoryRetrievalService:
                 for participant in memory.participants
                 if participant.relationship
             ]
+            item.participant_roles = [
+                participant.role for participant in memory.participants
+            ]
             item.tags = [
                 link.tag.name for link in memory.tag_links if link.tag
             ]

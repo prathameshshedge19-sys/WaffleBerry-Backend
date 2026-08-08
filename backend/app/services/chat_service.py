@@ -38,7 +38,11 @@ from app.services.memory.fidelity import (
     MemoryFidelityService,
 )
 from app.services.memory.multilingual_retrieval import detect_query_language_mode
-from app.services.memory.name_resolution import NameResolution, ProperNameResolver
+from app.services.memory.name_resolution import (
+    comparable_name,
+    NameResolution,
+    ProperNameResolver,
+)
 from app.services.memory.retrieval import (
     MemoryRetrievalArchivedError,
     MemoryRetrievalNotFoundError,
@@ -75,6 +79,16 @@ class PreparedCompanionInput:
     grounding_chars: int = 0
     identity_context_chars: int = 0
     identity_direct: bool = False
+    identity_count: int = 0
+    conflict_count: int = 0
+    has_uncertainty: bool = False
+    resolved_entities: tuple[str, ...] = ()
+    memory_evidence: tuple[dict, ...] = ()
+    identity_evidence: tuple[dict, ...] = ()
+    approved_candidate_count: int = 0
+    matched_candidate_count: int = 0
+    query_intent: str = "unknown"
+    query_language_mode: str = "unknown"
 
 
 @dataclass(frozen=True)
@@ -94,6 +108,27 @@ class CompanionStreamPlan:
 
 
 class ChatService:
+    @staticmethod
+    def _memory_perspective(memory, legacy_name: str) -> dict:
+        """Classify grammatical perspective from source-grounded participant roles."""
+        subjects = [
+            name for name, role in zip(
+                memory.participant_names, memory.participant_roles, strict=False,
+            )
+            if role == "subject"
+        ]
+        if not subjects:
+            return {"subject": "uncertain", "subjects": []}
+        legacy_key = comparable_name(legacy_name)
+        perspectives = [
+            "self" if comparable_name(name) == legacy_key else name
+            for name in subjects
+        ]
+        perspectives = list(dict.fromkeys(perspectives))
+        if len(perspectives) == 1:
+            return {"subject": perspectives[0], "subjects": perspectives}
+        return {"subject": "multiple", "subjects": perspectives}
+
     """Load conversation context and prepare provider-neutral AI input."""
 
     def __init__(
@@ -169,6 +204,10 @@ class ChatService:
         identity_context = None
         request_id = uuid4().hex
         memory_ids: tuple[int, ...] = ()
+        memory_evidence: tuple[dict, ...] = ()
+        identity_evidence: tuple[dict, ...] = ()
+        approved_candidate_count = 0
+        matched_candidate_count = 0
         retrieved_at = None
         persona_display_name = None
         persona_relationship = None
@@ -180,6 +219,7 @@ class ChatService:
         query_language_mode = detect_query_language_mode(user_message)
         knowledge_plan = ExternalKnowledgeClassifier.classify(user_message)
         name_resolution = NameResolution()
+        identity_result = IdentityGroundingResult(None, None)
         legacy_id = getattr(conversation, "legacy_id", None)
         if (
             legacy_id is not None
@@ -312,6 +352,8 @@ class ChatService:
                     "Approved Legacy memories could not be prepared."
                 ) from exc
             else:
+                approved_candidate_count = ranked.approved_memory_count
+                matched_candidate_count = ranked.matched_memory_count
                 selection = (
                     self._memory_grounding.select(ranked.memories, compact=True)
                     if live_call else self._memory_grounding.select(ranked.memories)
@@ -329,11 +371,22 @@ class ChatService:
                         if grounding_context is None
                         else f"{identity_context}\n\n{grounding_context}"
                     )
+                identity_evidence = identity_result.records
                 if selection.memories:
                     memory_ids = tuple(
                         memory.memory_id for memory in selection.memories
                     )
                     retrieved_at = datetime.now(timezone.utc)
+                    memory_evidence = tuple({
+                        "memory_id": memory.memory_id,
+                        "title": memory.title,
+                        "summary": memory.summary,
+                        "uncertainty": memory.uncertainty_note,
+                        "conflict": memory.contradiction_group_id is not None,
+                        **self._memory_perspective(
+                            memory, conversation.legacy.display_name,
+                        ),
+                    } for memory in selection.memories)
                 _safe_log(
                     logging.INFO,
                     "companion_memory_retrieval",
@@ -499,6 +552,20 @@ class ChatService:
             identity_direct=(
                 legacy_id is not None
                 and identity_result.compact_context is not None
+            ),
+            identity_count=identity_result.candidate_count,
+            conflict_count=(int(identity_result.conflict_present)
+                            + int(fidelity_plan.has_conflict)),
+            has_uncertainty=fidelity_plan.has_uncertainty,
+            resolved_entities=((name_resolution.canonical_value,)
+                               if name_resolution.canonical_value else ()),
+            memory_evidence=memory_evidence,
+            identity_evidence=identity_evidence,
+            approved_candidate_count=approved_candidate_count,
+            matched_candidate_count=matched_candidate_count,
+            query_intent=getattr(query_intent, "value", str(query_intent)),
+            query_language_mode=getattr(
+                query_language_mode, "value", str(query_language_mode)
             ),
         )
 
@@ -701,6 +768,19 @@ class ChatService:
             history_override=history,
             live_call=True,
         )
+
+    def retrieve_live_call_identity(
+        self, db: Session, *, user_id: int, legacy_id: int, query: str,
+    ):
+        """Reuse authoritative F2/F3 services for a compact direct identity lookup."""
+        resolution = self._name_resolver.resolve(
+            db, user_id=user_id, legacy_id=legacy_id, query=query,
+        )
+        arguments = {"user_id": user_id, "legacy_id": legacy_id, "query": query}
+        if resolution.fact_type is not None:
+            arguments["fact_type_override"] = resolution.fact_type
+            arguments["canonical_value_override"] = resolution.canonical_value
+        return self._identity_retrieval.retrieve(db, **arguments), resolution
 
     @staticmethod
     def _source_link_count(content: str) -> int:

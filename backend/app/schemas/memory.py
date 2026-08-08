@@ -584,6 +584,7 @@ class ApprovedMemoryRetrievalItem(BaseModel):
     participant_relationships: list[str] = Field(
         default_factory=list, exclude=True
     )
+    participant_roles: list[str | None] = Field(default_factory=list, exclude=True)
     tags: list[str] = Field(default_factory=list, exclude=True)
     source_topics: list[str] = Field(default_factory=list, exclude=True)
     details: MemoryDetails | None = None

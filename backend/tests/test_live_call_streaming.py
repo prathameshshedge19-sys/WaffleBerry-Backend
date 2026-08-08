@@ -1,6 +1,7 @@
 """Phase 10.8.3 provider-neutral streaming speech fast-path tests."""
 
 import asyncio
+import inspect
 from datetime import datetime, timedelta, timezone
 
 from app.services.ai.context_builder import ContextBuilder
@@ -106,6 +107,34 @@ def test_committed_file_transcript_remains_the_only_grounding_input():
     assert "transcript = await self._transcription.transcribe(validated)" in source
     assert 'yield {"type": "transcription", "text": transcript}' in source
     assert "transcription.partial" not in source
+
+
+def test_generation_producer_failure_is_consumed_and_next_turn_remains_usable():
+    class FailingAI:
+        async def stream_response(self, _messages):
+            if False:
+                yield ""
+            raise RuntimeError("provider failed")
+
+    failing = LiveCallTurnService(
+        FileTranscription(), FailingAI(), ContextBuilder(10), FullSpeech(),
+        StreamingPersonalSpeech(),
+    )
+    try:
+        asyncio.run(collect(failing))
+    except RuntimeError as exc:
+        assert str(exc) == "provider failed"
+    else:
+        raise AssertionError("provider failure should remain recoverable by the transport")
+
+    healthy = LiveCallTurnService(
+        FileTranscription(), StreamingAI(), ContextBuilder(10), FullSpeech(),
+        StreamingPersonalSpeech(),
+    )
+    events = asyncio.run(collect(healthy))
+    assert events[-1]["type"] == "completed"
+    source = inspect.getsource(LiveCallTurnService.process_streaming)
+    assert "producer.exception()" in source
 
 
 def test_successful_realtime_final_bypasses_fallback_transcription_once():

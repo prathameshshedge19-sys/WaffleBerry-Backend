@@ -8,7 +8,7 @@ INDIAN_RECOMMENDATION = (
     "Best suited for Indian languages and Indian English"
 )
 NATURAL_ENGLISH_RECOMMENDATION = (
-    "Best suited for natural English and international languages"
+    "Best suited for natural English, international languages, and Live Calls"
 )
 
 

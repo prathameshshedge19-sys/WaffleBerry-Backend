@@ -44,7 +44,16 @@ class VoiceCatalogueTests(unittest.TestCase):
             )
             self.assertEqual(
                 item["recommendation"],
-                "Best suited for natural English and international languages",
+                "Best suited for natural English, international languages, and Live Calls",
+            )
+        for voice_id in ("simran", "shubh"):
+            item = next(
+                voice for group in public.values() for voice in group
+                if voice["id"] == voice_id
+            )
+            self.assertEqual(
+                item["recommendation"],
+                "Best suited for Indian languages and Indian English",
             )
         for voice in VOICE_CATALOGUE:
             expected = VoiceProvider.OPENAI if voice.id in {"cedar", "marin"} else VoiceProvider.SARVAM

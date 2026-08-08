@@ -43,6 +43,25 @@ class FakeResponses:
 
 
 class AIConfigurationTests(unittest.IsolatedAsyncioTestCase):
+    def test_realtime_boolean_environment_syntax(self):
+        for value in ("true", "True", "1"):
+            with self.subTest(value=value):
+                settings = settings_for_test(live_call_realtime_enabled=value)
+                self.assertTrue(settings.live_call_realtime_enabled)
+
+    def test_realtime_strict_defaults_off_and_parses_true(self):
+        self.assertFalse(settings_for_test().live_call_realtime_strict)
+        self.assertTrue(settings_for_test(live_call_realtime_strict="true").live_call_realtime_strict)
+
+    def test_realtime_vad_threshold_defaults_conservatively_and_is_bounded(self):
+        self.assertEqual(settings_for_test().openai_realtime_vad_threshold, 0.60)
+        self.assertEqual(
+            settings_for_test(openai_realtime_vad_threshold="0.65").openai_realtime_vad_threshold,
+            0.65,
+        )
+        with self.assertRaises(ValidationError):
+            settings_for_test(openai_realtime_vad_threshold=1.1)
+
     def test_valid_configuration(self):
         settings = settings_for_test()
 

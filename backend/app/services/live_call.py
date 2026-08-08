@@ -17,6 +17,7 @@ from app.services.ai.context_builder import ContextBuilder
 from app.services.ai.provider import AIMessage, SpeechResult, GenerationOptions
 from app.services.ai.transcription_service import TranscriptionService, validate_audio_upload
 from app.services.personal_voice_speech_service import PersonalVoiceSpeechService
+from app.services.persona_profile import PersonaProfile
 from app.services.ai.sarvam_speech_service import SarvamSpeechService
 from app.services.voice_catalogue import get_voice
 from app.services.voice_profile_resolver import StandardVoiceProfile
@@ -212,6 +213,11 @@ class LiveCallSession:
     ended_at: datetime | None = None
     conversation_style: str = "natural"
     response_length: str = "balanced"
+    base_delivery_profile: str = "identity_neutral_v1"
+    engine: str = "cascade"
+    speech_renderer: str = "cascade_legacy"
+    realtime_capable: bool = False
+    persona_profile: PersonaProfile = field(default_factory=PersonaProfile)
 
 
 class LiveCallSessionStore:
@@ -233,6 +239,10 @@ class LiveCallSessionStore:
         effective_voice: str,
         conversation_style: str = "natural",
         response_length: str = "balanced",
+        engine: str = "cascade",
+        speech_renderer: str = "cascade_legacy",
+        realtime_capable: bool = False,
+        persona_profile: PersonaProfile | None = None,
     ) -> LiveCallSession:
         now = datetime.now(timezone.utc)
         with self._lock:
@@ -254,6 +264,10 @@ class LiveCallSessionStore:
                 expires_at=now + SESSION_TTL,
                 conversation_style=conversation_style,
                 response_length=response_length,
+                engine=engine,
+                speech_renderer=speech_renderer,
+                realtime_capable=realtime_capable,
+                persona_profile=persona_profile or PersonaProfile(),
             )
             self._sessions[session.session_id] = session
             self._runtime[session.session_id] = LiveCallRuntime()
@@ -277,6 +291,19 @@ class LiveCallSessionStore:
                 or not secrets.compare_digest(
                     session.transport_token, transport_token
                 )
+            ):
+                return None
+            return session
+
+    def authorize_user(self, session_id: str, user_id: int) -> LiveCallSession | None:
+        """Authorize an authenticated HTTP operation against an active call."""
+        with self._lock:
+            session = self._sessions.get(session_id)
+            if (
+                session is None
+                or session.user_id != user_id
+                or session.state == "ended"
+                or datetime.now(timezone.utc) >= session.expires_at
             ):
                 return None
             return session
@@ -584,7 +611,8 @@ class LiveCallTurnService:
 
     async def process(self, *, session: LiveCallSession, audio: bytes,
                       content_type: str, history: tuple[AIMessage, ...],
-                      db: Session | None = None) -> tuple[str, str, SpeechResult]:
+                      db: Session | None = None,
+                      turn_id: int | None = None) -> tuple[str, str, SpeechResult]:
         validated = validate_audio_upload(audio, content_type)
         transcript = await self._transcription.transcribe(validated)
         tone = self._tone_resolver.resolve(transcript, history)
@@ -612,51 +640,20 @@ class LiveCallTurnService:
             )
         else:
             response = await self._ai.generate_response(messages)
-        voice = get_voice(session.effective_voice)
-        profile = StandardVoiceProfile.MALE if session.effective_voice == "standard_male" else StandardVoiceProfile.FEMALE
-        speech_tone = tone
-        if tone in {LiveCallTone.NEUTRAL, LiveCallTone.WARM}:
-            if session.conversation_style == "gentle":
-                speech_tone = LiveCallTone.GENTLE
-            elif session.conversation_style == "expressive":
-                speech_tone = LiveCallTone.WARM
-
-        async def synthesize(delivery_tone: LiveCallTone):
-            if voice is not None:
-                return await self._personal_speech.synthesize(
-                    text=response, voice=voice, response_format="mp3",
-                    conversational_tone=delivery_tone,
-                )
-            return await self._standard_speech.synthesize(
-                text=response, standard_voice_profile=profile, response_format="mp3",
-                preserve_text=True, conversational_tone=delivery_tone,
-            )
-
-        try:
-            speech = await synthesize(speech_tone)
-        except Exception:
-            if speech_tone is LiveCallTone.NEUTRAL:
-                raise
-            # Emotional controls are optional: retry ordinary delivery with the
-            # identical text and selected voice before failing the call turn.
-            speech = await synthesize(LiveCallTone.NEUTRAL)
+        speech = await self._synthesize_live_call_phrase(
+            session, response, tone, turn_id=turn_id, kind="response",
+        )
         return transcript, response, speech
 
-    async def greeting(self, *, session: LiveCallSession) -> tuple[str, SpeechResult]:
+    async def greeting(
+        self, *, session: LiveCallSession, turn_id: int | None = 0,
+    ) -> tuple[str, SpeechResult]:
         """Speak one deterministic neutral greeting without AI or memory access."""
         response = build_live_call_greeting(session)
-        voice = get_voice(session.effective_voice)
-        profile = StandardVoiceProfile.MALE if session.effective_voice == "standard_male" else StandardVoiceProfile.FEMALE
-        if voice is not None:
-            speech = await self._personal_speech.synthesize(
-                text=response, voice=voice, response_format="mp3",
-                conversational_tone=LiveCallTone.WARM,
-            )
-        else:
-            speech = await self._standard_speech.synthesize(
-                text=response, standard_voice_profile=profile, response_format="mp3",
-                preserve_text=True, conversational_tone=LiveCallTone.WARM,
-            )
+        speech = await self._synthesize_live_call_phrase(
+            session, response, LiveCallTone.NEUTRAL,
+            turn_id=turn_id, kind="greeting",
+        )
         return response, speech
 
     async def process_streaming(
@@ -665,6 +662,7 @@ class LiveCallTurnService:
         mark: Callable[[str], None] | None = None,
         record_metrics: Callable[[dict[str, int]], None] | None = None,
         final_transcript: str | None = None,
+        turn_id: int | None = None,
     ) -> AsyncIterator[dict[str, object]]:
         """Stream grounded text into ordered, phrase-level speech chunks."""
         note = mark or (lambda _stage: None)
@@ -710,6 +708,7 @@ class LiveCallTurnService:
             buffer = ""
             received = False
             phrase_emitted = False
+            generation_failed = False
             note("generation_started")
             try:
                 stream_options = (
@@ -746,6 +745,9 @@ class LiveCallTurnService:
                 note("first_text_available")
                 response_parts.append(response)
                 buffer = response
+            except Exception:
+                generation_failed = True
+                raise
             finally:
                 if buffer.strip():
                     phrases, _ = split_speakable_phrases(buffer, final=True)
@@ -755,7 +757,7 @@ class LiveCallTurnService:
                             note("first_phrase_available")
                         await queue.put(phrase)
                         phrase_emitted = True
-                note("generation_completed")
+                note("generation_failed" if generation_failed else "generation_completed")
                 await queue.put(None)
 
         producer = asyncio.create_task(produce())
@@ -769,7 +771,9 @@ class LiveCallTurnService:
                     note("tts_started")
                 streamed = False
                 try:
-                    async for chunk in self._stream_live_call_phrase(session, phrase, tone):
+                    async for chunk in self._stream_live_call_phrase(
+                        session, phrase, tone, turn_id=turn_id,
+                    ):
                         streamed = True
                         if first_audio:
                             note("tts_first_chunk")
@@ -782,7 +786,9 @@ class LiveCallTurnService:
                     if streamed:
                         raise
                 if not streamed:
-                    speech = await self._synthesize_live_call_phrase(session, phrase, tone)
+                    speech = await self._synthesize_live_call_phrase(
+                        session, phrase, tone, turn_id=turn_id,
+                    )
                     if first_audio:
                         note("first_audio_ready")
                         first_audio = False
@@ -796,19 +802,27 @@ class LiveCallTurnService:
         finally:
             if not producer.done():
                 producer.cancel()
+                try:
+                    await producer
+                except (asyncio.CancelledError, Exception):
+                    pass
+            else:
+                # Always retrieve a completed producer exception, including when
+                # the async consumer disappeared before reaching `await producer`.
+                try:
+                    producer.exception()
+                except asyncio.CancelledError:
+                    pass
 
     async def _stream_live_call_phrase(
         self, session: LiveCallSession, text: str, tone: LiveCallTone,
+        *, turn_id: int | None = None,
     ):
         voice = get_voice(session.effective_voice)
         if voice is None or not self._personal_speech.supports_streaming(voice):
             raise NotImplementedError
-        speech_tone = tone
-        if tone in {LiveCallTone.NEUTRAL, LiveCallTone.WARM}:
-            if session.conversation_style == "gentle":
-                speech_tone = LiveCallTone.GENTLE
-            elif session.conversation_style == "expressive":
-                speech_tone = LiveCallTone.WARM
+        speech_tone = LiveCallTone.NEUTRAL
+        self._log_voice_route(session, turn_id, "response", voice, speech_tone, 0)
         async for chunk in self._personal_speech.stream(
             text=text, voice=voice, conversational_tone=speech_tone,
         ):
@@ -816,15 +830,11 @@ class LiveCallTurnService:
 
     async def _synthesize_live_call_phrase(
         self, session: LiveCallSession, text: str, tone: LiveCallTone,
+        *, turn_id: int | None = None, kind: str = "response",
     ) -> SpeechResult:
         voice = get_voice(session.effective_voice)
         profile = StandardVoiceProfile.MALE if session.effective_voice == "standard_male" else StandardVoiceProfile.FEMALE
-        speech_tone = tone
-        if tone in {LiveCallTone.NEUTRAL, LiveCallTone.WARM}:
-            if session.conversation_style == "gentle":
-                speech_tone = LiveCallTone.GENTLE
-            elif session.conversation_style == "expressive":
-                speech_tone = LiveCallTone.WARM
+        speech_tone = LiveCallTone.NEUTRAL
         async def synthesize(delivery_tone: LiveCallTone) -> SpeechResult:
             if voice is not None:
                 return await self._personal_speech.synthesize(
@@ -836,11 +846,34 @@ class LiveCallTurnService:
                 preserve_text=True, conversational_tone=delivery_tone,
             )
         try:
+            self._log_voice_route(session, turn_id, kind, voice, speech_tone, 0)
             return await synthesize(speech_tone)
         except Exception:
-            if speech_tone is LiveCallTone.NEUTRAL:
-                raise
-            return await synthesize(LiveCallTone.NEUTRAL)
+            self._log_voice_route(session, turn_id, kind, voice, speech_tone, 1)
+            return await synthesize(speech_tone)
+
+    async def render_external_phrase(
+        self, session: LiveCallSession, text: str, *, generation_id: str,
+    ) -> SpeechResult:
+        """Render one bounded Realtime phrase through the call's frozen voice."""
+        if session.speech_renderer not in {"external_streaming_tts", "external_nonstreaming_tts"}:
+            raise ValueError("External speech is not enabled for this call.")
+        return await self._synthesize_live_call_phrase(
+            session, text, LiveCallTone.NEUTRAL, kind=f"external:{generation_id[-8:]}",
+        )
+
+    @staticmethod
+    def _log_voice_route(
+        session: LiveCallSession, turn_id: int | None, kind: str,
+        voice, tone: LiveCallTone, retry: int,
+    ) -> None:
+        provider_voice = voice.provider_voice if voice is not None else session.effective_voice
+        logger.debug(
+            "LIVE_CALL_VOICE session_id=%s turn_id=%s kind=%s effective_voice=%s "
+            "provider_voice_id_safe=%s delivery_profile_id=%s tone=%s retry=%s voice_match=True",
+            session.session_id, turn_id, kind, session.effective_voice,
+            provider_voice, session.base_delivery_profile, tone.value, retry,
+        )
 
 
 live_call_sessions = LiveCallSessionStore()

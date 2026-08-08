@@ -19,6 +19,11 @@ from app.schemas.live_call import (
     LiveCallSessionCreate,
     LiveCallSessionEndResponse,
     LiveCallSessionResponse,
+    RealtimeBootstrapResponse,
+    RealtimeSpeechRequest,
+    RealtimeSpeechResponse,
+    RealtimeToolRequest,
+    RealtimeToolResponse,
 )
 from app.services.live_call import (
     LIVE_CALL_EVENT_VERSION,
@@ -27,11 +32,22 @@ from app.services.live_call import (
     live_call_sessions,
 )
 from app.services.voice_profile_resolver import StandardVoiceResolver
+from app.services.persona_profile import PersonaProfileService
 from app.config import get_settings
-from app.dependencies.ai import get_live_call_turn_service
+from app.dependencies.ai import (
+    get_live_call_turn_service,
+    get_realtime_bootstrap_provider,
+    get_realtime_tool_service,
+)
 from app.services.live_call import LiveCallTurnService
 from app.services.ai.exceptions import AITimeoutError
 from app.services.ai.transcription_service import AudioValidationError
+from app.services.realtime_live_call import (
+    OpenAIRealtimeBootstrapProvider,
+    RealtimeBootstrapError,
+    RealtimeToolService,
+    choose_live_call_delivery,
+)
 
 
 router = APIRouter()
@@ -210,16 +226,31 @@ async def create_live_call_session(
     # This performs no transcription, generation, embedding, or synthesis call.
     get_live_call_turn_service()
     preferences = UserCRUD.get_settings(db, current_user.user_id)
+    effective_voice = _effective_voice(db, current_user.user_id, legacy.relationship)
+    settings = get_settings()
+    delivery = choose_live_call_delivery(
+        settings, effective_voice, request.engine
+    )
     session = live_call_sessions.create(
         user_id=current_user.user_id,
         legacy_id=legacy.legacy_id,
         legacy_name=legacy.display_name,
         relationship=legacy.relationship,
-        effective_voice=_effective_voice(
-            db, current_user.user_id, legacy.relationship
-        ),
+        effective_voice=effective_voice,
         conversation_style=(preferences.conversation_style if preferences else "natural"),
         response_length=(preferences.response_length if preferences else "balanced"),
+        engine=delivery.conversation_engine,
+        speech_renderer=delivery.speech_renderer,
+        realtime_capable=delivery.realtime_capable,
+        persona_profile=PersonaProfileService().build(
+            db, legacy_id=legacy.legacy_id,
+        ),
+    )
+    logger.info(
+        "LIVE_CALL_ENGINE session_id=%s effective_voice=%s feature_enabled=%s "
+        "voice_realtime_capable=%s selected_engine=%s speech_renderer=%s fallback_reason=%s",
+        session.session_id, session.effective_voice, settings.live_call_realtime_enabled,
+        session.realtime_capable, session.engine, session.speech_renderer, delivery.reason,
     )
     return LiveCallSessionResponse(
         session_id=session.session_id,
@@ -227,9 +258,137 @@ async def create_live_call_session(
         legacy_name=session.legacy_name,
         relationship=session.relationship,
         effective_voice=session.effective_voice,
+        base_delivery_profile=session.base_delivery_profile,
         state=session.state,
         conversation_style=session.conversation_style,
         response_length=session.response_length,
+        expires_at=session.expires_at,
+        engine=session.engine,
+        engine_reason=delivery.reason,
+        realtime_strict=getattr(settings, "live_call_realtime_strict", False),
+        realtime_capable=session.realtime_capable,
+        speech_renderer=session.speech_renderer,
+        transport="webrtc" if session.engine == "realtime" else "websocket",
+    )
+
+
+@router.post(
+    "/live-call/realtime/{session_id}/bootstrap",
+    response_model=RealtimeBootstrapResponse,
+)
+async def bootstrap_realtime_call(
+    session_id: str,
+    current_user: User = Depends(get_current_user),
+    provider: OpenAIRealtimeBootstrapProvider = Depends(get_realtime_bootstrap_provider),
+):
+    logger.debug(
+        "REALTIME_BOOTSTRAP request_received=True provider_request_started=False "
+        "provider_status=na client_secret_received=False model=%s voice=na "
+        "success=False failure_category=none",
+        get_settings().openai_realtime_model,
+    )
+    session = live_call_sessions.authorize_user(session_id, current_user.user_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Call session was not found.")
+    if session.engine != "realtime" or not get_settings().live_call_realtime_enabled:
+        raise HTTPException(status_code=409, detail="Realtime is not enabled for this call.")
+    try:
+        credential = await provider.create(session)
+    except Exception as exc:
+        status_code = exc.status_code if isinstance(exc, RealtimeBootstrapError) else None
+        category = exc.category if isinstance(exc, RealtimeBootstrapError) else "unknown"
+        logger.exception(
+            "REALTIME_BOOTSTRAP request_received=True provider_request_started=True "
+            "provider_status=%s client_secret_received=False model=%s voice=%s "
+            "success=False failure_category=%s",
+            status_code if status_code is not None else "na", get_settings().openai_realtime_model,
+            session.effective_voice, category,
+        )
+        headers = None
+        retry_after = exc.retry_after if isinstance(exc, RealtimeBootstrapError) else None
+        if retry_after is not None:
+            headers = {"Retry-After": str(retry_after)}
+        raise HTTPException(
+            status_code=502,
+            detail={"message": "Realtime call startup failed.", "code": category},
+            headers=headers,
+        ) from None
+    return RealtimeBootstrapResponse(
+        client_secret=credential["client_secret"],
+        expires_at=credential.get("expires_at"),
+        model=get_settings().openai_realtime_model,
+        voice=session.effective_voice,
+    )
+
+
+@router.post(
+    "/live-call/realtime/{session_id}/tool",
+    response_model=RealtimeToolResponse,
+)
+async def execute_realtime_tool(
+    session_id: str,
+    request: RealtimeToolRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    tools: RealtimeToolService = Depends(get_realtime_tool_service),
+):
+    session = live_call_sessions.authorize_user(session_id, current_user.user_id)
+    if session is None or session.engine != "realtime":
+        raise HTTPException(status_code=404, detail="Call session was not found.")
+    try:
+        result = await asyncio.wait_for(
+            asyncio.to_thread(
+                tools.execute, db, session, request.name, request.arguments
+            ),
+            timeout=get_settings().live_call_realtime_tool_timeout_seconds,
+        )
+    except (ValueError, asyncio.TimeoutError):
+        result = {"status": "error", "uncertain": True}
+    except Exception:
+        logger.exception(
+            "live_call_realtime_tool_failed session_id=%s tool=%s",
+            session_id,
+            request.name,
+        )
+        result = {"status": "error", "uncertain": True}
+    return RealtimeToolResponse(call_id=request.call_id, result=result)
+
+
+@router.post(
+    "/live-call/realtime/{session_id}/speech",
+    response_model=RealtimeSpeechResponse,
+)
+async def render_realtime_external_speech(
+    session_id: str,
+    request: RealtimeSpeechRequest,
+    current_user: User = Depends(get_current_user),
+    service: LiveCallTurnService = Depends(get_live_call_turn_service),
+):
+    session = live_call_sessions.authorize_user(session_id, current_user.user_id)
+    if session is None or session.engine != "realtime":
+        raise HTTPException(status_code=404, detail="Call session was not found.")
+    if session.speech_renderer not in {"external_streaming_tts", "external_nonstreaming_tts"}:
+        raise HTTPException(status_code=409, detail="External speech is not enabled for this call.")
+    started = monotonic()
+    try:
+        speech = await service.render_external_phrase(
+            session, request.text.strip(), generation_id=request.generation_id,
+        )
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Speech phrase is invalid.") from None
+    except Exception:
+        logger.exception("live_call_external_speech_failed session_id=%s", session_id)
+        raise HTTPException(status_code=502, detail="External speech rendering failed.") from None
+    logger.debug(
+        "LIVE_CALL_EXTERNAL_TTS session_id=%s voice=%s renderer=%s elapsed_ms=%s audio_bytes=%s",
+        session_id, session.effective_voice, session.speech_renderer,
+        max(0, round((monotonic() - started) * 1000)), len(speech.content),
+    )
+    return RealtimeSpeechResponse(
+        response_id=request.response_id,
+        generation_id=request.generation_id,
+        audio=base64.b64encode(speech.content).decode("ascii"),
+        content_type=speech.media_type,
     )
 
 
@@ -269,6 +428,9 @@ async def live_call_transport(
         close_code = 4404 if transport_status == "missing" else 4401
         await websocket.close(code=close_code, reason="Call session is unavailable.")
         return
+    if session.engine != "cascade":
+        await websocket.close(code=4409, reason="This call uses the Realtime transport.")
+        return
     await websocket.accept(subprotocol="waffleberry.live-call.v1")
     live_call_sessions.mark_connected(session_id)
     greeting_trace = live_call_sessions.start_latency(session_id, 0, None)
@@ -294,11 +456,38 @@ async def live_call_transport(
         except (WebSocketDisconnect, RuntimeError):
             return False
 
-    async def send_error(code: str, turn_id: int | None = None) -> None:
+    async def send_error(
+        code: str, turn_id: int | None = None, failure_stage: str | None = None,
+    ) -> None:
         event = {"version": LIVE_CALL_EVENT_VERSION, "type": "error", "code": code}
         if turn_id is not None:
             event["turn_id"] = turn_id
+        if failure_stage is not None:
+            event["failure_stage"] = failure_stage
         await websocket.send_json(event)
+
+    def failed_stage(turn_id: int) -> str:
+        trace = live_call_sessions.latency_trace(session_id, turn_id)
+        marks = trace.marks if trace else {}
+        if "transcription_started" in marks and "transcription_completed" not in marks:
+            return "stt_failed"
+        if "generation_failed" in marks or (
+            "generation_started" in marks and "generation_completed" not in marks
+        ):
+            return "generation_failed"
+        if "tts_started" in marks and "tts_completed" not in marks:
+            return "tts_failed"
+        return "turn_processing"
+
+    async def fail_turn_safely(turn_id: int, code: str) -> None:
+        stage = failed_stage(turn_id)
+        live_call_sessions.fail_turn(session_id, turn_id)
+        logger.debug(
+            "LIVE_CALL_FAILURE session_id=%s turn_id=%s stage=%s safe_code=%s "
+            "retry_count=0 recovered=False",
+            session_id, turn_id, stage, code,
+        )
+        await send_error(code, turn_id, stage)
 
     async def process_turn(
         turn_id: int, audio: bytes, content_type: str,
@@ -334,6 +523,7 @@ async def live_call_transport(
                         mark=trace.mark if trace else None,
                         record_metrics=trace.add_context_metrics if trace else None,
                         final_transcript=final_transcript,
+                        turn_id=turn_id,
                     ):
                         if live_call_sessions.is_interrupted(session_id, turn_id):
                             raise asyncio.CancelledError
@@ -376,6 +566,7 @@ async def live_call_transport(
                     turn_service.process(
                         session=active_session, audio=audio, content_type=content_type,
                         history=live_call_sessions.history(session_id), db=db,
+                        turn_id=turn_id,
                     ),
                     timeout=LIVE_CALL_TURN_TIMEOUT_SECONDS,
                 )
@@ -426,17 +617,14 @@ async def live_call_transport(
                 })
                 _log_turn_latency(session_id, turn_id, trace.metrics(), diagnostics)
         except AudioValidationError as exc:
-            live_call_sessions.fail_turn(session_id, turn_id)
-            await send_error(exc.code, turn_id)
+            await fail_turn_safely(turn_id, exc.code)
         except asyncio.CancelledError:
             live_call_sessions.fail_turn(session_id, turn_id)
             raise
         except (AITimeoutError, asyncio.TimeoutError):
-            live_call_sessions.fail_turn(session_id, turn_id)
-            await send_error("turn_timeout", turn_id)
+            await fail_turn_safely(turn_id, "turn_timeout")
         except Exception:
-            live_call_sessions.fail_turn(session_id, turn_id)
-            await send_error("turn_failed", turn_id)
+            await fail_turn_safely(turn_id, "turn_failed")
 
     async def process_greeting() -> None:
         try:
@@ -446,7 +634,7 @@ async def live_call_transport(
                 return
             greeting_trace.mark("greeting_tts_started")
             _, speech = await asyncio.wait_for(
-                turn_service.greeting(session=active_session),
+                turn_service.greeting(session=active_session, turn_id=0),
                 timeout=LIVE_CALL_TURN_TIMEOUT_SECONDS,
             )
             greeting_trace.mark("greeting_first_audio")

@@ -30,6 +30,7 @@ from app.services.message_speech_service import MessageSpeechService
 from app.services.voice_profile_resolver import StandardVoiceResolver
 from app.services.personal_voice_speech_service import PersonalVoiceSpeechService
 from app.services.live_call import LiveCallTurnService
+from app.services.realtime_live_call import OpenAIRealtimeBootstrapProvider, RealtimeToolService
 
 
 @lru_cache()
@@ -189,3 +190,13 @@ def get_live_call_turn_service() -> LiveCallTurnService:
         ),
         companion_context=get_chat_service(),
     )
+
+
+@lru_cache()
+def get_realtime_bootstrap_provider() -> OpenAIRealtimeBootstrapProvider:
+    return OpenAIRealtimeBootstrapProvider(get_settings())
+
+
+@lru_cache()
+def get_realtime_tool_service() -> RealtimeToolService:
+    return RealtimeToolService(get_chat_service())
