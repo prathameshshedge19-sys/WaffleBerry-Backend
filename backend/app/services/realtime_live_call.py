@@ -315,6 +315,11 @@ class RealtimeToolService:
                 self._states.move_to_end(session_id)
             return state
 
+    def discard_session(self, session_id: str) -> None:
+        """Release bounded follow-up evidence when its logical call ends."""
+        with self._lock:
+            self._states.pop(session_id, None)
+
     @staticmethod
     def _query(arguments: dict) -> str:
         query = arguments.get("query")
@@ -492,7 +497,10 @@ class RealtimeToolService:
                 {**record, "perspective_owner": "self"}
                 for record in identity_evidence
             ],
-            "memories": list(prepared.memory_evidence),
+            "memories": [
+                {key: value for key, value in memory.items() if key != "memory_id"}
+                for memory in prepared.memory_evidence
+            ],
             "resolved_entities": list(prepared.resolved_entities),
             "followup_context": "active" if state.last_query else "none",
             "memory_count": len(prepared.memory_ids),

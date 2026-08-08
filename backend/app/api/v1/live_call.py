@@ -400,12 +400,14 @@ async def render_realtime_external_speech(
 async def end_live_call_session(
     session_id: str,
     current_user: User = Depends(get_current_user),
+    tools: RealtimeToolService = Depends(get_realtime_tool_service),
 ):
     session = live_call_sessions.end(
         session_id, user_id=current_user.user_id
     )
     if session is None:
         raise HTTPException(status_code=404, detail="Call session was not found.")
+    tools.discard_session(session_id)
     return LiveCallSessionEndResponse(session_id=session.session_id)
 
 

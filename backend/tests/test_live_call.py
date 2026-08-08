@@ -5,6 +5,9 @@ import asyncio
 import base64
 import inspect
 import time
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -151,6 +154,10 @@ class LiveCallFoundationTests(unittest.TestCase):
 
     def test_termination_is_owned_and_idempotent(self):
         session = self.create_session()
+        discarded = []
+        app.dependency_overrides[get_realtime_tool_service] = lambda: SimpleNamespace(
+            discard_session=lambda session_id: discarded.append(session_id)
+        )
         app.dependency_overrides[get_current_user] = lambda: self.other
         self.assertEqual(
             self.client.delete(
@@ -168,6 +175,7 @@ class LiveCallFoundationTests(unittest.TestCase):
         self.assertIsNone(live_call_sessions.authorize_transport(
             session["session_id"], session["transport_token"]
         ))
+        self.assertEqual(discarded, [session["session_id"], session["session_id"]])
 
     def test_websocket_contract_ready_validation_and_clean_end(self):
         session = self.create_session()
@@ -221,6 +229,36 @@ class LiveCallFoundationTests(unittest.TestCase):
         self.assertEqual(history[0].content, "user 3")
         self.client.delete(f"/api/v1/live-call/session/{payload['session_id']}")
         self.assertEqual(live_call_sessions.history(payload["session_id"]), ())
+
+    def test_superseded_and_expired_sessions_release_ephemeral_runtime(self):
+        store = LiveCallSessionStore()
+        first = store.create(
+            user_id=1, legacy_id=1, legacy_name="Aaji", relationship="grandmother",
+            effective_voice="marin",
+        )
+        self.assertIsNone(store.begin_turn(first.session_id, 1, "audio/webm"))
+        self.assertIsNone(store.append_audio(first.session_id, 1, b"private audio"))
+        self.assertTrue(store.complete_turn(
+            first.session_id, 1, "private transcript", "private response",
+        ))
+        store.create(
+            user_id=1, legacy_id=1, legacy_name="Aaji", relationship="grandmother",
+            effective_voice="marin",
+        )
+        self.assertEqual(store.history(first.session_id), ())
+        self.assertNotIn(first.session_id, store._runtime)
+
+        expiring = store.create(
+            user_id=2, legacy_id=2, legacy_name="Dad", relationship="father",
+            effective_voice="cedar",
+        )
+        self.assertIsNone(store.begin_turn(expiring.session_id, 1, "audio/webm"))
+        self.assertIsNone(store.append_audio(expiring.session_id, 1, b"private audio"))
+        store._sessions[expiring.session_id] = replace(
+            expiring, expires_at=datetime.now(timezone.utc) - timedelta(seconds=1),
+        )
+        self.assertIsNone(store.authorize_user(expiring.session_id, 2))
+        self.assertNotIn(expiring.session_id, store._runtime)
 
     def test_interrupt_is_idempotent_retracts_assistant_and_allows_next_turn(self):
         payload = self.create_session()
@@ -591,7 +629,7 @@ class LiveCallFoundationTests(unittest.TestCase):
             live_call_realtime_enabled=True,
             default_standard_voice_profile="standard_female",
         )
-        fake_tools = SimpleNamespace(execute=lambda db, session, name, arguments: {
+        fake_tools = SimpleNamespace(execute=lambda db, session, name, arguments, call_id=None: {
             "status": "grounded",
             "legacy": {"name": session.legacy_name, "relationship": session.relationship},
         })
@@ -613,6 +651,68 @@ class LiveCallFoundationTests(unittest.TestCase):
             json={"call_id": "call-2", "name": "get_legacy_identity_context", "arguments": {}},
         )
         self.assertEqual(denied.status_code, 404)
+
+    def test_realtime_session_operations_are_owned_ended_and_argument_scoped(self):
+        UserCRUD.set_conversation_preferences(
+            self.db, self.owner.user_id, voice="marin",
+            conversation_style="natural", response_length="balanced",
+        )
+        settings = SimpleNamespace(
+            live_call_realtime_enabled=True, live_call_realtime_strict=True,
+            default_standard_voice_profile="standard_female",
+            openai_realtime_model="gpt-realtime-test",
+            openai_realtime_vad_threshold=0.60,
+            live_call_realtime_tool_timeout_seconds=1.0,
+        )
+        app.dependency_overrides[get_realtime_bootstrap_provider] = FakeRealtimeBootstrapProvider
+        with patch("app.api.v1.live_call.get_settings", return_value=settings):
+            session = self.client.post(
+                "/api/v1/live-call/session",
+                json={"legacy_id": self.legacy.legacy_id, "engine": "realtime"},
+            ).json()
+            app.dependency_overrides[get_current_user] = lambda: self.other
+            self.assertEqual(self.client.post(
+                f"/api/v1/live-call/realtime/{session['session_id']}/bootstrap"
+            ).status_code, 404)
+            self.assertEqual(self.client.post(
+                f"/api/v1/live-call/realtime/{session['session_id']}/tool",
+                json={"call_id": "other", "name": "retrieve_legacy_memory_context",
+                      "arguments": {"query": "family"}},
+            ).status_code, 404)
+
+            app.dependency_overrides[get_current_user] = lambda: self.owner
+            override = self.client.post(
+                f"/api/v1/live-call/realtime/{session['session_id']}/tool",
+                json={"call_id": "override", "name": "retrieve_legacy_memory_context",
+                      "arguments": {"query": "family", "legacy_id": self.other_legacy.legacy_id}},
+            )
+            self.assertEqual(override.status_code, 200)
+            self.assertEqual(override.json()["result"]["status"], "error")
+            self.assertEqual(self.client.delete(
+                f"/api/v1/live-call/session/{session['session_id']}"
+            ).status_code, 200)
+            for endpoint in ("bootstrap", "tool"):
+                response = self.client.post(
+                    f"/api/v1/live-call/realtime/{session['session_id']}/{endpoint}",
+                    json=({"call_id": "ended", "name": "retrieve_legacy_memory_context",
+                           "arguments": {"query": "family"}} if endpoint == "tool" else None),
+                )
+                self.assertEqual(response.status_code, 404)
+
+    def test_live_call_source_contract_does_not_log_or_persist_private_payloads(self):
+        root = Path(__file__).resolve().parents[1]
+        sources = "\n".join((root / relative).read_text(encoding="utf-8") for relative in (
+            "app/api/v1/live_call.py", "app/services/live_call.py",
+            "app/services/realtime_live_call.py",
+        ))
+        for forbidden in (
+            "logger.info(transcript", "logger.debug(transcript", "logger.info(request.text",
+            "logger.debug(request.text", "logger.info(result)", "logger.debug(result)",
+            "db.add(runtime", "db.add(audio", "localStorage", "sessionStorage",
+        ):
+            self.assertNotIn(forbidden, sources)
+        self.assertIn('session_id=uuid4().hex', sources)
+        self.assertIn('transport_token=secrets.token_urlsafe(32)', sources)
 
     def test_realtime_memory_adapter_reuses_followup_state_and_deduplicates(self):
         calls = []
@@ -647,7 +747,7 @@ class LiveCallFoundationTests(unittest.TestCase):
         self.assertEqual(first, duplicate)
         self.assertEqual(first["status"], "supported")
         self.assertTrue(first["uncertain"])
-        self.assertEqual(first["memories"][0]["memory_id"], 11)
+        self.assertNotIn("memory_id", first["memories"][0])
         self.assertEqual(followup["followup_context"], "active")
         self.assertEqual(calls[1]["history"][0].content, "Tell me about Goa")
         self.assertEqual(calls[1]["user_id"], 7)
@@ -702,7 +802,9 @@ class LiveCallFoundationTests(unittest.TestCase):
         )
         self.assertEqual([item["value"] for item in family["identity"]],
                          ["Rohan Deshmukh", "Aditya Deshmukh"])
-        self.assertEqual([item["memory_id"] for item in family["memories"]], [1, 2])
+        self.assertEqual([item["title"] for item in family["memories"]],
+                         ["My husband", "My brother"])
+        self.assertTrue(all("memory_id" not in item for item in family["memories"]))
 
         followup = service.execute(
             self.db, session, "retrieve_legacy_memory_context", {"query": "Who else?"},

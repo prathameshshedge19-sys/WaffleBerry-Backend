@@ -229,6 +229,12 @@ class LiveCallSessionStore:
         self._lock = RLock()
         self._latency: dict[tuple[str, int], LiveCallLatencyTrace] = {}
 
+    def _discard_runtime_locked(self, session_id: str) -> None:
+        """Release ephemeral audio, transcript history, and latency state."""
+        self._runtime.pop(session_id, None)
+        for key in [key for key in self._latency if key[0] == session_id]:
+            self._latency.pop(key, None)
+
     def create(
         self,
         *,
@@ -251,6 +257,7 @@ class LiveCallSessionStore:
                     self._sessions[session_id] = replace(
                         session, state="ended", ended_at=now, transport_token=""
                     )
+                    self._discard_runtime_locked(session_id)
             session = LiveCallSession(
                 session_id=uuid4().hex,
                 transport_token=secrets.token_urlsafe(32),
@@ -284,10 +291,12 @@ class LiveCallSessionStore:
     ) -> LiveCallSession | None:
         with self._lock:
             session = self._sessions.get(session_id)
+            if session is not None and datetime.now(timezone.utc) >= session.expires_at:
+                self._discard_runtime_locked(session_id)
+                return None
             if (
                 session is None
                 or session.state == "ended"
-                or datetime.now(timezone.utc) >= session.expires_at
                 or not secrets.compare_digest(
                     session.transport_token, transport_token
                 )
@@ -299,11 +308,13 @@ class LiveCallSessionStore:
         """Authorize an authenticated HTTP operation against an active call."""
         with self._lock:
             session = self._sessions.get(session_id)
+            if session is not None and datetime.now(timezone.utc) >= session.expires_at:
+                self._discard_runtime_locked(session_id)
+                return None
             if (
                 session is None
                 or session.user_id != user_id
                 or session.state == "ended"
-                or datetime.now(timezone.utc) >= session.expires_at
             ):
                 return None
             return session
@@ -317,6 +328,7 @@ class LiveCallSessionStore:
             if session.state == "ended":
                 return "ended"
             if datetime.now(timezone.utc) >= session.expires_at:
+                self._discard_runtime_locked(session_id)
                 return "expired"
             if not secrets.compare_digest(session.transport_token, transport_token):
                 return "unauthorized"
@@ -342,9 +354,7 @@ class LiveCallSessionStore:
                     session, state="ended", ended_at=now, transport_token=""
                 )
                 self._sessions[session_id] = session
-            self._runtime.pop(session_id, None)
-            for key in [key for key in self._latency if key[0] == session_id]:
-                self._latency.pop(key, None)
+            self._discard_runtime_locked(session_id)
         logger.info(
             "live_call_session_ended user_id=%s legacy_id=%s transport=%s",
             session.user_id,
