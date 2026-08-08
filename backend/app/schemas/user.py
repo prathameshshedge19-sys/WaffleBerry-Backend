@@ -31,7 +31,39 @@ class UserLogin(BaseModel):
     email: EmailStr
     password: str
 
+class VerifyEmailRequest(BaseModel):
+    """Request body for email verification."""
 
+    email: EmailStr
+    otp: str
+
+class ResendOTPRequest(BaseModel):
+    """Request body for resending OTP."""
+
+    email: EmailStr
+    
+class ForgotPasswordRequest(BaseModel):
+    """Request body for requesting a password reset."""
+
+    email: EmailStr
+
+
+class VerifyResetOTPRequest(BaseModel):
+    """Request body for verifying a password reset OTP."""
+
+    email: EmailStr
+    otp: str
+
+class ResetPasswordRequest(BaseModel):
+    """Request body for resetting the password."""
+
+    email: EmailStr
+    password: str = Field(
+        ...,
+        min_length=8,
+        description="Password must be at least 8 characters"
+    )
+    
 class UserResponse(UserBase):
     """Schema for user response."""
     user_id: int
@@ -39,6 +71,12 @@ class UserResponse(UserBase):
     
     class Config:
         from_attributes = True
+
+
+class SignupResponse(UserResponse):
+    """Schema returned after creating or resuming signup."""
+
+    verification_resent: bool = False
 
 
 class LoginResponse(BaseModel):

@@ -4,6 +4,8 @@ import asyncio
 import json
 import logging
 
+from app.services.email_service import EmailService
+from app.services.email_verification_service import EmailVerificationService
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
@@ -12,9 +14,11 @@ from app.dependencies.auth import get_current_user
 from app.dependencies.ai import get_chat_service, get_message_speech_service
 from app.models.user import User
 from app.schemas.user import (
-    UserCreate, UserLogin, UserResponse, LoginResponse, VoiceProfileCreate, VoiceProfileResponse, 
+    UserCreate, UserLogin, UserResponse, SignupResponse, LoginResponse, VoiceProfileCreate, VoiceProfileResponse, 
     VoiceProfileUpdate, VoiceSampleCreate, VoiceSampleResponse,
     ConversationCreate, ConversationUpdate, ConversationResponse,
+    MessageCreate, MessagePairResponse, MessageResponse, VerifyEmailRequest,ResendOTPRequest, ForgotPasswordRequest,
+    VerifyResetOTPRequest, ResetPasswordRequest
     MessageCreate, MessagePairResponse, MessageResponse, StoryGuideRequest,
     VoicePreferenceResponse, VoicePreferenceUpdate,
     ConversationPreferenceResponse, ConversationPreferenceUpdate,
@@ -233,7 +237,7 @@ def _ai_http_exception(exc: AIServiceError) -> HTTPException:
 
 # ==================== USER ENDPOINTS ====================
 
-@router.post("/users", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/users", response_model=SignupResponse, status_code=status.HTTP_201_CREATED)
 async def create_user(user: UserCreate, db: Session = Depends(get_db)):
     """Create a new user account.
     
@@ -241,22 +245,100 @@ async def create_user(user: UserCreate, db: Session = Depends(get_db)):
     - **email**: User's email (must be unique)
     - **password**: Password (minimum 8 characters)
     """
+    logger.info("[signup] Received account creation request.")
+
     # Check if email already exists
     existing_user = UserCRUD.get_user_by_email(db, user.email)
     if existing_user:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Email already registered"
+        if existing_user.is_verified:
+            logger.info("[signup] Email is already registered.")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Email already registered"
+            )
+
+        logger.info(
+            "[signup] Resending OTP for unverified user (user_id=%d).",
+            existing_user.user_id,
+        )
+        otp = EmailVerificationService.resend_otp(
+            db=db,
+            user_id=existing_user.user_id,
+        )
+
+        try:
+            await EmailService.send_otp(existing_user.email, otp)
+        except TimeoutError as exc:
+            logger.exception("[signup] OTP resend timed out.")
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Unable to send the verification email. Please try again.",
+            ) from exc
+        except Exception as exc:
+            logger.exception("[signup] OTP resend failed.")
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Unable to send the verification email. Please try again.",
+            ) from exc
+
+        response = SignupResponse.model_validate(existing_user)
+        return response.model_copy(
+            update={"verification_resent": True}
         )
     
     db_user = UserCRUD.create_user(db, user)
+    logger.info("[signup] User record created (user_id=%d).", db_user.user_id)
+    otp = EmailVerificationService.generate_otp()
+    otp_hash = EmailVerificationService.hash_otp(otp)
+
+    logger.info("[signup] Creating OTP verification record.")
+    EmailVerificationService.create_verification(
+        db=db,
+        user_id=db_user.user_id,
+        otp_hash=otp_hash,
+    )
+
+    logger.info("[signup] Sending OTP email.")
+    try:
+        await EmailService.send_otp(db_user.email, otp)
+    except TimeoutError as exc:
+        logger.exception("[signup] OTP email delivery timed out.")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Unable to send the verification email. Please try again.",
+        ) from exc
+    except Exception as exc:
+        logger.exception("[signup] OTP email delivery failed.")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Unable to send the verification email. Please try again.",
+        ) from exc
+
+    logger.info("[signup] OTP email sent; returning account creation response.")
     return db_user
 
 
 @router.post("/login", response_model=LoginResponse)
 async def login(user: UserLogin, db: Session = Depends(get_db)):
     """Authenticate a user with an email and password."""
+
+    db_user = UserCRUD.get_user_by_email(db, user.email)
+
+    if not db_user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid email or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    if not db_user.is_verified:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Please verify your email before logging in.",
+        )
+
     authenticated_user = UserCRUD.authenticate_user(db, user.email, user.password)
+
     if not authenticated_user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -265,12 +347,170 @@ async def login(user: UserLogin, db: Session = Depends(get_db)):
         )
 
     access_token = create_access_token(authenticated_user.user_id)
+
     return {
         "access_token": access_token,
         "token_type": "bearer",
         "user": authenticated_user,
     }
+    
+@router.post("/verify-email")
+async def verify_email(
+    request: VerifyEmailRequest,
+    db: Session = Depends(get_db)
+):
+    """Verify email using OTP."""
 
+    user = UserCRUD.get_user_by_email(db, request.email)
+
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found"
+        )
+
+    is_valid = EmailVerificationService.verify_otp(
+        db=db,
+        user_id=user.user_id,
+        otp=request.otp
+    )
+
+    if not is_valid:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or expired OTP"
+        )
+
+    user.is_verified = True
+    db.commit()
+
+    return {
+        "message": "Email verified successfully"
+    }
+    
+@router.post("/resend-otp")
+async def resend_otp(
+    request: ResendOTPRequest,
+    db: Session = Depends(get_db),
+):
+    """Generate and send a new OTP."""
+
+    user = UserCRUD.get_user_by_email(db, request.email)
+
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found",
+        )
+
+    purpose = (
+        "password_reset"
+        if user.is_verified
+        else "email_verification"
+    )
+
+    otp = EmailVerificationService.resend_otp(
+        db=db,
+        user_id=user.user_id,
+        purpose=purpose,
+    )
+
+    await EmailService.send_otp(user.email, otp)
+
+    return {
+        "message": "OTP resent successfully"
+    }
+    
+@router.post("/forgot-password")
+async def forgot_password(
+    request: ForgotPasswordRequest,
+    db: Session = Depends(get_db),
+):
+    """Send a password reset OTP."""
+
+    user = UserCRUD.get_user_by_email(db, request.email)
+
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found",
+        )
+
+    otp = EmailVerificationService.resend_otp(
+        db=db,
+        user_id=user.user_id,
+        purpose="password_reset",
+    )
+
+    try:
+        await EmailService.send_otp(user.email, otp)
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Unable to send reset code. Please try again.",
+        )
+
+    return {
+        "message": "Password reset OTP sent successfully."
+    }
+    
+@router.post("/verify-reset-otp")
+async def verify_reset_otp(
+    request: VerifyResetOTPRequest,
+    db: Session = Depends(get_db),
+):
+    """Verify password reset OTP."""
+
+    user = UserCRUD.get_user_by_email(db, request.email)
+
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found",
+        )
+
+    status_result = EmailVerificationService.verify_otp_status(
+        db=db,
+        user_id=user.user_id,
+        otp=request.otp,
+        purpose="password_reset",
+    )
+
+    if status_result != "verified":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or expired OTP",
+        )
+
+    return {
+        "message": "OTP verified successfully."
+    }
+
+@router.post("/reset-password")
+async def reset_password(
+    request: ResetPasswordRequest,
+    db: Session = Depends(get_db),
+):
+    """Reset a user's password."""
+
+    user = UserCRUD.get_user_by_email(db, request.email)
+
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found",
+        )
+
+    UserCRUD.update_password(
+        db,
+        user,
+        request.password
+    )
+
+    return {
+        "message": "Password reset successfully."
+    }
+    
 @router.get("/me", response_model=UserResponse)
 async def read_current_user(
     current_user: User = Depends(get_current_user),

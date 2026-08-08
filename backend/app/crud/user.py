@@ -11,6 +11,7 @@ from app.models.memory import (
     MemoryReviewStatus,
 )
 from app.schemas.user import UserCreate, VoiceProfileCreate, VoiceProfileUpdate, VoiceSampleCreate
+import app.services.email_verification_service as evs
 import hashlib
 import hmac
 
@@ -36,12 +37,25 @@ class UserCRUD:
         db.add(db_user)
         db.commit()
         db.refresh(db_user)
+       
         return db_user
     
     @staticmethod
     def get_user_by_email(db: Session, email: str) -> User | None:
         """Get user by email."""
         return db.query(User).filter(User.email == email).first()
+
+    @staticmethod
+    def update_password(
+        db: Session,
+        user: User,
+        password: str
+    ) -> User:
+        """Update a user's password using the existing hash function."""
+        user.password_hash = hash_password(password)
+        db.commit()
+        db.refresh(user)
+        return user
 
     @staticmethod
     def authenticate_user(db: Session, email: str, password: str) -> User | None:
@@ -53,7 +67,10 @@ class UserCRUD:
         password_hash = hash_password(password)
         if not hmac.compare_digest(password_hash, user.password_hash):
             return None
-
+        
+        if not user.is_verified:
+            return None
+        
         return user
     
     @staticmethod
