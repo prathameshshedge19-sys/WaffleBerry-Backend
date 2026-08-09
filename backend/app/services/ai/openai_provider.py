@@ -112,7 +112,7 @@ class OpenAIProvider(AIProvider):
         try:
             response = await self._client.responses.create(**request_options)
         except OpenAIError as exc:
-            self._raise_provider_error(exc)
+            self._raise_provider_error(exc, operation="chat")
 
         try:
             assistant_text = response.output_text
@@ -155,7 +155,7 @@ class OpenAIProvider(AIProvider):
                 response_format="json",
             )
         except OpenAIError as exc:
-            self._raise_provider_error(exc)
+            self._raise_provider_error(exc, operation="transcription")
 
         transcript = getattr(response, "text", None)
         if not isinstance(transcript, str) or not transcript.strip():
@@ -190,7 +190,7 @@ class OpenAIProvider(AIProvider):
             )
             content = getattr(response, "content", None)
         except OpenAIError as exc:
-            self._raise_provider_error(exc)
+            self._raise_provider_error(exc, operation="speech")
         except (AttributeError, TypeError, ValueError):
             raise AIInvalidResponseError(
                 "OpenAI returned unreadable speech audio."
@@ -250,7 +250,7 @@ class OpenAIProvider(AIProvider):
                             sample_rate=24000 if response_format == "pcm" else None,
                         )
         except OpenAIError as exc:
-            self._raise_provider_error(exc)
+            self._raise_provider_error(exc, operation="speech_stream")
         except (AttributeError, KeyError, TypeError, ValueError):
             raise AIInvalidResponseError(
                 "OpenAI returned unreadable streaming speech audio."
@@ -338,7 +338,7 @@ class OpenAIProvider(AIProvider):
         except AIInvalidResponseError:
             raise
         except OpenAIError as exc:
-            self._raise_provider_error(exc)
+            self._raise_provider_error(exc, operation="chat_stream")
         finally:
             if stream is not None:
                 try:
@@ -363,16 +363,18 @@ class OpenAIProvider(AIProvider):
         ):
             raise AIConfigurationError("OPENAI_API_KEY must be configured.")
 
-    @classmethod
-    def _raise_provider_error(cls, exc: OpenAIError) -> NoReturn:
+    def _raise_provider_error(
+        self, exc: OpenAIError, *, operation: str,
+    ) -> NoReturn:
+        self._log_provider_failure(exc, operation=operation)
         if isinstance(exc, RateLimitError):
-            if cls._error_code(exc) == "insufficient_quota":
+            if self._error_code(exc) == "insufficient_quota":
                 raise AIQuotaExceededError(
                     "OpenAI quota is exhausted."
                 ) from None
             raise AIRateLimitError(
                 "OpenAI temporarily rate limited the request.",
-                retry_after=cls._retry_after(exc),
+                retry_after=self._retry_after(exc),
             ) from None
         if isinstance(
             exc,
@@ -401,6 +403,77 @@ class OpenAIProvider(AIProvider):
         raise AIProviderError(
             "OpenAI could not generate a response."
         ) from None
+
+    def _log_provider_failure(self, exc: OpenAIError, *, operation: str) -> None:
+        """Log machine-readable provider metadata without response content."""
+        if not getattr(self._settings, "debug", False):
+            return
+        status_code = getattr(exc, "status_code", None)
+        logger.error(
+            "OPENAI_PROVIDER_FAILURE exception_type=%s http_status=%s "
+            "provider_error_code=%s provider_error_type=%s request_id=%s "
+            "classification=%s model=%s operation=%s",
+            type(exc).__name__,
+            status_code if isinstance(status_code, int) else "na",
+            self._safe_metadata(self._error_code(exc)),
+            self._safe_metadata(self._error_type(exc)),
+            self._safe_metadata(self._request_id(exc)),
+            self._failure_classification(exc, status_code),
+            self._settings.ai_model.strip(),
+            operation,
+        )
+
+    @staticmethod
+    def _safe_metadata(value: object) -> str:
+        if not isinstance(value, str) or not value:
+            return "na"
+        safe = "".join(
+            character for character in value[:128]
+            if character.isalnum() or character in {"_", "-", "."}
+        )
+        return safe or "na"
+
+    @staticmethod
+    def _error_type(exc: OpenAIError) -> str | None:
+        body = getattr(exc, "body", None)
+        if isinstance(body, Mapping):
+            error = body.get("error", body)
+            if isinstance(error, Mapping):
+                value = error.get("type")
+                if isinstance(value, str):
+                    return value
+        value = getattr(exc, "type", None)
+        return value if isinstance(value, str) else None
+
+    @staticmethod
+    def _request_id(exc: OpenAIError) -> str | None:
+        value = getattr(exc, "request_id", None)
+        if isinstance(value, str):
+            return value
+        response = getattr(exc, "response", None)
+        headers = getattr(response, "headers", None)
+        if headers is not None:
+            value = headers.get("x-request-id")
+            return value if isinstance(value, str) else None
+        return None
+
+    @staticmethod
+    def _failure_classification(exc: OpenAIError, status_code: object) -> str:
+        if isinstance(exc, AuthenticationError) or status_code == 401:
+            return "authentication"
+        if isinstance(exc, PermissionDeniedError) or status_code == 403:
+            return "permission"
+        if isinstance(exc, RateLimitError) or status_code == 429:
+            return "rate_limit_or_quota"
+        if isinstance(exc, APITimeoutError):
+            return "timeout"
+        if isinstance(exc, APIConnectionError):
+            return "connectivity"
+        if isinstance(exc, BadRequestError) or status_code in {400, 404, 422}:
+            return "model_or_request"
+        if isinstance(status_code, int) and status_code >= 500:
+            return "provider_5xx"
+        return "sdk_or_provider_error"
 
     @staticmethod
     def _error_code(exc: OpenAIError) -> str | None:

@@ -94,6 +94,25 @@ def test_no_business_work_depends_on_generator_resumption_after_complete():
     assert "process_conversation(" not in before_handlers
 
 
+def test_chat_provider_stream_does_not_capture_request_scoped_orm_state():
+    from pathlib import Path
+    source = (Path(__file__).parents[1] / "app" / "services" / "chat_service.py").read_text()
+    factory = source[source.index("def stream_response_with_provenance"):]
+    before_return = factory[:factory.index("return CompanionStreamPlan(")]
+    assert "self._log_provider_attempt(prepared, conversation)" in before_return
+    assert "stream=self._stream_prepared_response(prepared)" in factory
+
+
+def test_stream_assistant_persistence_uses_independent_session():
+    from pathlib import Path
+    source = (Path(__file__).parents[1] / "app" / "api" / "v1" / "user.py").read_text()
+    stream = source[source.index("async def event_stream():"):]
+    persistence = stream[stream.index("stream_db = SessionLocal()"):]
+    assert "ConversationCRUD.get_user_conversation(" in persistence
+    assert "MessageCRUD.create_assistant_message(\n                        stream_db," in persistence
+    assert "finally:\n                stream_db.close()" in persistence
+
+
 def test_stream_schedules_detached_task_without_awaiting_extraction():
     from pathlib import Path
     root = Path(__file__).parents[1]

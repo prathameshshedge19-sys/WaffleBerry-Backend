@@ -681,9 +681,12 @@ class ChatService:
             conversation_style=conversation_style,
             response_length=response_length,
         )
+        # Log while the request-scoped ORM object is still attached.  FastAPI
+        # may close yield dependencies before a StreamingResponse body starts.
+        self._log_provider_attempt(prepared, conversation)
         db.rollback()
         return CompanionStreamPlan(
-            stream=self._stream_with_provider_log(prepared, conversation),
+            stream=self._stream_prepared_response(prepared),
             memory_ids=prepared.memory_ids,
             retrieved_at=prepared.retrieved_at,
             request_id=prepared.request_id,
@@ -786,12 +789,10 @@ class ChatService:
     def _source_link_count(content: str) -> int:
         return len(set(re.findall(r"https?://[^\s)\]]+", content)))
 
-    async def _stream_with_provider_log(
+    async def _stream_prepared_response(
         self,
         prepared: PreparedCompanionInput,
-        conversation: Conversation,
     ) -> AsyncIterator[str]:
-        self._log_provider_attempt(prepared, conversation)
         received = False
         try:
             synthesis_messages = prepared.messages

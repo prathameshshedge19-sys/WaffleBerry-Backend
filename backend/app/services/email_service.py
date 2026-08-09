@@ -19,16 +19,45 @@ BERRY_ICON_CID = "waffleberry-berry-icon"
 
 load_dotenv()
 
-conf = ConnectionConfig(
-    MAIL_USERNAME=os.getenv("MAIL_USERNAME"),
-    MAIL_PASSWORD=os.getenv("MAIL_PASSWORD"),
-    MAIL_FROM=os.getenv("MAIL_FROM"),
-    MAIL_PORT=int(os.getenv("MAIL_PORT")),
-    MAIL_SERVER=os.getenv("MAIL_SERVER"),
-    MAIL_STARTTLS=os.getenv("MAIL_STARTTLS") == "True",
-    MAIL_SSL_TLS=os.getenv("MAIL_SSL_TLS") == "True",
-    USE_CREDENTIALS=True,
-)
+
+def _mail_connection_config() -> ConnectionConfig:
+    """Build validated SMTP configuration with predictable error messages."""
+    names = (
+        "MAIL_USERNAME", "MAIL_PASSWORD", "MAIL_FROM", "MAIL_PORT",
+        "MAIL_SERVER", "MAIL_STARTTLS", "MAIL_SSL_TLS",
+    )
+    values = {name: (os.getenv(name) or "").strip() for name in names}
+    missing = [name for name, value in values.items() if not value]
+    if missing:
+        raise RuntimeError(
+            "Email configuration is incomplete; missing: "
+            + ", ".join(missing)
+        )
+    try:
+        port = int(values["MAIL_PORT"])
+    except ValueError as exc:
+        raise RuntimeError("MAIL_PORT must be an integer.") from exc
+
+    def boolean(name: str) -> bool:
+        value = values[name].casefold()
+        if value not in {"true", "false"}:
+            raise RuntimeError(f"{name} must be true or false.")
+        return value == "true"
+
+    starttls = boolean("MAIL_STARTTLS")
+    ssl_tls = boolean("MAIL_SSL_TLS")
+    if starttls and ssl_tls:
+        raise RuntimeError("MAIL_STARTTLS and MAIL_SSL_TLS cannot both be true.")
+    return ConnectionConfig(
+        MAIL_USERNAME=values["MAIL_USERNAME"],
+        MAIL_PASSWORD=values["MAIL_PASSWORD"],
+        MAIL_FROM=values["MAIL_FROM"],
+        MAIL_PORT=port,
+        MAIL_SERVER=values["MAIL_SERVER"],
+        MAIL_STARTTLS=starttls,
+        MAIL_SSL_TLS=ssl_tls,
+        USE_CREDENTIALS=True,
+    )
 
 
 def _inline_brand_attachments() -> list[dict]:
@@ -161,7 +190,7 @@ class EmailService:
             attachments=_inline_brand_attachments(),
         )
 
-        fm = FastMail(conf)
+        fm = FastMail(_mail_connection_config())
         logger.info("[email] Starting SMTP send.")
         try:
             await asyncio.wait_for(

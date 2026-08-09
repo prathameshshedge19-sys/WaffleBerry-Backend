@@ -11,7 +11,7 @@ from app.services.auth_challenge_service import (
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
-from app.db import get_db
+from app.db import SessionLocal, get_db
 from app.dependencies.auth import get_current_user
 from app.dependencies.ai import get_chat_service, get_message_speech_service
 from app.models.user import User
@@ -1021,15 +1021,37 @@ async def create_message_stream(
                     "AI provider returned an empty response."
                 )
 
-            assistant_message, updated_conversation = (
-                MessageCRUD.create_assistant_message(
-                    db,
-                    conversation,
-                    assistant_content,
-                    grounded_memory_ids=stream_plan.memory_ids,
-                    memories_retrieved_at=stream_plan.retrieved_at,
+            # StreamingResponse bodies can outlive yield dependencies. Persist
+            # through an independent session instead of the request session,
+            # which newer FastAPI versions may already have closed here.
+            stream_db = SessionLocal()
+            try:
+                stream_conversation = ConversationCRUD.get_user_conversation(
+                    stream_db,
+                    learning_conversation_id,
+                    learning_user_id,
                 )
-            )
+                if stream_conversation is None:
+                    raise RuntimeError("Conversation disappeared during stream.")
+                assistant_message, updated_conversation = (
+                    MessageCRUD.create_assistant_message(
+                        stream_db,
+                        stream_conversation,
+                        assistant_content,
+                        grounded_memory_ids=stream_plan.memory_ids,
+                        memories_retrieved_at=stream_plan.retrieved_at,
+                    )
+                )
+                complete_payload = {
+                    "message": MessageResponse.model_validate(
+                        assistant_message
+                    ).model_dump(mode="json"),
+                    "conversation": ConversationResponse.model_validate(
+                        updated_conversation
+                    ).model_dump(mode="json"),
+                }
+            finally:
+                stream_db.close()
             # Generation and assistant persistence are complete. Create only the
             # detached task before terminal SSE; the expensive work stays async.
             try:
@@ -1047,14 +1069,7 @@ async def create_message_stream(
                 )
             yield _sse_event(
                 "complete",
-                {
-                    "message": MessageResponse.model_validate(
-                        assistant_message
-                    ).model_dump(mode="json"),
-                    "conversation": ConversationResponse.model_validate(
-                        updated_conversation
-                    ).model_dump(mode="json"),
-                },
+                complete_payload,
             )
         except asyncio.CancelledError:
             logger.info(
