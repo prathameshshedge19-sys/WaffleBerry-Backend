@@ -261,9 +261,9 @@ async def create_user(user: UserCreate, db: Session = Depends(get_db)):
     return {"message": "Verification code sent."}
 
 
-@router.post("/complete-registration", response_model=UserResponse, status_code=201)
+@router.post("/complete-registration", response_model=LoginResponse, status_code=201)
 async def complete_registration(request: CompleteRegistrationRequest, db: Session = Depends(get_db)):
-    """Create an account only with a valid, single-use OTP authorization."""
+    """Create and authenticate an account with a valid OTP authorization."""
     challenge = AuthChallengeService.consume_authorization(
         db, authorization=request.verification_token, purpose=EMAIL_VERIFICATION,
     )
@@ -277,13 +277,18 @@ async def complete_registration(request: CompleteRegistrationRequest, db: Sessio
         db.delete(existing)
         db.flush()
     try:
-        return UserCRUD.create_user(
+        created_user = UserCRUD.create_user(
             db, full_name=challenge.full_name, email=challenge.email, password=request.password,
         )
     except Exception:
         db.rollback()
         logger.exception("Account completion failed.")
         raise HTTPException(status_code=409, detail="Unable to create account.")
+    return {
+        "access_token": create_access_token(created_user.user_id),
+        "token_type": "bearer",
+        "user": created_user,
+    }
 
 
 @router.post("/login", response_model=LoginResponse)
