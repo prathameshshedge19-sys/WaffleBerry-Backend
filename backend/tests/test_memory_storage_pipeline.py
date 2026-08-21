@@ -442,7 +442,7 @@ class MemoryStoragePipelineTests(unittest.IsolatedAsyncioTestCase):
         memories = self.db.query(Memory).order_by(Memory.memory_id).all()
         self.assertEqual(report.contradictions_persisted, 1)
         self.assertEqual(len(memories), 2)
-        self.assertEqual(memories[0].summary, "Mom was born in Pune in 1968.")
+        self.assertEqual(memories[0].summary, "I was born in Pune in 1968.")
         self.assertEqual(
             memories[0].contradiction_group_id,
             memories[1].contradiction_group_id,

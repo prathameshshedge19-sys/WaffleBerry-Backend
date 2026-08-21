@@ -33,6 +33,9 @@ from app.models.memory import (
 )
 from app.models.user import Conversation, Message
 from app.services.memory.extractor import MemoryExtractionService
+from app.services.memory.canonical_perspective import (
+    CanonicalMemoryPerspectiveService,
+)
 from app.services.memory.fingerprint import build_memory_fingerprint
 from app.services.memory.identity_facts import (
     IdentityFactProjectionService,
@@ -268,9 +271,20 @@ class MemoryStoragePipeline:
         existing = MemoryCRUD.list_legacy_memories(
             db, legacy_id, user_id
         )
+        legacy = db.query(Legacy).filter(Legacy.legacy_id == legacy_id).one()
+        identity_facts = db.query(LegacyIdentityFact).filter(
+            LegacyIdentityFact.legacy_id == legacy_id
+        ).all()
+        perspective = CanonicalMemoryPerspectiveService()
         status_counts: Counter[str] = Counter()
 
         for index, candidate in enumerate(candidates):
+            candidate = perspective.normalize(
+                candidate,
+                legacy=legacy,
+                identity_facts=identity_facts,
+                existing_memories=existing,
+            )
             try:
                 result = self._validation.validate_candidate(
                     candidate,

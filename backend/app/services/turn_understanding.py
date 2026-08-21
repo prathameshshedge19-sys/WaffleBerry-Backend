@@ -12,6 +12,8 @@ _ATTRIBUTES = {
     "name": "name", "names": "name", "breed": "breed", "breeds": "breed",
     "size": "size", "large": "size", "count": "count", "many": "count",
     "brand": "brand", "model": "model", "where": "place", "when": "time",
+    "nickname": "nickname", "nicknames": "nickname",
+    "birthday": "birthday", "birthdays": "birthday",
 }
 _ALIASES = {
     "dog": "dogs", "pets": "dogs", "pet": "dogs", "television": "tv",
@@ -19,7 +21,9 @@ _ALIASES = {
 }
 _KNOWN_SUBJECTS = (
     "husband", "wife", "spouse", "brother", "sister", "family", "dogs", "dog",
-    "pets", "pet", "tv", "television", "garden", "car", "trip", "trips",
+    "pets", "pet", "tv", "television", "garden", "car", "cars", "trip", "trips",
+    "siblings", "children", "friends", "schools", "school", "jobs", "colleagues",
+    "hobbies", "places", "houses",
 )
 _REFERENTIAL = frozenset({
     "he", "her", "him", "it", "she", "that", "their", "them", "they", "this",
@@ -49,6 +53,23 @@ def interpret_turn(query: str, *, active_topic: str | None = None) -> TurnUnders
     words = _WORDS.findall(semantic)
     word_set = set(words)
     attributes = list(dict.fromkeys(_ATTRIBUTES[word] for word in words if word in _ATTRIBUTES))
+    if re.search(r"\bwhat did\b.+\bdo\b|\bused to do\b", semantic):
+        attributes.append("activity")
+    if re.search(r"\b(?:tease|teased|teasing)\b", semantic):
+        attributes.append("teasing")
+    if re.search(r"\b(?:play|played|playing)\b", semantic):
+        attributes.append("activity")
+    if re.search(r"\bchildhood\b", semantic):
+        attributes.append("childhood_narrative")
+    if re.search(r"\b(?:evenings?|mornings?|afternoons?|nights?)\b", semantic):
+        attributes.append("time_context")
+    if re.search(
+        r"\b(?:their [\w'-]+|who are (?:they|your)|which (?:ones?|[\w'-]+)|"
+        r"how many|where have you (?:travelled|traveled|been)|both|all of them|"
+        r"the other one|the second one)\b",
+        semantic,
+    ):
+        attributes.append("collection")
     if re.search(r"\b(?:do|did) (?:i|we|you) (?:have|own|go|visit)|\b(?:is|are) there\b", semantic):
         attributes.insert(0, "existence")
 
@@ -130,7 +151,11 @@ def interpret_turn(query: str, *, active_topic: str | None = None) -> TurnUnders
     else:
         top_level = "general"
 
-    if re.search(r"\b(?:your|my|our)\s+(?:full\s+)?name\b", semantic) or re.fullmatch(r"who are you[?.!]*", semantic):
+    if re.search(r"\b(?:your|my|our)\s+nickname\b", semantic):
+        subject, subject_type = "represented person", "self"
+        if "nickname" not in attributes:
+            attributes.append("nickname")
+    elif re.search(r"\b(?:your|my|our)\s+(?:full\s+)?name\b", semantic) or re.fullmatch(r"who are you[?.!]*", semantic):
         subject, subject_type = "represented person", "self"
         if "name" not in attributes:
             attributes.append("name")
@@ -149,6 +174,7 @@ def interpret_turn(query: str, *, active_topic: str | None = None) -> TurnUnders
         ]
         subject, subject_type = (candidates[-1] if candidates else "personal subject"), "memory"
 
+    attributes = list(dict.fromkeys(attributes))
     intent = "existence_query" if "existence" in attributes else "attribute_query" if attributes else "summary"
     speech_act = corrective_kind or ("question" if "?" in query or re.match(r"^(?:what|who|why|how|do|did|have|is|are)\b", semantic) else "statement")
     resolved = subject if top_level == "personal" else None

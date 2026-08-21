@@ -249,6 +249,13 @@ semantic attributes in English regardless of the source language. Preserve
 proper names, brands, model identifiers, numbers, and measurement values
 exactly; never translate or transliterate them. Evidence excerpts must remain
 exact verbatim slices of the original source message in its original language.
+Resolve the supplied active Legacy as SELF before writing canonical prose.
+Render SELF as I/me/my, SELF plus other participants as we/us/our or naturally
+as "Name and I", and the Legacy household as we/our. Keep people who are not
+SELF in third person. Never write narrator wrappers such as "the user said",
+"the Legacy stated", or "the conversation established". Populate participants
+with the people used to make that semantic decision; do not infer SELF merely
+from a similar-looking name.
 Populate details.semantic_attributes only from explicit source wording. Record
 profession only when the source explicitly identifies the person's profession,
 occupation, job, career, or work; teaching someone by itself does not establish

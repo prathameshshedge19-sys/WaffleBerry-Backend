@@ -172,7 +172,13 @@ class GroundedAnswerService:
         eligible = [item[3] for item in ranked if item[0] == strongest and strongest > 0]
         if strongest == 1 and ranked and not eligible:
             eligible = [item[3] for item in ranked]
-        budget = len(eligible) if GroundedAnswerService.requests_expansion(query) else 2
+        collection_request = GroundedAnswerService.requests_collection(query, attributes)
+        budget = (
+            len(eligible) if GroundedAnswerService.requests_expansion(query)
+            else min(len(eligible), 8) if collection_request
+            else 4 if "childhood_narrative" in attributes
+            else 2
+        )
         answer_facts = tuple(eligible[:budget])
         for fact in answer_facts:
             required.extend([
@@ -387,7 +393,12 @@ class GroundedAnswerService:
         if _RAW_STORAGE_LANGUAGE.search(normalized):
             errors.append("raw_storage_language")
         if plan.status != "unsupported" and _NEGATIVE.search(normalized):
-            errors.append("false_no_memory")
+            scoped_partial = bool(
+                plan.answer_facts and plan.may_hedge
+                and any(value.casefold() in normalized for value in plan.must_include)
+            )
+            if not scoped_partial:
+                errors.append("false_no_memory")
         if plan.status == "supported" and re.search(
             r"\b(?:i think|maybe|possibly|probably|i(?:'m| am) not sure|as far as i (?:know|remember))\b",
             normalized,
@@ -508,6 +519,23 @@ class GroundedAnswerService:
             breed = pets[0][0]
             plural = breed if breed.casefold().endswith("s") else f"{breed}s"
             return f"We have two {plural}, {pets[0][1]} and {pets[1][1]}."
+        collection_entities = list(dict.fromkeys(
+            str(fact.get("entity") or "").strip()
+            for fact in plan.answer_facts
+            if str(fact.get("entity") or "").strip()
+        ))
+        if statements and plan.may_hedge and "birthday" in plan.requested_attributes:
+            unknown = GroundedAnswerService._natural_list(
+                list(dict.fromkeys(plan.may_hedge)),
+            )
+            return f"{' '.join(statements)} I don't remember {unknown}'s birthday."
+        if "collection" in plan.requested_attributes and collection_entities:
+            joined = GroundedAnswerService._natural_list(collection_entities)
+            if "count" in plan.requested_attributes:
+                return f"There are {len(collection_entities)}."
+            if "name" in plan.requested_attributes:
+                return f"Their names are {joined}."
+            return f"They are {joined}."
         if len(statements) == 2 and all(item.casefold().startswith("my ") for item in statements):
             return f"{statements[0][:-1]}, and {statements[1][0].lower()}{statements[1][1:]}"
         if len(statements) == 1:
@@ -749,6 +777,14 @@ class GroundedAnswerService:
             "members": {"husband", "wife", "spouse", "brother", "sister", "parent", "child"},
             "spouse": {"husband", "wife", "spouse"},
             "sibling": {"brother", "sister", "sibling"},
+            "siblings": {"brother", "sister", "sibling", "siblings"},
+            "children": {"child", "children", "son", "daughter"},
+            "cars": {"car", "cars", "vehicle", "vehicles"},
+            "schools": {"school", "schools", "college", "colleges"},
+            "houses": {"house", "houses", "home", "homes"},
+            "jobs": {"job", "jobs", "work", "worked", "career"},
+            "hobbies": {"hobby", "hobbies", "played", "playing"},
+            "places": {"place", "places", "travel", "travelled", "visited"},
             "trip": {"trip", "travel", "travelled", "visited"},
             "preference": {"preference", "prefer", "favourite", "favorite"},
             "occupation": {"occupation", "work", "worked", "job", "career"},
@@ -756,7 +792,13 @@ class GroundedAnswerService:
         }
         terms = aliases.get(subject, {subject})
         if subject_type == "self":
-            direct = fact.get("kind") == "identity_fact" and not relationship
+            direct = (
+                (fact.get("kind") == "identity_fact" and not relationship)
+                or (
+                    "nickname" in attributes
+                    and bool(re.search(r"\b(?:nickname|preferred name|called)\b", text))
+                )
+            )
         elif subject in {"family", "members", "household"}:
             direct = relationship in terms or any(re.search(rf"\b{term}\b", text) for term in terms)
         elif subject_type == "relationship":
@@ -765,10 +807,50 @@ class GroundedAnswerService:
             )
         else:
             direct = any(re.search(rf"\b{re.escape(term)}\b", text) for term in terms)
+        if "nickname" in attributes:
+            nickname_match = bool(re.search(r"\b(?:nickname|preferred name|called)\b", text))
+            preferred_identity = (
+                fact.get("kind") == "identity_fact"
+                and "preferred" in str(fact.get("statement") or "").casefold()
+            )
+            return 3 if nickname_match or preferred_identity else 1
+        if "teasing" in attributes:
+            if fact.get("kind") == "identity_fact":
+                return 1
+            return 3 if re.search(r"\b(?:tease|teased|teasing)\b", text) else (
+                2 if re.search(r"\b(?:close|closeness|grew up together)\b", text) else 0
+            )
+        if "childhood_narrative" in attributes:
+            if fact.get("kind") == "identity_fact":
+                return 1
+            shared = bool(re.search(
+                r"\b(?:brother|sister|sibling|together|we|us|our)\b", text,
+            ))
+            childhood = bool(re.search(
+                r"\b(?:childhood|grew up|young|school|played|cricket|teased)\b", text,
+            ))
+            return 3 if shared and childhood else 1 if shared else 0
         if not direct:
             if subject in {"family", "members", "household"} and re.search(r"\bfamil(?:y|ies)\b", text):
                 return 2
             return 0
+        if "activity" in attributes:
+            if fact.get("kind") == "identity_fact":
+                return 2
+            activity_match = bool(re.search(
+                r"\b(?:used to|would|played|talked|chatted|walked|sat|went|"
+                r"watched|listened|teased|ate|drank|worked|studied|did)\b",
+                text,
+            ))
+            time_match = (
+                "time_context" not in attributes
+                or bool(re.search(
+                    r"\b(?:evenings?|mornings?|afternoons?|nights?|after dinner|"
+                    r"before bed|at sunset)\b",
+                    text,
+                ))
+            )
+            return 3 if activity_match and time_match else 2
         if "name" in attributes and subject_type == "relationship":
             return 3 if relationship == subject or re.search(rf"\bmy {re.escape(subject)}\b", text) else 2
         if "size" in attributes:
@@ -852,9 +934,28 @@ class GroundedAnswerService:
         normalized = " ".join(query.casefold().split())
         return bool(re.search(
             r"\b(?:what else|who else|tell me more|tell me everything|all (?:the |our |your )?|"
-            r"whole story|complete(?:ly)?|everything about|explain|what happened)\b",
+            r"whole story|complete(?:ly)?|everything about|explain|what happened|"
+            r"the other one|the second one|what about the other)\b",
             normalized,
         ))
+
+    @staticmethod
+    def requests_collection(query: str, attributes: tuple[str, ...] = ()) -> bool:
+        normalized = " ".join(query.casefold().split())
+        return "collection" in attributes or bool(re.search(
+            r"\b(?:their [\w'-]+|who are (?:they|your)|which (?:ones?|[\w'-]+)|"
+            r"how many|where have you (?:travelled|traveled|been)|both|all of them|"
+            r"the other one|the second one)\b",
+            normalized,
+        ))
+
+    @staticmethod
+    def _natural_list(values: list[str]) -> str:
+        if len(values) < 2:
+            return values[0] if values else ""
+        if len(values) == 2:
+            return f"{values[0]} and {values[1]}"
+        return f"{', '.join(values[:-1])}, and {values[-1]}"
 
     @staticmethod
     def _generation_instruction(

@@ -55,9 +55,12 @@ class LegacyContextEngineTests(unittest.TestCase):
             participants=(("Luffy", "dog"),), tags=("pet", "Labrador"),
         )
         self.tv = self._memory("home", "Living-room TV", "Our TV is 85 inches.")
+        self.nickname = self._memory(
+            "personal_detail", "Nickname", "My nickname is Pinky.",
+        )
         self.brother_story = self._memory(
             "story", "Childhood with Aditya",
-            "My younger brother Aditya and I grew up in Pune and teased each other.",
+            "My younger brother Aditya and I sat together and talked every evening.",
             memory_type=MemoryType.NARRATIVE,
             participants=(("Aditya Deshmukh", "younger brother"),),
             tags=("childhood", "Pune"),
@@ -172,6 +175,48 @@ class LegacyContextEngineTests(unittest.TestCase):
         unknown = self._turn(engine, "What is our submarine's serial number?", ())
         self.assertTrue(unknown.may_say_no_memory)
         self.assertEqual(unknown.retrieval_status, "true_unknown")
+
+    def test_nickname_and_brother_event_are_selected_identically_for_both_surfaces(self):
+        engine = LegacyMemoryEngine()
+        for query, expected_memory_id in (
+            ("What is your nickname?", self.nickname.memory_id),
+            ("What did you and your brother do in the evenings?", self.brother_story.memory_id),
+            ("Do you have dogs?", self.bruno.memory_id),
+            ("What size is your TV?", self.tv.memory_id),
+        ):
+            chat = self._turn(engine, query, ())
+            live = self._turn(engine, query, ())
+            chat_ids = {
+                *(fact.source_id for fact in chat.profile_facts if fact.source_kind == "memory"),
+                *(item.memory_id for item in chat.detailed_memories),
+            }
+            live_ids = {
+                *(fact.source_id for fact in live.profile_facts if fact.source_kind == "memory"),
+                *(item.memory_id for item in live.detailed_memories),
+            }
+            self.assertEqual(chat_ids, live_ids)
+            self.assertIn(expected_memory_id, live_ids)
+
+    def test_language_normalized_queries_keep_the_same_evidence_ids(self):
+        engine = LegacyMemoryEngine()
+        cases = (
+            ("What is your nickname?", self.nickname.memory_id),
+            ("What did you and your brother do in the evenings?", self.brother_story.memory_id),
+            ("What size is our TV?", self.tv.memory_id),
+            ("Tell me about our dogs.", self.bruno.memory_id),
+        )
+        for normalized_english, expected in cases:
+            english_chat = self._turn(engine, normalized_english, ())
+            marathi_live_after_normalization = self._turn(
+                engine, normalized_english, (),
+            )
+            def ids(turn):
+                return {
+                    *(fact.source_id for fact in turn.profile_facts if fact.source_kind == "memory"),
+                    *(item.memory_id for item in turn.detailed_memories),
+                }
+            self.assertEqual(ids(english_chat), ids(marathi_live_after_normalization))
+            self.assertIn(expected, ids(marathi_live_after_normalization))
 
     def test_same_engine_is_conversation_independent_and_reflects_current_edit(self):
         engine = LegacyMemoryEngine()

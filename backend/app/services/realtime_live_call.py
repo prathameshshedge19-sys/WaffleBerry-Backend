@@ -6,7 +6,7 @@ import logging
 import re
 from collections import OrderedDict
 from hashlib import sha256
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from threading import RLock
 from time import monotonic
 from types import SimpleNamespace
@@ -18,6 +18,7 @@ from app.crud.user import ConversationCRUD
 from app.config import Settings
 from app.services.chat_service import ChatService
 from app.services.grounded_answer import GroundedAnswerPlan, GroundedAnswerService
+from app.services.semantic_concept_resolution import SemanticConceptResolver
 from app.services.conversation_continuity import ConversationContinuity
 from app.services.turn_understanding import TurnUnderstanding, interpret_turn
 from app.services.language_normalization import LanguageNormalizationService
@@ -340,6 +341,8 @@ class RealtimeMemoryState:
     turns: OrderedDict = field(default_factory=OrderedDict)
     rendered_fact_ids_by_topic: OrderedDict = field(default_factory=OrderedDict)
     last_answer_subject: str | None = None
+    pending_concept_query: str | None = None
+    pending_concept_term: str | None = None
 
 
 @dataclass
@@ -366,6 +369,7 @@ class RealtimeTurnRoute:
     understanding: TurnUnderstanding | None = None
     normalized_query: str | None = None
     response_language: str = "english"
+    clarification_prompt: str | None = None
 
 
 @dataclass
@@ -450,7 +454,46 @@ class RealtimeToolService:
                         state.last_tool_type = None
                         state.last_grounded_turn_id = None
             normalized_turn = normalized_turn or LanguageNormalizationService().normalize_user_turn(query)
+            if state.pending_concept_query:
+                selection = (
+                    "business partner" if re.search(r"\bbusiness partner\b", query, re.I)
+                    else "husband" if re.search(r"\bhusband\b", query, re.I)
+                    else "brother" if re.search(r"\bbrother\b", query, re.I)
+                    else None
+                )
+                correction = re.search(r"\b(?:means?|meant)\s+(.+?)[.!?]*$", query, re.I)
+                if selection is None and correction:
+                    entity = re.sub(
+                        r"^(?:my|your|our|the)\s+", "", correction.group(1), flags=re.I,
+                    )
+                    if re.fullmatch(r"[A-Za-z][\w'-]*(?:\s+[A-Za-z][\w'-]*){0,2}", entity):
+                        selection = entity
+                if selection and state.pending_concept_term:
+                    resumed = re.sub(
+                        rf"\b{re.escape(state.pending_concept_term)}\b", selection,
+                        state.pending_concept_query, flags=re.I,
+                    )
+                    normalized_turn = replace(
+                        normalized_turn, normalized_english_text=resumed,
+                        clarification_required=False, clarification_prompt=None,
+                    )
+                    state.pending_concept_query = None
+                    state.pending_concept_term = None
             active_topic = state.last_answer_subject or state.last_memory_topic or state.last_query
+            if getattr(normalized_turn, "clarification_required", False) and active_topic:
+                contextual = SemanticConceptResolver().resolve(
+                    normalized_turn.original_text, active_topic=active_topic,
+                )
+                if not contextual.clarification_required and contextual.canonical_concept:
+                    normalized_turn = replace(
+                        normalized_turn,
+                        normalized_english_text=contextual.canonical_query,
+                        canonical_concept=contextual.canonical_concept,
+                        canonical_relationship=contextual.canonical_relationship,
+                        concept_confidence=contextual.confidence,
+                        clarification_required=False, clarification_prompt=None,
+                        concept_resolution_source=contextual.source,
+                    )
             understanding = interpret_turn(
                 normalized_turn.normalized_english_text, active_topic=active_topic,
             )
@@ -471,7 +514,20 @@ class RealtimeToolService:
                 classification=classification, understanding=understanding,
                 normalized_query=normalized_turn.normalized_english_text,
                 response_language=normalized_turn.response_language,
+                clarification_prompt=getattr(normalized_turn, "clarification_prompt", None),
             )
+            if getattr(normalized_turn, "clarification_required", False):
+                state.pending_concept_query = normalized_turn.normalized_english_text
+                match = re.search(
+                    r"\b(?:your|my|our)\s+([\w'-]+)",
+                    normalized_turn.normalized_english_text, re.I,
+                )
+                if match is None:
+                    match = re.search(
+                        r"\babout\s+([\w'-]+)",
+                        normalized_turn.normalized_english_text, re.I,
+                    )
+                state.pending_concept_term = match.group(1) if match else None
             logger.info(
                 "LANGUAGE_NORMALIZATION turn_id=%s stage_used=%s detected_language=%s "
                 "response_language=%s code_switched=%s confidence_bucket=%s success=%s",
@@ -712,6 +768,13 @@ class RealtimeToolService:
         if turn_id is not None and (turn is None or turn.obsolete or turn.completed):
             return {"status": "cancelled", "uncertain": True}
         original_query = turn.query if turn is not None else self._query(arguments)
+        if turn is not None and turn.clarification_prompt:
+            return {
+                "status": "clarification_required",
+                "validated_text": turn.clarification_prompt,
+                "answer_source": "semantic_concept_clarification",
+                "uncertain": False,
+            }
         query = (turn.normalized_query or turn.query) if turn is not None else original_query
         response_language = (
             turn.response_language if turn is not None
@@ -967,6 +1030,7 @@ class RealtimeToolService:
                     "status": record["epistemic_status"],
                 } for record in memory_payload),
             ],
+            "_prepared_personal_input": prepared,
         }
         if turn is not None and turn.obsolete:
             return {"status": "cancelled", "uncertain": True}

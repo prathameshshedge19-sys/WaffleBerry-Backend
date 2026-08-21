@@ -53,6 +53,9 @@ from app.services.memory.retrieval_ranking import MemoryRelevanceRanker
 from app.services.persona_profile import PersonaProfile, PersonaProfileService
 from app.services.grounded_answer import GroundedAnswerService
 from app.services.memory.legacy_context import LegacyMemoryEngine
+from app.services.turn_understanding import interpret_turn
+from app.services.personal_answer import PersonalAnswerService
+from app.services.semantic_concept_resolution import SemanticConceptResolver
 
 
 logger = logging.getLogger(__name__)
@@ -234,6 +237,45 @@ class ChatService:
         self._legacy_memory_engine = legacy_memory_engine or LegacyMemoryEngine(
             retrieval=self._memory_retrieval,
         )
+        self._concept_resolver = SemanticConceptResolver()
+        self._pending_concept_clarifications: dict[int, tuple[str, str]] = {}
+
+    def _resolved_personal_query(
+        self, conversation_id: int, original_query: str, normalized_query: str,
+    ) -> tuple[str, str | None]:
+        pending = self._pending_concept_clarifications.get(conversation_id)
+        if pending:
+            pending_query, pending_term = pending
+            definition = re.search(r"\b(?:means?|meant)\s+(.+?)[.!?]*$", original_query, re.I)
+            candidate_text = definition.group(1) if definition else original_query
+            candidate = self._concept_resolver.resolve(candidate_text)
+            canonical = candidate.canonical_concept or (
+                "business partner" if re.search(r"\bbusiness partner\b", candidate_text, re.I)
+                else "husband" if re.search(r"\bhusband\b", candidate_text, re.I) else None
+            )
+            if (
+                canonical and len(candidate_text.split()) == 1
+                and candidate_text.strip(" .!?").casefold() == canonical.casefold()
+            ):
+                canonical = candidate_text.strip(" .!?")
+            if canonical is None and definition:
+                entity = re.sub(r"^(?:my|your|our|the)\s+", "", candidate_text, flags=re.I)
+                if re.fullmatch(r"[A-Za-z][\w'-]*(?:\s+[A-Za-z][\w'-]*){0,2}", entity):
+                    canonical = entity
+            if canonical:
+                self._pending_concept_clarifications.pop(conversation_id, None)
+                return re.sub(rf"\b{re.escape(pending_term)}\b", canonical, pending_query, flags=re.I), None
+        resolution = self._concept_resolver.resolve(normalized_query)
+        if resolution.clarification_required:
+            match = re.search(r"\b(?:your|my|our)\s+([\w'-]+)", normalized_query, re.I)
+            if match is None:
+                match = re.search(r"\babout\s+([\w'-]+)", normalized_query, re.I)
+            term = match.group(1) if match else "that"
+            self._pending_concept_clarifications[conversation_id] = (normalized_query, term)
+            if len(self._pending_concept_clarifications) > 128:
+                self._pending_concept_clarifications.pop(next(iter(self._pending_concept_clarifications)))
+            return normalized_query, resolution.clarification_prompt
+        return resolution.canonical_query, None
 
     def prepare_ai_input(
         self,
@@ -770,8 +812,28 @@ class ChatService:
             fallback_search_attempted = fallback_search_attempted or (
                 shared_context.retrieval_status == "true_unknown"
             )
+            requested_attributes = interpret_turn(
+                semantic_message,
+            ).requested_attributes
+            _safe_log(
+                logging.INFO,
+                "MEMORY_PARITY",
+                turn_id=request_id,
+                surface="live_call" if live_call else "chat",
+                subject_type=interpret_turn(semantic_message).subject_type,
+                requested_attribute_count=len(requested_attributes),
+                profile_evidence_count=shared_context.profile_relevant_fact_count,
+                detailed_evidence_count=shared_context.detailed_relevant_memory_count,
+                selected_evidence_count=len(memory_ids) + len(identity_evidence),
+                direct_evidence_count=sum(
+                    level == 1 for level in shared_context.relevance_levels
+                ) + len(shared_context.detailed_memories),
+                answer_status=shared_context.retrieval_status,
+            )
 
-        resolved_entities = self._unique_names([
+        legacy_entity_key = comparable_name(persona_display_name or "")
+        resolved_entities = tuple(
+            entity for entity in self._unique_names([
             *(shared_context.resolved_entities if shared_context else ()),
             *([name_resolution.canonical_value]
               if name_resolution.canonical_value else []),
@@ -780,7 +842,9 @@ class ChatService:
                 for memory in memory_evidence
                 for entity in memory.get("entities", ())
             ),
-        ])
+            ])
+            if comparable_name(entity) != legacy_entity_key
+        )
         conflict_count = (int(identity_result.conflict_present)
                           + int(fidelity_plan.has_conflict))
         fact_confidence = (
@@ -920,16 +984,41 @@ class ChatService:
         normalized_turn = await LanguageNormalizationService(
             self._ai_service
         ).normalize_semantically(user_message)
+        semantic_query, clarification = self._resolved_personal_query(
+            conversation.conversation_id, user_message,
+            normalized_turn.normalized_english_text,
+        )
+        if clarification:
+            return CompanionGeneration(content=clarification)
         prepared = self.prepare_grounded_personal_turn(
             db,
             conversation,
             user_message,
             conversation_style=conversation_style,
             response_length=response_length,
-            semantic_message_override=normalized_turn.normalized_english_text,
+            semantic_message_override=semantic_query,
         )
         db.rollback()
         self._log_provider_attempt(prepared, conversation)
+        if prepared.profile_engine_invoked:
+            personal_answers = PersonalAnswerService(
+                GroundedAnswerService(self._ai_service), self._ai_service,
+            )
+            factual_result = personal_answers.factual_result_from_prepared(
+                prepared,
+                legacy_name=conversation.legacy.display_name,
+                original_query=user_message,
+                response_language=normalized_turn.response_language,
+            )
+            personal = await personal_answers.answer_prepared(
+                normalized_turn.normalized_english_text, prepared, factual_result,
+            )
+            return CompanionGeneration(
+                content=personal.validated_text,
+                memory_ids=prepared.memory_ids,
+                retrieved_at=prepared.retrieved_at,
+                request_id=prepared.request_id,
+            )
         try:
             synthesis_messages = prepared.messages
             if prepared.external_knowledge_mode == "web_search":
@@ -1005,13 +1094,20 @@ class ChatService:
         semantic_message_override: str | None = None,
     ) -> CompanionStreamPlan:
         """Prepare stream and provenance before provider iteration begins."""
+        deterministic = LanguageNormalizationService().normalize_user_turn(user_message)
+        semantic_query, clarification = self._resolved_personal_query(
+            conversation.conversation_id, user_message,
+            semantic_message_override or deterministic.normalized_english_text,
+        )
+        if clarification:
+            return CompanionStreamPlan(stream=self._single_chunk(clarification))
         prepared = self.prepare_grounded_personal_turn(
             db,
             conversation,
             user_message,
             conversation_style=conversation_style,
             response_length=response_length,
-            semantic_message_override=semantic_message_override,
+            semantic_message_override=semantic_query,
         )
         # Log while the request-scoped ORM object is still attached.  FastAPI
         # may close yield dependencies before a StreamingResponse body starts.
@@ -1162,6 +1258,7 @@ class ChatService:
             ):
                 received = True
                 yield chunk
+
             if prepared.external_knowledge_mode == "web_search":
                 _safe_log(
                     logging.INFO,
@@ -1196,6 +1293,10 @@ class ChatService:
                 attach_web_failure_context(prepared.messages)
             ):
                 yield chunk
+
+    @staticmethod
+    async def _single_chunk(text: str) -> AsyncIterator[str]:
+        yield text
 
     def stream_story_response(
         self,

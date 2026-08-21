@@ -49,6 +49,7 @@ from app.dependencies.ai import (
     get_grounded_answer_service,
 )
 from app.services.grounded_answer import GroundedAnswerService
+from app.services.personal_answer import PersonalAnswerService
 from app.services.live_call import LiveCallTurnService
 from app.services.chat_service import ChatService
 from app.services.ai.exceptions import AITimeoutError
@@ -447,11 +448,21 @@ async def execute_realtime_tool(
         )
         result = {"status": "error", "uncertain": True}
     if result.get("status") in {"supported", "conflicted", "unsupported"}:
+        prepared_personal_input = result.pop("_prepared_personal_input", None)
+        personal_answers = PersonalAnswerService(
+            answers, getattr(answers, "_ai", None),
+        )
         query = str(result.get("topic_anchor") or request.arguments.get("query") or "")
         if hasattr(tools, "prepare_rendering_result"):
             result = tools.prepare_rendering_result(session, query, result)
         try:
-            plan, answer, source = await answers.produce(query, result)
+            personal = (
+                await personal_answers.answer_prepared(
+                    query, prepared_personal_input, result,
+                ) if prepared_personal_input is not None
+                else await personal_answers.answer(query, result)
+            )
+            plan, answer, source = personal.plan, personal.validated_text, personal.source
         except Exception:
             logger.exception("live_call_grounded_answer_failed session_id=%s", session_id)
             plan = answers.plan(query, result)
@@ -463,7 +474,8 @@ async def execute_realtime_tool(
         if hasattr(tools, "record_rendered_facts"):
             tools.record_rendered_facts(session, plan)
         result = {**result, "answer_plan": plan.public_dict(),
-                  "validated_text": answer, "answer_source": source}
+                  "validated_text": answer, "answer_source": source,
+                  "personal_answer": personal.public_dict() if 'personal' in locals() else None}
         if hasattr(tools, "register_validated_response"):
             tools.register_validated_response(
                 session, request.turn_id, f"validated-{request.call_id}",

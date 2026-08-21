@@ -9,6 +9,7 @@ from app.services.ai.ai_service import AIService
 from app.services.ai.exceptions import AIServiceError
 from app.services.ai.provider import AIMessage
 from app.services.speech_language_analyzer import SpeechLanguageAnalyzer, SpeechLanguageMode
+from app.services.semantic_concept_resolution import SemanticConceptResolver
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,6 +27,13 @@ class NormalizedTurn:
     speech_act: str = "statement"
     substantive_intent: str = "unknown"
     stage_used: str = "deterministic"
+    canonical_concept: str | None = None
+    canonical_relationship: str | None = None
+    concept_confidence: float = 1.0
+    concept_ambiguity: tuple[str, ...] = ()
+    clarification_required: bool = False
+    clarification_prompt: str | None = None
+    concept_resolution_source: str = "canonical_fast_path"
 
 
 _NORMALIZATION_SCHEMA = {
@@ -60,6 +68,21 @@ class LanguageNormalizationService:
     def __init__(self, ai_service: AIService | None = None) -> None:
         self._speech = SpeechLanguageAnalyzer()
         self._ai = ai_service
+        self._concepts = SemanticConceptResolver()
+
+    def _resolve_concepts(self, turn: NormalizedTurn) -> NormalizedTurn:
+        resolution = self._concepts.resolve(turn.normalized_english_text)
+        return replace(
+            turn,
+            normalized_english_text=resolution.canonical_query,
+            canonical_concept=resolution.canonical_concept,
+            canonical_relationship=resolution.canonical_relationship,
+            concept_confidence=resolution.confidence,
+            concept_ambiguity=resolution.ambiguity,
+            clarification_required=resolution.clarification_required,
+            clarification_prompt=resolution.clarification_prompt,
+            concept_resolution_source=resolution.source,
+        )
 
     async def normalize_semantically(
         self, text: str, recent_language_context: str | None = None,
@@ -97,7 +120,7 @@ class LanguageNormalizationService:
                 normalized_english = self._preserve_recognized_subject(
                     stage_one.normalized_english_text, normalized_english,
                 )
-                return NormalizedTurn(
+                return self._resolve_concepts(NormalizedTurn(
                     original_text=stage_one.original_text,
                     detected_language=payload["detected_language"],
                     normalized_english_text=normalized_english,
@@ -106,14 +129,14 @@ class LanguageNormalizationService:
                     translation_required=True, normalization_success=True, fallback_used=False,
                     response_language=payload["response_language"], speech_act=payload["speech_act"],
                     substantive_intent=payload["substantive_intent"], stage_used="semantic_model",
-                )
+                ))
             except (KeyError, TypeError, ValueError, json.JSONDecodeError, AIServiceError):
                 continue
-        return replace(
+        return self._resolve_concepts(replace(
             stage_one, fallback_used=True, stage_used="fallback",
             normalization_success=False,
             response_language=self._fallback_response_language(stage_one, recent_language_context),
-        )
+        ))
 
     @staticmethod
     def _preserve_recognized_subject(
@@ -132,6 +155,8 @@ class LanguageNormalizationService:
     @staticmethod
     def _is_confidently_clear_english(turn: NormalizedTurn) -> bool:
         """Only ordinary, confidently parsed English may bypass semantic normalization."""
+        if turn.clarification_required:
+            return False
         if turn.detected_language != "english" or turn.script != "latin":
             return False
         tokens = re.findall(r"[A-Za-z]+(?:'[A-Za-z]+)?", turn.original_text.casefold())
@@ -177,7 +202,7 @@ class LanguageNormalizationService:
             if neutral_acknowledgement and recent_language_context in {"marathi", "hindi", "english"}
             else "marathi" if "marathi" in mode else "hindi" if "hindi" in mode else "english"
         )
-        return NormalizedTurn(
+        return self._resolve_concepts(NormalizedTurn(
             original_text=original, detected_language=mode,
             normalized_english_text=semantic, language_confidence=0.95 if translated else 0.9,
             script="devanagari" if self._DEVANAGARI.search(original) else "latin",
@@ -188,7 +213,7 @@ class LanguageNormalizationService:
             response_language=response_language,
             speech_act="question" if "?" in original else "statement",
             substantive_intent="unknown", stage_used="deterministic",
-        )
+        ))
 
     def _detect(self, text: str, recent: str | None) -> str:
         tokens = set(re.findall(r"[A-Za-z]+", text.casefold()))

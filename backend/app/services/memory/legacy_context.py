@@ -321,7 +321,14 @@ class LegacyMemoryEngine:
         details = tuple(item for item in detailed if item.memory_id not in profile_ids)[:8]
         selected = tuple(fact for fact, level in ranked_profile if level <= 3)[:8]
         levels = tuple(level for _, level in ranked_profile if level <= 3)
-        entities = tuple(dict.fromkeys(entity for fact in selected for entity in fact.entities))
+        legacy_key = _norm(profile.display_name)
+        entities = tuple(dict.fromkeys(
+            entity
+            for fact, level in ranked_profile
+            if level <= 2
+            for entity in fact.entities
+            if _norm(entity) != legacy_key
+        ))
         identities = tuple({
             "identity_fact_id": fact.source_id, "fact_type": fact.key,
             "value": fact.value, "relationship": fact.relationship,

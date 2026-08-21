@@ -1,6 +1,7 @@
 import unittest
 
 from app.services.grounded_answer import GroundedAnswerService
+from app.services.personal_answer import PersonalAnswerService
 
 
 class FakeAI:
@@ -105,6 +106,35 @@ class GroundedAnswerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(GroundedAnswerService.validate(
             television, "We have an 85-inch TV at home.",
         ), ())
+
+    def test_nickname_and_activity_attributes_outrank_related_identity(self):
+        nickname = GroundedAnswerService.plan(
+            "What is your nickname?",
+            result(
+                "My full name is Anjali Deshmukh.",
+                "My nickname is Pinky.",
+                identity=({
+                    "identity_fact_id": 91, "fact_type": "full_name",
+                    "value": "Anjali Deshmukh", "epistemic_status": "supported",
+                },),
+            ),
+        )
+        self.assertEqual(nickname.requested_attributes, ("nickname",))
+        self.assertIn("Pinky", GroundedAnswerService.fallback(nickname))
+        self.assertNotIn("full name", GroundedAnswerService.fallback(nickname))
+
+        evening = GroundedAnswerService.plan(
+            "What did you and your brother do in the evenings?",
+            result(
+                "My younger brother is Aditya Deshmukh.",
+                "My younger brother Aditya and I sat together and talked every evening.",
+                entities=("Aditya Deshmukh",),
+            ),
+        )
+        self.assertEqual(evening.requested_attributes, ("activity", "time_context"))
+        answer = GroundedAnswerService.fallback(evening)
+        self.assertIn("talked every evening", answer)
+        self.assertNotEqual(answer, "My younger brother is Aditya Deshmukh.")
 
     def test_explicit_multi_subject_query_selects_each_requested_subject_only(self):
         payload = result(
@@ -487,3 +517,141 @@ class GroundedAnswerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(source, "deterministic_fallback")
         self.assertNotEqual(text, english)
         self.assertRegex(text, r"[\u0900-\u097f]")
+
+    def test_teasing_request_selects_teasing_and_closeness_not_evening_activity(self):
+        payload = result(
+            "My younger brother is Aditya Deshmukh.",
+            "I used to take evening walks with my brother, and we played cricket.",
+            "I used to tease Aditya a lot, and we were very close.",
+            entities=("Aditya Deshmukh",),
+        )
+        plan = GroundedAnswerService.plan("Did you use to tease your brother?", payload)
+        statements = tuple(fact["statement"] for fact in plan.answer_facts)
+        self.assertTrue(any("tease" in value.casefold() for value in statements))
+        self.assertFalse(any("evening walks" in value.casefold() for value in statements))
+        self.assertIn("teasing", plan.requested_attributes)
+
+    def test_childhood_request_selects_shared_story_not_school_as_self_name(self):
+        payload = result(
+            "My school was Vidya Mandir School in Pune.",
+            "My younger brother is Aditya Deshmukh.",
+            "Aditya and I grew up together in Pune, played cricket, and were very close.",
+            entities=("Aditya Deshmukh",),
+        )
+        plan = GroundedAnswerService.plan(
+            "What is your childhood memory with your brother?", payload,
+        )
+        statements = tuple(fact["statement"] for fact in plan.answer_facts)
+        self.assertTrue(any("grew up together" in value.casefold() for value in statements))
+        self.assertFalse(any("my name is vidya" in value.casefold() for value in statements))
+        self.assertIn("childhood_narrative", plan.requested_attributes)
+
+    async def test_shared_personal_result_has_evidence_fact_and_text_parity(self):
+        payload = result(
+            "My younger brother is Aditya Deshmukh.",
+            "I used to tease Aditya a lot, and we were very close.",
+            entities=("Aditya Deshmukh",),
+        )
+        service = PersonalAnswerService(GroundedAnswerService(FakeAI([
+            "Yes, I used to tease Aditya a lot, and we were very close.",
+            "Yes, I used to tease Aditya a lot, and we were very close.",
+        ])))
+        chat = await service.answer("Did you tease your brother?", payload)
+        live = await service.answer("Did you tease your brother?", payload)
+        self.assertEqual(chat.selected_evidence_ids, live.selected_evidence_ids)
+        self.assertEqual(chat.answer_facts, live.answer_facts)
+        self.assertEqual(chat.must_include, live.must_include)
+        self.assertEqual(chat.validated_text, live.validated_text)
+
+    def test_generic_small_collections_are_complete_across_domains(self):
+        cases = (
+            ("Who are your siblings?", ("My brother is Aditya.", "My sister is Riya."), ("Aditya", "Riya")),
+            ("Who are your children?", ("My son is Aarav.", "My daughter is Mira."), ("Aarav", "Mira")),
+            ("Which cars did we own?", ("We owned a car named Honda City.", "We owned a car named Volkswagen Golf."), ("Honda City", "Volkswagen Golf")),
+            ("Which schools did you attend?", ("I attended Vidya Mandir school.", "I attended ABC College."), ("Vidya Mandir", "ABC College")),
+            ("Where have you travelled?", ("I travelled to Pune.", "I travelled to Goa.", "I travelled to Berlin."), ("Pune", "Goa", "Berlin")),
+        )
+        for query, summaries, entities in cases:
+            with self.subTest(query=query):
+                plan = GroundedAnswerService.plan(query, result(*summaries, entities=entities))
+                self.assertEqual(
+                    {fact["entity"] for fact in plan.answer_facts}, set(entities),
+                )
+
+    async def test_supported_coverage_repairs_false_amnesia_on_first_answer(self):
+        payload = result(
+            "We have a Labrador named Bruno.",
+            "We have a Labrador named Luffy.",
+            entities=("Bruno", "Luffy"),
+        )
+        service = PersonalAnswerService(GroundedAnswerService(FakeAI([
+            "I don't remember their names.",
+            "I don't remember their names.",
+        ])))
+        answer = await service.answer("What are their names?", payload)
+        self.assertEqual(answer.coverage.status, "SUPPORTED")
+        self.assertFalse(answer.coverage.no_memory_allowed)
+        self.assertIn("Bruno", answer.validated_text)
+        self.assertIn("Luffy", answer.validated_text)
+
+    def test_partial_knowledge_uses_known_value_and_scopes_unknown_member(self):
+        payload = result("Aarav's birthday is June 4.", entities=("Aarav",))
+        payload["memories"].append({
+            "memory_id": 2, "summary": "Mira's birthday is unknown.",
+            "entities": ["Mira"], "epistemic_status": "uncertain",
+        })
+        plan = GroundedAnswerService.plan("What are their birthdays?", payload)
+        coverage = PersonalAnswerService.evidence_coverage(plan)
+        text = GroundedAnswerService.fallback(plan)
+        self.assertEqual(coverage.status, "PARTIAL")
+        self.assertIn("June 4", text)
+        self.assertIn("Mira", text)
+        self.assertNotEqual(text, "I don't remember that.")
+
+    async def test_narrow_question_repairs_background_memory_dump(self):
+        payload = result(
+            "My younger brother is Aditya.",
+            "We grew up together in Pune.",
+            "We were very close.",
+            "We took evening walks.",
+            "We played cricket.",
+            "I teased Aditya as a child.",
+            "I attended Vidya Mandir School.",
+            "We have an 85-inch TV.",
+            entities=("Aditya",),
+        )
+        dump = "My brother is Aditya. We grew up in Pune. We were close. We took evening walks. We played cricket. I teased him. I attended Vidya Mandir School. We have an 85-inch TV."
+        direct = "Yes, I used to tease Aditya, and we were very close."
+        service = PersonalAnswerService(GroundedAnswerService(FakeAI([dump, direct])))
+        answer = await service.answer("Did you tease your brother?", payload)
+        self.assertIn("tease", answer.validated_text.casefold())
+        self.assertNotIn("85-inch", answer.validated_text)
+        self.assertNotIn("Vidya Mandir", answer.validated_text)
+
+    def test_other_one_is_a_generic_unused_evidence_expansion(self):
+        self.assertTrue(GroundedAnswerService.requests_expansion(
+            "What's the other one's name?",
+        ))
+        self.assertTrue(GroundedAnswerService.requests_expansion(
+            "What about the other car?",
+        ))
+
+    def test_broad_childhood_budget_uses_strong_subset_without_household_dump(self):
+        payload = result(
+            "My younger brother is Aditya.",
+            "We grew up together in Pune.",
+            "We played cricket together as children.",
+            "I teased Aditya when we were young.",
+            "We were very close.",
+            "We took evening walks.",
+            "I attended Vidya Mandir School.",
+            "We have an 85-inch TV.",
+            entities=("Aditya",),
+        )
+        plan = GroundedAnswerService.plan(
+            "Tell me about your childhood with your brother.", payload,
+        )
+        text = GroundedAnswerService.fallback(plan)
+        self.assertGreaterEqual(len(plan.answer_facts), 2)
+        self.assertLessEqual(len(plan.answer_facts), 4)
+        self.assertNotIn("85-inch", text)
