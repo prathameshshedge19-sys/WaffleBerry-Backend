@@ -10,7 +10,8 @@ from app.services.memory.storage_pipeline import MemoryStoragePipeline
 def test_assistant_persists_then_schedules_once_before_terminal_complete():
     from pathlib import Path
     source = (Path(__file__).parents[1] / "app" / "api" / "v1" / "user.py").read_text()
-    stream_block = source[source.index("async def event_stream():"):]
+    endpoint = source[source.index("async def create_message_stream("):]
+    stream_block = endpoint[endpoint.index("async def event_stream():"):]
     persisted = stream_block.index("MessageCRUD.create_assistant_message(")
     schedule = stream_block.index("schedule_conversation_learning(")
     complete = stream_block.index('yield _sse_event(\n                "complete"')
@@ -118,7 +119,8 @@ def test_stream_schedules_detached_task_without_awaiting_extraction():
     root = Path(__file__).parents[1]
     user_source = (root / "app" / "api" / "v1" / "user.py").read_text()
     scheduler_source = (root / "app" / "services" / "memory" / "auto_learning.py").read_text()
-    stream = user_source[user_source.index("async def event_stream():"):]
+    endpoint = user_source[user_source.index("async def create_message_stream("):]
+    stream = endpoint[endpoint.index("async def event_stream():"):]
     schedule_call = stream[stream.index("schedule_conversation_learning("):stream.index('yield _sse_event(\n                "complete"')]
     scheduler = scheduler_source[scheduler_source.index("def schedule_conversation_learning"):scheduler_source.index("async def learn_live_call_turn_safely")]
     assert "await " not in schedule_call
@@ -213,19 +215,21 @@ def test_chat_prompt_promotes_small_durable_facts_without_changing_story_prompt(
     )
     assert CHAT_AUTO_MEMORY_EXTRACTION_ADDENDUM in chat
     assert "importance to at least 4" in chat
+    normalized_chat = " ".join(chat.split())
     for phrase in (
         "Pet names", "durable preferences", "recurring habits", "hobbies",
         "occupations", "schools", "location history",
     ):
-        assert phrase in chat
+        assert phrase in normalized_chat
     assert story == MEMORY_EXTRACTION_SYSTEM_PROMPT
 
 
-def test_protected_guard_is_limited_to_automatic_chat_source():
+def test_protected_guard_is_limited_to_automatic_conversation_sources():
     from pathlib import Path
     source = (Path(__file__).parents[1] / "app" / "services" / "memory" / "storage_pipeline.py").read_text()
     guard = source[source.index("if (\n                auto_approve\n                and source_type"):]
-    assert "source_type == MemoryPipelineSourceType.CONVERSATION" in guard
+    assert "MemoryPipelineSourceType.CONVERSATION" in guard
+    assert "MemoryPipelineSourceType.LIVE_CALL" in guard
     assert "protected_identity_mutation" in guard
 
 

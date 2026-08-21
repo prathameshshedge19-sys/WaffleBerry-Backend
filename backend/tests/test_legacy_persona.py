@@ -468,6 +468,20 @@ class LegacyPersonaTests(unittest.IsolatedAsyncioTestCase):
         query = ConversationContinuity().build_retrieval_query(history, latest)
         self.assertEqual(query, latest)
 
+    def test_short_explicit_subject_replaces_stale_topic_but_attribute_followup_keeps_it(self):
+        history = [
+            SimpleNamespace(role="user", content="Tell me about our family."),
+            SimpleNamespace(role="assistant", content="A grounded family response."),
+        ]
+        builder = ConversationContinuity()
+        for latest in ("And what about the TV?", "Our car", "The garden", "TV?"):
+            self.assertEqual(builder.build_retrieval_query(history, latest), latest)
+
+        tv_history = [*history, SimpleNamespace(role="user", content="And the TV?")]
+        followup = builder.build_retrieval_query(tv_history, "What size is it?")
+        self.assertIn("And the TV?", followup)
+        self.assertIn("What size is it?", followup)
+
     def test_long_follow_up_chain_retains_topic_until_explicit_switch(self):
         history = [
             SimpleNamespace(role="user", content="Tell me about your childhood."),
@@ -674,7 +688,7 @@ class LegacyPersonaTests(unittest.IsolatedAsyncioTestCase):
         before = self.db.query(Message).count()
         retrieval = FakeRetrieval([approved_memory()])
         service, _ = self.service(retrieval)
-        prepared = service._prepare_companion_input(
+        prepared = service.prepare_grounded_personal_turn(
             self.db,
             self.conversation,
             "And then?",

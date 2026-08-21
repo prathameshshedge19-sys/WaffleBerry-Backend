@@ -67,6 +67,40 @@ def decode_access_token(token: str) -> int:
         raise TokenValidationError("Invalid or expired access token") from exc
 
 
+def create_refresh_token(user_id: int, password_hash: str) -> str:
+    """Create a longer-lived, password-bound refresh credential."""
+    if not isinstance(user_id, int) or isinstance(user_id, bool) or user_id <= 0:
+        raise ValueError("user_id must be a positive integer")
+    settings = get_settings()
+    issued_at = datetime.now(timezone.utc)
+    return jwt.encode(
+        {
+            "sub": str(user_id), "purpose": "session_refresh",
+            "fingerprint": _password_reset_fingerprint(user_id, password_hash),
+            "iat": issued_at,
+            "exp": issued_at + timedelta(days=settings.refresh_token_expire_days),
+        },
+        settings.jwt_secret_key, algorithm=settings.jwt_algorithm,
+    )
+
+
+def decode_refresh_token(token: str) -> tuple[int, str]:
+    """Validate a refresh credential without accepting an access JWT."""
+    settings = get_settings()
+    try:
+        payload = jwt.decode(
+            token, settings.jwt_secret_key, algorithms=[settings.jwt_algorithm],
+            options={"require": ["sub", "purpose", "fingerprint", "iat", "exp"]},
+        )
+        if payload["purpose"] != "session_refresh":
+            raise TokenValidationError("Invalid refresh token")
+        return int(payload["sub"]), str(payload["fingerprint"])
+    except TokenValidationError:
+        raise
+    except (jwt.PyJWTError, TypeError, ValueError, KeyError) as exc:
+        raise TokenValidationError("Invalid or expired refresh token") from exc
+
+
 def _password_reset_fingerprint(
     user_id: int,
     password_hash: str

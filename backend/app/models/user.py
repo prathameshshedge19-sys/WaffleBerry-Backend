@@ -1,6 +1,9 @@
 """SQLAlchemy ORM models for Waffle Berry."""
 
-from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, CheckConstraint, Enum, ForeignKey
+from sqlalchemy import (
+    Column, Integer, String, Text, DateTime, Boolean, CheckConstraint, Enum,
+    ForeignKey, UniqueConstraint,
+)
 from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship, validates
 from app.db import Base
@@ -127,6 +130,14 @@ class Message(Base):
             "length(trim(content)) > 0",
             name="ck_messages_content_not_blank"
         ),
+        CheckConstraint(
+            "source IS NULL OR source IN ('chat', 'live_call')",
+            name="ck_messages_source_supported",
+        ),
+        UniqueConstraint(
+            "conversation_id", "source", "source_session_id", "source_event_id", "role",
+            name="uq_messages_source_event_role",
+        ),
     )
     
     message_id = Column(Integer, primary_key=True, index=True)
@@ -149,6 +160,9 @@ class Message(Base):
     )
     content = Column(Text, nullable=False)
     audio_path = Column(String(500), nullable=True)  # For AI-generated audio
+    source = Column(String(20), nullable=True)
+    source_session_id = Column(String(36), nullable=True)
+    source_event_id = Column(String(200), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     conversation = relationship("Conversation", back_populates="messages")

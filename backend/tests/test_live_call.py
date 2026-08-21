@@ -4,7 +4,9 @@ import unittest
 import asyncio
 import base64
 import inspect
+import json
 import time
+from decimal import Decimal
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -18,17 +20,24 @@ from sqlalchemy.pool import StaticPool
 
 import app.models  # noqa: F401
 from app.crud.memory import LegacyCRUD
-from app.crud.user import UserCRUD
+from app.crud.user import ConversationCRUD, MessageCRUD, UserCRUD
 from app.db import Base, get_db
 from app.dependencies.auth import get_current_user
-from app.dependencies.ai import get_realtime_bootstrap_provider, get_realtime_tool_service
+from app.dependencies.ai import (
+    get_ai_service, get_grounded_answer_service, get_realtime_bootstrap_provider,
+    get_realtime_tool_service,
+)
 from app.main import app
-from app.models.user import User
+from app.models.user import Message, MessageRole, User
+from app.models.memory import Memory, MemoryProvenance, MemoryReviewStatus, MemoryType
 from app.schemas.memory import LegacyCreate
 from app.services.live_call import LiveCallSessionStore, LiveCallTurnService, live_call_sessions
 from app.services.ai.provider import SpeechResult
+from app.services.ai.exceptions import AIProviderError
 from app.services.ai.context_builder import ContextBuilder
 from app.services.chat_service import ChatService
+from app.services.grounded_answer import GroundedAnswerService
+from app.services.memory.identity_facts import IdentityFactProjectionService
 from app.services.persona_profile import PersonaProfile
 from app.services.realtime_live_call import (
     OpenAIRealtimeBootstrapProvider,
@@ -111,10 +120,13 @@ class LiveCallFoundationTests(unittest.TestCase):
         live_call_sessions.clear()
         self.db.close()
 
-    def create_session(self):
+    def create_session(self, engine=None):
+        payload = {"legacy_id": self.legacy.legacy_id}
+        if engine is not None:
+            payload["engine"] = engine
         response = self.client.post(
             "/api/v1/live-call/session",
-            json={"legacy_id": self.legacy.legacy_id},
+            json=payload,
         )
         self.assertEqual(response.status_code, 201)
         return response.json()
@@ -129,6 +141,79 @@ class LiveCallFoundationTests(unittest.TestCase):
         self.assertEqual(first["effective_voice"], "standard_female")
         self.assertEqual(first["transport"], "websocket")
         self.assertEqual(first["event_version"], 1)
+        self.assertGreater(first["conversation_id"], 0)
+
+    def test_live_call_attaches_only_to_owned_matching_legacy_conversation(self):
+        matching = ConversationCRUD.create_conversation(
+            self.db, self.owner.user_id, legacy_id=self.legacy.legacy_id,
+        )
+        MessageCRUD.create_message_pair(
+            self.db, matching, "Tell me about your sibling.",
+            "My sibling is the supported person.",
+        )
+        attached = self.client.post(
+            "/api/v1/live-call/session",
+            json={"legacy_id": self.legacy.legacy_id,
+                  "conversation_id": matching.conversation_id},
+        )
+        self.assertEqual(attached.status_code, 201)
+        self.assertEqual(attached.json()["conversation_id"], matching.conversation_id)
+        stored_session = live_call_sessions.authorize_user(
+            attached.json()["session_id"], self.owner.user_id,
+        )
+        self.assertIn("Tell me about your sibling", stored_session.conversation_context)
+        self.assertIn("My sibling is the supported person", stored_session.conversation_context)
+
+        wrong_legacy = ConversationCRUD.create_conversation(
+            self.db, self.owner.user_id, legacy_id=self.other_legacy.legacy_id,
+        )
+        self.assertEqual(self.client.post(
+            "/api/v1/live-call/session",
+            json={"legacy_id": self.legacy.legacy_id,
+                  "conversation_id": wrong_legacy.conversation_id},
+        ).status_code, 409)
+        wrong_user = ConversationCRUD.create_conversation(
+            self.db, self.other.user_id, legacy_id=self.legacy.legacy_id,
+        )
+        self.assertEqual(self.client.post(
+            "/api/v1/live-call/session",
+            json={"legacy_id": self.legacy.legacy_id,
+                  "conversation_id": wrong_user.conversation_id},
+        ).status_code, 404)
+
+    def test_live_call_message_source_keys_are_durable_and_idempotent(self):
+        conversation = ConversationCRUD.create_conversation(
+            self.db, self.owner.user_id, legacy_id=self.legacy.legacy_id,
+        )
+        first, created = MessageCRUD.create_idempotent_source_message(
+            self.db, conversation, role=MessageRole.USER, content="Same words",
+            source_session_id="00000000-0000-0000-0000-000000000001",
+            source_event_id="turn:1",
+        )
+        duplicate, duplicate_created = MessageCRUD.create_idempotent_source_message(
+            self.db, conversation, role=MessageRole.USER, content="Same words",
+            source_session_id="00000000-0000-0000-0000-000000000001",
+            source_event_id="turn:1",
+        )
+        second, second_created = MessageCRUD.create_idempotent_source_message(
+            self.db, conversation, role=MessageRole.USER, content="Same words",
+            source_session_id="00000000-0000-0000-0000-000000000001",
+            source_event_id="turn:2",
+        )
+        other_session, other_created = MessageCRUD.create_idempotent_source_message(
+            self.db, conversation, role=MessageRole.USER, content="Same words",
+            source_session_id="00000000-0000-0000-0000-000000000002",
+            source_event_id="turn:1",
+        )
+        chat = Message(conversation_id=conversation.conversation_id,
+                       role=MessageRole.USER, content="Same words")
+        self.db.add(chat)
+        self.db.commit()
+        self.assertEqual(first.message_id, duplicate.message_id)
+        self.assertEqual((created, duplicate_created, second_created, other_created),
+                         (True, False, True, True))
+        self.assertEqual(len({first.message_id, second.message_id,
+                              other_session.message_id, chat.message_id}), 4)
 
     def test_unauthenticated_and_cross_legacy_creation_are_rejected(self):
         app.dependency_overrides.pop(get_current_user)
@@ -307,7 +392,7 @@ class LiveCallFoundationTests(unittest.TestCase):
             self.db, self.owner.user_id, voice="simran",
             conversation_style="gentle", response_length="short",
         )
-        session = self.create_session()
+        session = self.create_session(engine="cascade")
         self.assertEqual(session["effective_voice"], "simran")
         self.assertEqual(session["conversation_style"], "gentle")
         self.assertEqual(session["response_length"], "short")
@@ -393,6 +478,8 @@ class LiveCallFoundationTests(unittest.TestCase):
         enabled = SimpleNamespace(
             live_call_realtime_enabled=True,
             live_call_external_voice_realtime_enabled=True,
+            openai_realtime_model="gpt-realtime-test",
+            openai_realtime_vad_threshold=0.60,
         )
         for voice in ("simran", "shubh"):
             plan = choose_live_call_delivery(enabled, voice, "auto")
@@ -535,7 +622,8 @@ class LiveCallFoundationTests(unittest.TestCase):
         self.assertIsInstance(payload["instructions"], str)
         self.assertIn("Aaji", payload["instructions"])
         self.assertIn("speak from Aaji's first-person perspective", payload["instructions"])
-        self.assertIn("you are not literally Aaji", payload["instructions"])
+        self.assertIn("authoritative active Legacy", payload["instructions"])
+        self.assertIn("Never identify as ChatGPT", payload["instructions"])
         self.assertIn("Keep other people distinct", payload["instructions"])
         self.assertIn("Persona affects grammatical perspective only", payload["instructions"])
         self.assertNotIn("Companion for Aaji", payload["instructions"])
@@ -545,14 +633,39 @@ class LiveCallFoundationTests(unittest.TestCase):
         vad = payload["audio"]["input"]["turn_detection"]
         self.assertEqual(vad, {
             "type": "server_vad", "threshold": 0.60, "prefix_padding_ms": 400,
-            "silence_duration_ms": 1400, "create_response": True,
+            "silence_duration_ms": 1400, "create_response": False,
             "interrupt_response": False,
         })
         self.assertEqual(payload["audio"]["output"]["voice"], "marin")
-        self.assertEqual(payload["tool_choice"], "required")
+        self.assertEqual(payload["tool_choice"], "auto")
+        for fragment in (
+            "ordinary social conversation", "general-knowledge questions",
+            "answer directly", "without a tool",
+        ):
+            self.assertIn(fragment, payload["instructions"])
+        self.assertIn("answer directly without a tool", payload["instructions"])
 
         captured = {}
         class CapturingChatService:
+            def prepare_conversation_live_call_input(self, _db, **kwargs):
+                captured.update(kwargs)
+                identity_query = "full name" in kwargs["user_message"].casefold()
+                return SimpleNamespace(
+                    messages=(), memory_ids=(() if identity_query else (1,)),
+                    identity_direct=identity_query,
+                    identity_evidence=(({
+                        "fact_type": "full_name", "value": "Aaji", "relationship": None,
+                        "conflicting": False, "uncertainty_note": None,
+                    },) if identity_query else ()),
+                    conflict_count=0, identity_count=int(identity_query),
+                    has_uncertainty=False, resolved_entities=(),
+                    memory_evidence=(() if identity_query else ({
+                        "memory_id": 1, "summary": "A Goa trip",
+                    },)),
+                    query_intent=("identity" if identity_query else "trip"),
+                    matched_candidate_count=1,
+                    grounding_chars=20, identity_context_chars=0,
+                )
             def prepare_live_call_input(self, _db, **kwargs):
                 captured.update(kwargs)
                 return SimpleNamespace(
@@ -570,15 +683,18 @@ class LiveCallFoundationTests(unittest.TestCase):
                     SimpleNamespace(canonical_value="Aaji"),
                 )
 
-        result = RealtimeToolService(CapturingChatService()).execute(
-            self.db, session, "retrieve_legacy_memory_context", {"query": "Goa"}
+        tools = RealtimeToolService(CapturingChatService())
+        tools.route_turn(session, 1, "Tell me about your trip to Goa")
+        result = tools.execute(
+            self.db, session, "retrieve_legacy_memory_context", {}, turn_id=1,
         )
-        self.assertEqual(captured["legacy_id"], aaji.legacy_id)
-        self.assertEqual(captured["legacy_name"], "Aaji")
-        self.assertEqual(captured["relationship"], "grandmother")
+        self.assertEqual(captured["conversation"].legacy_id, aaji.legacy_id)
+        self.assertEqual(captured["conversation"].user_id, self.owner.user_id)
+        self.assertEqual(captured["user_message"], "Tell me about your trip to Goa")
         self.assertEqual(result["status"], "supported")
-        identity = RealtimeToolService(CapturingChatService()).execute(
-            self.db, session, "get_legacy_identity_context", {"query": "Who are you?"}
+        tools.route_turn(session, 2, "What is your full name?")
+        identity = tools.execute(
+            self.db, session, "get_legacy_identity_context", {}, turn_id=2,
         )
         self.assertEqual(identity["identity_count"], 1)
         self.assertEqual(identity["identity"][0]["value"], "Aaji")
@@ -616,7 +732,7 @@ class LiveCallFoundationTests(unittest.TestCase):
             ).json()
             response = self.client.post(
                 f"/api/v1/live-call/realtime/{session['session_id']}/tool",
-                json={"call_id": "slow-call", "name": "get_legacy_identity_context", "arguments": {}},
+                json={"turn_id": 1, "call_id": "slow-call", "name": "get_legacy_identity_context", "arguments": {}},
             )
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["result"], {"status": "error", "uncertain": True})
@@ -630,28 +746,288 @@ class LiveCallFoundationTests(unittest.TestCase):
             live_call_realtime_enabled=True,
             default_standard_voice_profile="standard_female",
         )
-        fake_tools = SimpleNamespace(execute=lambda db, session, name, arguments, call_id=None: {
-            "status": "grounded",
-            "legacy": {"name": session.legacy_name, "relationship": session.relationship},
-        })
+        fake_tools = SimpleNamespace(
+            route_turn=lambda session, turn_id, text: {
+                "route": "identity", "tool_name": "get_legacy_identity_context",
+            },
+            execute=lambda db, session, name, arguments, call_id=None, turn_id=None: {
+                "status": "grounded",
+                "legacy": {"name": session.legacy_name, "relationship": session.relationship},
+            },
+            accepts_assistant_turn=lambda session, turn_id: turn_id == 1,
+        )
         app.dependency_overrides[get_realtime_tool_service] = lambda: fake_tools
         with patch("app.api.v1.live_call.get_settings", return_value=settings):
             session = self.client.post(
                 "/api/v1/live-call/session",
                 json={"legacy_id": self.legacy.legacy_id, "engine": "realtime"},
             ).json()
+        routed = self.client.post(
+            f"/api/v1/live-call/realtime/{session['session_id']}/route",
+            json={"turn_id": 1, "text": "Who was your husband?"},
+        )
+        self.assertEqual(routed.status_code, 200)
+        self.assertEqual(routed.json(), {
+            "route": "identity", "tool_name": "get_legacy_identity_context",
+            "response_language": "english",
+        })
+        self.assertEqual(self.client.post(
+            f"/api/v1/live-call/realtime/{session['session_id']}/route",
+            json={"turn_id": 2, "text": "Who was your husband?", "legacy_id": 999},
+        ).status_code, 422)
         response = self.client.post(
             f"/api/v1/live-call/realtime/{session['session_id']}/tool",
-            json={"call_id": "call-1", "name": "get_legacy_identity_context", "arguments": {}},
+            json={"turn_id": 1, "call_id": "call-1", "name": "get_legacy_identity_context", "arguments": {}},
         )
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["result"]["legacy"]["name"], "Granny")
+        for _ in range(2):
+            persisted = self.client.post(
+                f"/api/v1/live-call/realtime/{session['session_id']}/assistant-turn",
+                json={"turn_id": 1, "response_id": "visible-response-1",
+                      "text": "My husband is the supported person."},
+            )
+            self.assertEqual(persisted.status_code, 202)
+        messages = (
+            self.db.query(Message)
+            .filter(Message.conversation_id == session["conversation_id"])
+            .order_by(Message.message_id)
+            .all()
+        )
+        self.assertEqual([(item.role.value, item.content) for item in messages], [
+            ("user", "Who was your husband?"),
+            ("assistant", "My husband is the supported person."),
+        ])
         app.dependency_overrides[get_current_user] = lambda: self.other
+        self.assertEqual(self.client.post(
+            f"/api/v1/live-call/realtime/{session['session_id']}/route",
+            json={"turn_id": 2, "text": "Who was your husband?"},
+        ).status_code, 404)
         denied = self.client.post(
             f"/api/v1/live-call/realtime/{session['session_id']}/tool",
-            json={"call_id": "call-2", "name": "get_legacy_identity_context", "arguments": {}},
+            json={"turn_id": 1, "call_id": "call-2", "name": "get_legacy_identity_context", "arguments": {}},
         )
         self.assertEqual(denied.status_code, 404)
+
+    def test_actual_http_family_and_self_identity_use_shared_profile_and_validated_renderer(self):
+        self.legacy.display_name = "Anjali"
+        for title, summary, claims in (
+            ("Full name", "My full name is Anjali.", [{
+                "fact_type": "full_name", "value": "Anjali", "confidence": 1,
+            }]),
+            ("Family", "My husband is Mohan and my younger brother is Aditya.", [{
+                "fact_type": "spouse_name", "value": "Mohan",
+                "relationship": "husband", "confidence": 1,
+            }, {
+                "fact_type": "sibling_name", "value": "Aditya",
+                "relationship": "younger brother", "confidence": 1,
+            }]),
+        ):
+            memory = Memory(
+                legacy_id=self.legacy.legacy_id, memory_type=MemoryType.ATOMIC,
+                category="identity", title=title, summary=summary,
+                details={"identity_facts": claims},
+                review_status=MemoryReviewStatus.APPROVED,
+                extraction_confidence=Decimal("1"),
+            )
+            self.db.add(memory)
+            self.db.flush()
+            self.db.add(MemoryProvenance(
+                memory_id=memory.memory_id, source_type="conversation",
+                excerpt=summary, speaker="user",
+            ))
+            self.db.flush()
+            IdentityFactProjectionService().project_memory(self.db, memory)
+        self.db.commit()
+        conversation = ConversationCRUD.create_conversation(
+            self.db, self.owner.user_id, legacy_id=self.legacy.legacy_id,
+        )
+        stored_session = live_call_sessions.create(
+            user_id=self.owner.user_id, legacy_id=self.legacy.legacy_id,
+            legacy_name="Anjali", relationship=self.legacy.relationship,
+            effective_voice="cedar", conversation_id=conversation.conversation_id,
+            engine="realtime", speech_renderer="realtime_native",
+            realtime_capable=True,
+        )
+        session = {"session_id": stored_session.session_id}
+
+        class InvalidPersonaAI:
+            async def generate_response(self, _messages, **_kwargs):
+                return "I don't have a family in the human sense; I'm just an AI."
+
+        chat = ChatService(SimpleNamespace(), ContextBuilder(12))
+        tools = RealtimeToolService(chat)
+        app.dependency_overrides[get_realtime_tool_service] = lambda: tools
+        app.dependency_overrides[get_grounded_answer_service] = lambda: GroundedAnswerService(
+            InvalidPersonaAI()
+        )
+        for turn_id, query, expected in (
+            (1, "Who else is there in your family?", ("Mohan", "Aditya")),
+            (2, "You are Anjali, right?", ("Anjali",)),
+        ):
+            routed = self.client.post(
+                f"/api/v1/live-call/realtime/{session['session_id']}/route",
+                json={"turn_id": turn_id, "text": query},
+            )
+            self.assertEqual(routed.status_code, 200)
+            self.assertEqual(routed.json()["tool_name"], "retrieve_legacy_memory_context")
+            grounded = self.client.post(
+                f"/api/v1/live-call/realtime/{session['session_id']}/tool",
+                json={"turn_id": turn_id, "call_id": f"call-{turn_id}",
+                      "name": routed.json()["tool_name"], "arguments": {"query": query}},
+            )
+            self.assertEqual(grounded.status_code, 200)
+            result = grounded.json()["result"]
+            self.assertTrue(result["profile_engine_invoked"])
+            self.assertGreater(result["profile_fact_count"], 0)
+            self.assertEqual(result["retrieval_status"], "ok")
+            self.assertEqual(result["answer_plan"]["status"], "supported")
+            self.assertTrue(all(value in result["validated_text"] for value in expected))
+            self.assertNotIn("just an AI", result["validated_text"])
+            if turn_id == 1:
+                family_text = result["validated_text"]
+        late = self.client.post(
+            f"/api/v1/live-call/realtime/{session['session_id']}/assistant-turn",
+            json={"turn_id": 1, "response_id": "validated-call-1", "text": family_text,
+                  "response_owner": "validated_personal", "playback_completed": True},
+        )
+        duplicate = self.client.post(
+            f"/api/v1/live-call/realtime/{session['session_id']}/assistant-turn",
+            json={"turn_id": 1, "response_id": "validated-call-1", "text": family_text,
+                  "response_owner": "validated_personal", "playback_completed": True},
+        )
+        conflict = self.client.post(
+            f"/api/v1/live-call/realtime/{session['session_id']}/assistant-turn",
+            json={"turn_id": 1, "response_id": "native-conflict",
+                  "text": "I don't have a family.",
+                  "response_owner": "native_realtime", "playback_completed": True},
+        )
+        self.assertEqual((late.status_code, duplicate.status_code, conflict.status_code),
+                         (202, 202, 202))
+        self.assertEqual(late.json()["status"], "created")
+        self.assertEqual(duplicate.json()["status"], "duplicate")
+        self.assertEqual(conflict.json()["status"], "conflict")
+        persisted = self.db.query(Message).filter(
+            Message.conversation_id == conversation.conversation_id,
+            Message.role == MessageRole.ASSISTANT,
+        ).all()
+        self.assertEqual([message.content for message in persisted], [family_text])
+
+    def test_realtime_route_endpoint_separates_general_identity_and_family_turns(self):
+        UserCRUD.set_conversation_preferences(
+            self.db, self.owner.user_id, voice="cedar",
+            conversation_style="natural", response_length="balanced",
+        )
+        settings = SimpleNamespace(
+            live_call_realtime_enabled=True,
+            default_standard_voice_profile="standard_female",
+        )
+        with patch("app.api.v1.live_call.get_settings", return_value=settings):
+            session = self.client.post(
+                "/api/v1/live-call/session",
+                json={"legacy_id": self.legacy.legacy_id, "engine": "realtime"},
+            ).json()
+        endpoint = f"/api/v1/live-call/realtime/{session['session_id']}/route"
+        cases = (
+            (1, "What is the capital of Germany?", {"route": "direct", "tool_name": None,
+                                                     "response_language": "english"}),
+            (2, "Who was your husband?", {
+                "route": "memory", "tool_name": "retrieve_legacy_memory_context",
+                "response_language": "english",
+            }),
+            (3, "Tell me about your family", {
+                "route": "memory", "tool_name": "retrieve_legacy_memory_context",
+                "response_language": "english",
+            }),
+        )
+        for turn_id, query, expected in cases:
+            response = self.client.post(endpoint, json={"turn_id": turn_id, "text": query})
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json(), expected)
+
+    def test_normalization_provider_failure_never_turns_route_into_500(self):
+        conversation = ConversationCRUD.create_conversation(
+            self.db, self.owner.user_id, legacy_id=self.legacy.legacy_id,
+        )
+        session = live_call_sessions.create(
+            user_id=self.owner.user_id, legacy_id=self.legacy.legacy_id,
+            legacy_name="Granny", relationship=self.legacy.relationship,
+            effective_voice="cedar", conversation_id=conversation.conversation_id,
+            engine="realtime", speech_renderer="realtime_native", realtime_capable=True,
+        )
+
+        class FailingNormalizerAI:
+            async def generate_response(self, _messages, **_options):
+                raise AIProviderError("invalid_json_schema")
+
+        tools = RealtimeToolService(ChatService(SimpleNamespace(), ContextBuilder(12)))
+        app.dependency_overrides[get_realtime_tool_service] = lambda: tools
+        app.dependency_overrides[get_ai_service] = FailingNormalizerAI
+        response = self.client.post(
+            f"/api/v1/live-call/realtime/{session.session_id}/route",
+            json={"turn_id": 1, "text": "malasang tu kon ahe"},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["response_language"], "english")
+
+    def test_english_and_marathi_self_identity_have_identical_grounding_ownership(self):
+        conversation = ConversationCRUD.create_conversation(
+            self.db, self.owner.user_id, legacy_id=self.legacy.legacy_id,
+        )
+        session = live_call_sessions.create(
+            user_id=self.owner.user_id, legacy_id=self.legacy.legacy_id,
+            legacy_name="Anjali Deshmukh", relationship=self.legacy.relationship,
+            effective_voice="cedar", conversation_id=conversation.conversation_id,
+            engine="realtime", speech_renderer="realtime_native", realtime_capable=True,
+        )
+
+        class MarathiIdentityAI:
+            async def generate_response(self, _messages, **_options):
+                return json.dumps({
+                    "detected_language": "marathi", "response_language": "marathi",
+                    "normalized_english": "What is your name?", "code_switched": False,
+                    "speech_act": "question", "substantive_intent": "personal_identity",
+                    "translation_confidence": 0.99,
+                })
+
+        tools = RealtimeToolService(ChatService(SimpleNamespace(), ContextBuilder(12)))
+        app.dependency_overrides[get_realtime_tool_service] = lambda: tools
+        app.dependency_overrides[get_ai_service] = MarathiIdentityAI
+        endpoint = f"/api/v1/live-call/realtime/{session.session_id}/route"
+        english = self.client.post(endpoint, json={"turn_id": 1, "text": "What's your name?"})
+        marathi = self.client.post(endpoint, json={"turn_id": 2, "text": "तुझं नाव काय आहे?"})
+        self.assertEqual((english.status_code, marathi.status_code), (200, 200))
+        self.assertEqual(
+            {key: english.json()[key] for key in ("route", "tool_name")},
+            {key: marathi.json()[key] for key in ("route", "tool_name")},
+        )
+        self.assertEqual(english.json()["response_language"], "english")
+        self.assertEqual(marathi.json(), {
+            "route": "memory", "tool_name": "retrieve_legacy_memory_context",
+            "response_language": "marathi",
+        })
+        state = tools._state(session.session_id)
+        self.assertEqual(state.turns[1].classification, "personal")
+        self.assertEqual(state.turns[2].classification, "personal")
+        self.assertEqual(state.turns[1].understanding.subject_type, "self")
+        self.assertEqual(state.turns[2].understanding.subject_type, "self")
+
+    def test_active_legacy_blocks_native_implementation_identity_persistence(self):
+        conversation = ConversationCRUD.create_conversation(
+            self.db, self.owner.user_id, legacy_id=self.legacy.legacy_id,
+        )
+        session = live_call_sessions.create(
+            user_id=self.owner.user_id, legacy_id=self.legacy.legacy_id,
+            legacy_name="Anjali Deshmukh", relationship=self.legacy.relationship,
+            effective_voice="cedar", conversation_id=conversation.conversation_id,
+            engine="realtime", speech_renderer="realtime_native", realtime_capable=True,
+        )
+        tools = RealtimeToolService(ChatService(SimpleNamespace(), ContextBuilder(12)))
+        tools.route_turn(session, 1, "What is a mango?")
+        self.assertEqual(tools.assistant_turn_decision(
+            session, 1, "native-1", "You can call me ChatGPT. I'm an AI voice companion.",
+            response_owner="native_realtime", playback_completed=True,
+        ), "conflict")
 
     def test_realtime_session_operations_are_owned_ended_and_argument_scoped(self):
         UserCRUD.set_conversation_preferences(
@@ -677,25 +1053,30 @@ class LiveCallFoundationTests(unittest.TestCase):
             ).status_code, 404)
             self.assertEqual(self.client.post(
                 f"/api/v1/live-call/realtime/{session['session_id']}/tool",
-                json={"call_id": "other", "name": "retrieve_legacy_memory_context",
+                json={"turn_id": 1, "call_id": "other", "name": "retrieve_legacy_memory_context",
                       "arguments": {"query": "family"}},
             ).status_code, 404)
 
             app.dependency_overrides[get_current_user] = lambda: self.owner
+            routed = self.client.post(
+                f"/api/v1/live-call/realtime/{session['session_id']}/route",
+                json={"turn_id": 1, "text": "Tell me about your family"},
+            )
+            self.assertEqual(routed.status_code, 200)
             override = self.client.post(
                 f"/api/v1/live-call/realtime/{session['session_id']}/tool",
-                json={"call_id": "override", "name": "retrieve_legacy_memory_context",
+                json={"turn_id": 1, "call_id": "override", "name": "retrieve_legacy_memory_context",
                       "arguments": {"query": "family", "legacy_id": self.other_legacy.legacy_id}},
             )
             self.assertEqual(override.status_code, 200)
-            self.assertEqual(override.json()["result"]["status"], "error")
+            self.assertIn(override.json()["result"]["status"], {"supported", "unsupported", "conflicted"})
             self.assertEqual(self.client.delete(
                 f"/api/v1/live-call/session/{session['session_id']}"
             ).status_code, 200)
             for endpoint in ("bootstrap", "tool"):
                 response = self.client.post(
                     f"/api/v1/live-call/realtime/{session['session_id']}/{endpoint}",
-                    json=({"call_id": "ended", "name": "retrieve_legacy_memory_context",
+                    json=({"turn_id": 2, "call_id": "ended", "name": "retrieve_legacy_memory_context",
                            "arguments": {"query": "family"}} if endpoint == "tool" else None),
                 )
                 self.assertEqual(response.status_code, 404)
@@ -728,6 +1109,9 @@ class LiveCallFoundationTests(unittest.TestCase):
                     resolved_entities=("Meenakshi",),
                     memory_evidence=({"memory_id": 11, "title": "Goa", "summary": "Trip",
                         "uncertainty": "possibly 1986", "conflict": False},),
+                    identity_evidence=(), query_intent="trip",
+                    matched_candidate_count=1, grounding_chars=20,
+                    identity_context_chars=0,
                 )
 
         session = SimpleNamespace(
@@ -735,22 +1119,28 @@ class LiveCallFoundationTests(unittest.TestCase):
             legacy_name="Aaji", relationship="grandmother",
         )
         service = RealtimeToolService(MemoryChat())
+        service.route_turn(session, 1, "Tell me about your trip to Goa")
         first = service.execute(
-            self.db, session, "retrieve_legacy_memory_context", {"query": "Tell me about Goa"},
+            self.db, session, "retrieve_legacy_memory_context", {},
+            call_id="goa-call", turn_id=1,
         )
         duplicate = service.execute(
-            self.db, session, "retrieve_legacy_memory_context", {"query": "Tell me about Goa"},
+            self.db, session, "retrieve_legacy_memory_context", {},
+            call_id="goa-call", turn_id=1,
         )
+        service.route_turn(session, 2, "What happened after that?")
         followup = service.execute(
-            self.db, session, "retrieve_legacy_memory_context", {"query": "What happened after that?"},
+            self.db, session, "retrieve_legacy_memory_context", {},
+            call_id="followup-call", turn_id=2,
         )
         self.assertEqual(len(calls), 2)
-        self.assertEqual(first, duplicate)
+        self.assertEqual(duplicate, {"status": "cancelled", "uncertain": True})
         self.assertEqual(first["status"], "supported")
         self.assertTrue(first["uncertain"])
-        self.assertNotIn("memory_id", first["memories"][0])
+        self.assertEqual(first["memories"][0]["memory_id"], 11)
+        self.assertEqual(first["selected_memory_ids"], [11])
         self.assertEqual(followup["followup_context"], "active")
-        self.assertEqual(calls[1]["history"][0].content, "Tell me about Goa")
+        self.assertEqual(calls[1]["history"][0].content, "Tell me about your trip to Goa")
         self.assertEqual(calls[1]["user_id"], 7)
         self.assertEqual(calls[1]["legacy_id"], 9)
 
@@ -805,7 +1195,8 @@ class LiveCallFoundationTests(unittest.TestCase):
                          ["Rohan Deshmukh", "Aditya Deshmukh"])
         self.assertEqual([item["title"] for item in family["memories"]],
                          ["My husband", "My brother"])
-        self.assertTrue(all("memory_id" not in item for item in family["memories"]))
+        self.assertEqual(family["selected_memory_ids"], [1, 2])
+        self.assertEqual([item["memory_id"] for item in family["memories"]], [1, 2])
 
         followup = service.execute(
             self.db, session, "retrieve_legacy_memory_context", {"query": "Who else?"},
@@ -828,9 +1219,136 @@ class LiveCallFoundationTests(unittest.TestCase):
         )
         self.assertEqual(precise["memories"], trips["memories"])
 
+    def test_realtime_pet_turn_reuses_canonical_chat_retrieval_and_followup(self):
+        calls = []
+
+        class PetChat:
+            def prepare_live_call_input(self, _db, **kwargs):
+                calls.append(kwargs)
+                return SimpleNamespace(
+                    messages=(), memory_ids=(71,), identity_direct=False,
+                    identity_count=0, identity_evidence=(), conflict_count=0,
+                    has_uncertainty=False, resolved_entities=("Bruno",),
+                    memory_evidence=({
+                        "memory_id": 71, "title": "Our Labrador Bruno",
+                        "summary": "My dog's name was Bruno.",
+                        "uncertainty": None, "conflict": False,
+                        "subject": "self", "subjects": ["self"],
+                    },),
+                    query_intent="pets", matched_candidate_count=1,
+                    grounding_chars=40, identity_context_chars=0,
+                )
+
+        session = SimpleNamespace(
+            session_id="pet-parity", user_id=7, legacy_id=9,
+            legacy_name="Aaji", relationship="grandmother",
+        )
+        service = RealtimeToolService(PetChat())
+        self.assertEqual(service.route_turn(session, 1, "What was your dog's name?"), {
+            "route": "memory", "tool_name": "retrieve_legacy_memory_context",
+        })
+        first = service.execute(
+            self.db, session, "retrieve_legacy_memory_context", {},
+            call_id="pet-1", turn_id=1,
+        )
+        self.assertEqual(first["status"], "supported")
+        self.assertEqual(first["memories"], [{
+            "memory_id": 71, "title": "Our Labrador Bruno", "summary": "My dog's name was Bruno.",
+            "uncertainty": None, "conflict": False,
+            "subject": "self", "subjects": ["self"],
+            "epistemic_status": "supported",
+        }])
+        self.assertNotIn("breed", str(first).casefold())
+
+        self.assertEqual(
+            service.route_turn(session, 2, "What else do you remember about him?"),
+            {"route": "followup", "tool_name": "retrieve_legacy_memory_context"},
+        )
+        followup = service.execute(
+            self.db, session, "retrieve_legacy_memory_context", {},
+            call_id="pet-2", turn_id=2,
+        )
+        self.assertEqual(followup["followup_context"], "active")
+        self.assertEqual(calls[1]["history"][0].content, "What was your dog's name?")
+        self.assertEqual(len(calls), 2)
+
+    def test_realtime_sequential_subject_switch_replaces_anchor_and_preserves_attribute_followups(self):
+        calls = []
+
+        class SequentialChat:
+            def prepare_live_call_input(self, _db, **kwargs):
+                calls.append(kwargs)
+                context = " ".join(
+                    [item.content for item in kwargs["history"]]
+                    + [kwargs["user_message"]]
+                ).casefold()
+                if "dog" in context:
+                    ids, entities, summaries = (18, 22), ("Bruno", "Luffy"), (
+                        "Bruno is a Labrador.", "Luffy is a Labrador.",
+                    )
+                elif "tv" in context:
+                    ids, entities, summaries = (25, 27, 29), (), (
+                        "We have an 85-inch TV at home.",) * 3
+                else:
+                    ids, entities, summaries = (15, 18), ("Mohan", "Bruno"), (
+                        "My husband is Mohan.", "Bruno is a Labrador.",
+                    )
+                evidence = tuple({
+                    "memory_id": memory_id, "summary": summary,
+                    "uncertainty": None, "conflict": False,
+                    "epistemic_status": "supported",
+                } for memory_id, summary in zip(ids, summaries, strict=True))
+                return SimpleNamespace(
+                    memory_ids=ids, identity_direct=False, identity_evidence=(),
+                    identity_count=0, conflict_count=0, has_uncertainty=False,
+                    resolved_entities=entities, memory_evidence=evidence,
+                    query_intent="family", matched_candidate_count=len(ids),
+                    grounding_chars=40, identity_context_chars=0,
+                    query_broad=True, fact_confidence="supported", coverage="partial",
+                )
+
+        session = SimpleNamespace(
+            session_id="sequential-topics", user_id=1, legacy_id=2,
+            legacy_name="Aaji", relationship="grandmother",
+        )
+        service = RealtimeToolService(SequentialChat())
+        sequence = (
+            ("Tell me about our family", (15, 18)),
+            ("And what about the TV?", (25, 27, 29)),
+            ("What size is it?", (25, 27, 29)),
+            ("That's 85 inch, not 85 inches.", (25, 27, 29)),
+            ("Did I ask you that dumbass?", (25, 27, 29)),
+            ("I asked you about the TV.", (25, 27, 29)),
+            ("And our dogs?", (18, 22)),
+            ("Their names?", (18, 22)),
+        )
+        for turn_id, (query, expected_ids) in enumerate(sequence, 1):
+            route = service.route_turn(session, turn_id, query)
+            self.assertIn(route["route"], {"memory", "followup"})
+            result = service.execute(
+                self.db, session, route["tool_name"], {},
+                call_id=f"sequence-{turn_id}", turn_id=turn_id,
+            )
+            self.assertEqual(tuple(result["selected_memory_ids"]), expected_ids)
+            self.assertEqual(result["fact_confidence"], "supported")
+            self.assertFalse(result["uncertain"])
+        self.assertEqual(calls[2]["history"][0].content, "And what about the TV?")
+        self.assertEqual(calls[3]["user_message"], "tv")
+        self.assertEqual(calls[3]["history"][0].content, "And what about the TV?")
+        self.assertEqual(calls[4]["user_message"], "tv")
+        self.assertEqual(calls[4]["history"][0].content, "And what about the TV?")
+        self.assertEqual(calls[5]["user_message"], "tv")
+        self.assertEqual(calls[7]["history"][0].content, "And our dogs?")
+        self.assertFalse(service.should_learn_user_turn(session, 4))
+        self.assertFalse(service.should_learn_user_turn(session, 5))
+        self.assertFalse(service.should_learn_user_turn(session, 6))
+
     def test_realtime_tool_contract_routes_broad_biography_through_shared_chat_memory(self):
         tool_descriptions = {tool["name"]: tool["description"] for tool in REALTIME_TOOLS}
-        self.assertIn("direct single identity fact", tool_descriptions["get_legacy_identity_context"])
+        identity_description = tool_descriptions["get_legacy_identity_context"].casefold()
+        self.assertIn("direct identity fact", identity_description)
+        self.assertIn("broad family", identity_description)
+        self.assertIn("retrieve_legacy_memory_context", identity_description)
         memory_description = tool_descriptions["retrieve_legacy_memory_context"]
         for topic in ("family", "life", "childhood", "trip"):
             self.assertIn(topic, memory_description)
@@ -838,8 +1356,9 @@ class LiveCallFoundationTests(unittest.TestCase):
             legacy_name="Aaji", relationship="grandmother",
             conversation_style="natural", response_length="balanced",
         ))
-        self.assertIn("Use the identity tool only for a direct single identity fact", instructions)
-        self.assertIn("especially broad family, life, childhood, or trip", instructions)
+        self.assertIn("For every personal turn", instructions)
+        self.assertIn("call retrieve_legacy_memory_context", instructions)
+        self.assertIn("identity facts, memories, or both", instructions)
 
     def test_realtime_memory_routing_is_deterministic_and_overrides_model_choice(self):
         service = RealtimeToolService(SimpleNamespace())
@@ -848,16 +1367,42 @@ class LiveCallFoundationTests(unittest.TestCase):
         trip_routes = [service._route("Tell me about your trips", empty) for _ in range(20)]
         self.assertEqual(family_routes, ["broad_memory"] * 20)
         self.assertEqual(trip_routes, ["broad_memory"] * 20)
-        self.assertEqual(service._route("Tell me about the Kashmir trip", empty), "episode")
-        self.assertEqual(service._route("What happened in Goa?", empty), "episode")
-        self.assertEqual(service._route("Who is your husband?", empty), "identity")
-        self.assertEqual(service._route("Who is Meenakshi?", empty), "identity")
+        self.assertEqual(service._route("Tell me about the Kashmir trip", empty), "broad_memory")
+        self.assertEqual(service._route("What happened in Goa?", empty), "general")
+        self.assertEqual(service._route("Who is your husband?", empty), "broad_memory")
+        self.assertEqual(service._route("Who is your brother?", empty), "broad_memory")
         self.assertEqual(service._route("How are you?", empty), "social")
-        self.assertEqual(service._route("I passed my exam!", empty), "social")
+        self.assertEqual(service._route("I passed my exam!", empty), "general")
+        self.assertEqual(service._route("What is the capital of Germany?", empty), "general")
+        for query in (
+            "What is capitalism?", "Tell me about hospital care.",
+            "What does capitulate mean?",
+        ):
+            self.assertEqual(service._route(query, empty), "general")
+        self.assertEqual(service._route("Who was your pita?", empty), "broad_memory")
+        for query in (
+            "What was your dog's name?", "Tell me about your dog.",
+            "What pets did you have?", "What was your cat's name?",
+        ):
+            self.assertEqual(service._route(query, empty), "broad_memory")
+        self.assertEqual(service._route("What is a Labrador?", empty), "general")
+        self.assertEqual(service._route("What food can dogs eat?", empty), "general")
+        self.assertEqual(service._route("What was your brother's name?", empty), "broad_memory")
+        self.assertEqual(service._route("Tumhare pati ka naam kya tha?", empty), "broad_memory")
+        self.assertEqual(service._route("Tell me a story about your childhood", empty), "broad_memory")
         family_state = RealtimeMemoryState(last_query="Tell me about your family")
         trip_state = RealtimeMemoryState(last_query="Tell me about your trips")
         self.assertEqual(service._route("Who else?", family_state), "followup")
         self.assertEqual(service._route("Who went with you?", trip_state), "followup")
+        for query in ("Our TV", "The TV", "What about the TV?", "And our car?", "The garden"):
+            self.assertEqual(service._route(query, family_state), "broad_memory")
+        for closing in ("Perfect, bye.", "Okay thanks.", "Good night."):
+            self.assertEqual(service._route(closing, family_state), "social")
+        for mixed in (
+            "Thanks, tell me about our dogs.", "Okay, and the TV?",
+            "Bye, what time was our flight?",
+        ):
+            self.assertIn(service._route(mixed, family_state), {"broad_memory", "followup"})
 
         calls = []
         class RoutedChat:
@@ -891,8 +1436,8 @@ class LiveCallFoundationTests(unittest.TestCase):
         self.assertEqual(family["status"], "supported")
         husband = routed.execute(self.db, session, "retrieve_legacy_memory_context",
                                  {"query": "Who is your husband?"}, "husband-call")
-        self.assertEqual(calls[-1][0], "identity")
-        self.assertEqual(husband["identity"][0]["value"], "Rohan")
+        self.assertEqual(calls[-1][0], "memory")
+        self.assertEqual(husband["status"], "supported")
         before_social = len(calls)
         social = routed.execute(self.db, session, "retrieve_legacy_memory_context",
                                 {"query": "How are you?"}, "social-call")
@@ -902,24 +1447,181 @@ class LiveCallFoundationTests(unittest.TestCase):
         self.assertEqual(unsupported["status"], "unsupported")
         call_count = len(calls)
         duplicate = routed.execute(self.db, session, "get_legacy_identity_context",
-                                   {"query": "Tell me about unknown trips"}, "unknown-call")
+                                    {"query": "Tell me about unknown trips"}, "unknown-call")
         self.assertEqual(duplicate, unsupported)
         self.assertEqual(len(calls), call_count)
+
+        routed.route_turn(session, 1, "Who is your husband?")
+        authoritative = routed.execute(
+            self.db, session, "retrieve_legacy_memory_context",
+            {"query": "Describe a mango"}, "authoritative-call", turn_id=1,
+        )
+        self.assertEqual(calls[-1], ("memory", "Who is your husband?"))
+        self.assertEqual(authoritative["status"], "supported")
+
+    def test_realtime_route_turn_is_bounded_idempotent_and_followup_aware(self):
+        service = RealtimeToolService(SimpleNamespace())
+        session = SimpleNamespace(session_id="route-turn-session")
+        self.assertEqual(service.route_turn(session, 1, "How are you?"), {
+            "route": "direct", "tool_name": None,
+        })
+        self.assertEqual(service.route_turn(session, 1, "How are you?"), {
+            "route": "direct", "tool_name": None,
+        })
+        with self.assertRaises(ValueError):
+            service.route_turn(session, 1, "Describe a mango")
+        identity = service.route_turn(session, 2, "Who was your husband?")
+        self.assertEqual(identity, {
+            "route": "memory", "tool_name": "retrieve_legacy_memory_context",
+        })
+        state = service._state(session.session_id)
+        state.last_query = "Tell me about your family"
+        followup = service.route_turn(session, 3, "Who else?")
+        self.assertEqual(followup, {
+            "route": "followup", "tool_name": "retrieve_legacy_memory_context",
+        })
+
+    def test_mixed_general_and_identity_confirmation_have_one_correct_owner(self):
+        service = RealtimeToolService(SimpleNamespace())
+        session = SimpleNamespace(session_id="mixed-intent")
+        social = service.route_turn(session, 1, "Hello, how are you?")
+        avocado = service.route_turn(
+            session, 2, "What is an avocado? I've never eaten an avocado.",
+        )
+        family = service.route_turn(session, 3, "Who else is there in your family?")
+        identity = service.route_turn(session, 4, "You are Anjali, right?")
+        self.assertEqual(social, {"route": "direct", "tool_name": None})
+        self.assertEqual(avocado, {"route": "direct", "tool_name": None})
+        self.assertEqual(family["tool_name"], "retrieve_legacy_memory_context")
+        self.assertEqual(identity["tool_name"], "retrieve_legacy_memory_context")
+
+    def test_assistant_persistence_is_idempotent_and_late_events_are_noops(self):
+        service = RealtimeToolService(SimpleNamespace())
+        session = SimpleNamespace(session_id="assistant-owner")
+        service.route_turn(session, 1, "Who is your brother?")
+        service.register_validated_response(
+            session, 1, "validated-call-1", answer_plan_status="supported",
+            text="My brother is Aditya.",
+        )
+        self.assertEqual(service.assistant_turn_decision(
+            session, 1, "validated-call-1", "My brother is Aditya.",
+            response_owner="validated_personal", playback_completed=True,
+        ), "create")
+        self.assertEqual(service.assistant_turn_decision(
+            session, 1, "validated-call-1", "My brother is Aditya.",
+            response_owner="validated_personal", playback_completed=True,
+        ), "duplicate")
+        self.assertEqual(service.assistant_turn_decision(
+            session, 1, "validated-call-1", "I have no brother.",
+            response_owner="validated_personal", playback_completed=True,
+        ), "conflict")
+        service.route_turn(session, 2, "You are Anjali, right?")
+        self.assertEqual(service.assistant_turn_decision(
+            session, 1, "late-native", "Late response.",
+        ), "conflict")
+        self.assertEqual(service.assistant_turn_decision(
+            session, 99, "unknown", "Unknown response.",
+        ), "ignore")
+
+    def test_every_personal_subject_routes_to_one_shared_grounding_tool(self):
+        service = RealtimeToolService(SimpleNamespace())
+        session = SimpleNamespace(session_id="personal-matrix")
+        cases = (
+            "Tell me about our family", "Who is your spouse?", "Your sibling?",
+            "What about our pets?", "What about the television?", "Our vehicle?",
+            "Tell me about the house", "What about our garden?", "Our trip?",
+            "What are your preferences?", "What do you remember about school?",
+            "What about our hometown?", "What about our bicycle?",
+        )
+        for turn_id, query in enumerate(cases, 1):
+            routed = service.route_turn(session, turn_id, query)
+            self.assertIn(routed["route"], {"memory", "followup"})
+            self.assertEqual(routed["tool_name"], "retrieve_legacy_memory_context")
+        general = RealtimeToolService(SimpleNamespace()).route_turn(
+            SimpleNamespace(session_id="general-matrix"), 1, "How does an OLED TV work?",
+        )
+        self.assertEqual(general, {"route": "direct", "tool_name": None})
+
+    def test_unknown_personal_subject_executes_grounding_once_before_unsupported(self):
+        class GroundingChat:
+            def __init__(self): self.calls = []
+            def prepare_live_call_input(self, _db, **kwargs):
+                self.calls.append(kwargs["user_message"])
+                return SimpleNamespace(
+                    grounded_turn=SimpleNamespace(
+                        selected_memory_ids=(), selected_identity_fact_ids=(),
+                        resolved_entities=(), topic_anchor="bicycle", conflict_count=0,
+                        fact_confidence="unsupported", coverage="none", uncertain=False,
+                        supported_relevant_evidence_count=0,
+                    ),
+                    identity_evidence=(), memory_evidence=(), memory_ids=(),
+                    identity_direct=False, identity_count=0, conflict_count=0,
+                    has_uncertainty=False, query_broad=True, query_intent=None,
+                    grounding_chars=0, identity_context_chars=0,
+                )
+
+        chat = GroundingChat()
+        service = RealtimeToolService(chat)
+        session = SimpleNamespace(
+            session_id="unknown-bicycle", user_id=1, legacy_id=2,
+            legacy_name="Aaji", relationship="grandmother", conversation_id=None,
+        )
+        routed = service.route_turn(session, 1, "What about our bicycle?")
+        result = service.execute(
+            self.db, session, routed["tool_name"], {}, call_id="bicycle", turn_id=1,
+        )
+        self.assertEqual(chat.calls, ["What about our bicycle?"])
+        self.assertEqual(result["status"], "unsupported")
+        self.assertEqual(result["supported_relevant_evidence_count"], 0)
+
+    def test_five_turn_social_personal_sequence_only_grounds_personal_turns(self):
+        service = RealtimeToolService(SimpleNamespace())
+        session = SimpleNamespace(session_id="five-turn-intent")
+        sequence = (
+            ("Hello, how are you?", False),
+            ("I'm also doing good. Can you tell me about our family?", True),
+            ("Can you tell me about our dogs?", True),
+            ("Do you remember anything about a TV?", True),
+            ("Perfect, bye.", False),
+        )
+        grounding_calls = 0
+        for turn_id, (query, should_ground) in enumerate(sequence, 1):
+            routed = service.route_turn(session, turn_id, query)
+            self.assertEqual(routed["tool_name"] is not None, should_ground)
+            if should_ground:
+                grounding_calls += 1
+                self.assertEqual(routed["tool_name"], "retrieve_legacy_memory_context")
+        self.assertEqual(grounding_calls, 3)
 
     def test_realtime_identity_adapter_preserves_conflict_and_unsupported_status(self):
         class IdentityChat:
             def __init__(self): self.calls = 0
-            def retrieve_live_call_identity(self, _db, **kwargs):
+            def prepare_live_call_input(self, _db, **kwargs):
                 self.calls += 1
-                records = () if "Tokyo" in kwargs["query"] else (
-                    {"fact_type": "spouse_name", "value": "Meenakshi",
+                query = kwargs["user_message"]
+                records = () if ("Tokyo" in query or "Who am I" in query) else ({
+                    "fact_type": "spouse_name", "value": "Meenakshi",
                      "relationship": "wife", "conflicting": True,
-                     "uncertainty_note": "two approved versions"},
-                )
-                return (
-                    SimpleNamespace(records=records, candidate_count=len(records),
-                                    conflict_present=bool(records)),
-                    SimpleNamespace(canonical_value="Meenakshi" if records else None),
+                     "uncertainty_note": "two approved versions",
+                     "identity_fact_id": 10,
+                },)
+                relationship = "Who am I" in query
+                return SimpleNamespace(
+                    grounded_turn=SimpleNamespace(
+                        selected_memory_ids=(),
+                        selected_identity_fact_ids=((10,) if records else ()),
+                        resolved_entities=(("Meenakshi",) if records else ()),
+                        topic_anchor=query, conflict_count=int(bool(records)),
+                        fact_confidence=("conflicted" if records else "supported" if relationship else "unsupported"),
+                        coverage="focused", uncertain=False,
+                        supported_relevant_evidence_count=int(relationship),
+                    ),
+                    identity_evidence=records, memory_evidence=(), memory_ids=(),
+                    identity_direct=relationship, identity_count=max(len(records), int(relationship)),
+                    conflict_count=int(bool(records)), has_uncertainty=False,
+                    resolved_entities=(("Meenakshi",) if records else ()),
+                    query_broad=False, query_intent="family", matched_candidate_count=0,
+                    grounding_chars=0, identity_context_chars=0,
                 )
 
         session = SimpleNamespace(
@@ -927,15 +1629,17 @@ class LiveCallFoundationTests(unittest.TestCase):
             legacy_name="Aaji", relationship="grandmother",
         )
         service = RealtimeToolService(IdentityChat())
+        service.route_turn(session, 1, "Who was your wife?")
         conflict = service.execute(
-            self.db, session, "get_legacy_identity_context", {"query": "Who is Meenakshi?"},
+            self.db, session, "retrieve_legacy_memory_context", {}, turn_id=1,
         )
+        service.route_turn(session, 2, "Who was your husband in Tokyo?")
         unsupported = service.execute(
-            self.db, session, "get_legacy_identity_context",
-            {"query": "Who was the Tokyo restaurant owner?"},
+            self.db, session, "retrieve_legacy_memory_context", {}, turn_id=2,
         )
+        service.route_turn(session, 3, "Who am I to you?")
         relationship = service.execute(
-            self.db, session, "get_legacy_identity_context", {"query": "Who am I to you?"},
+            self.db, session, "retrieve_legacy_memory_context", {}, turn_id=3,
         )
         self.assertEqual(conflict["status"], "conflicted")
         self.assertEqual(conflict["conflict_count"], 1)
@@ -945,6 +1649,8 @@ class LiveCallFoundationTests(unittest.TestCase):
         self.assertEqual(relationship["selected_legacy"], {
             "name": "Aaji", "relationship_to_user": "grandmother", "role": "self",
         })
+        self.assertEqual(relationship["identity"], [])
+        self.assertEqual(relationship["conflict_count"], 0)
         self.assertEqual(conflict["identity"][0]["perspective_owner"], "self")
 
     def test_realtime_memory_perspective_uses_structured_subject_roles_without_rewriting(self):
@@ -978,8 +1684,19 @@ class LiveCallFoundationTests(unittest.TestCase):
         )
         instructions = session_instructions(session)
 
-        self.assertIn("Supported facts: answer directly with no source or completeness disclaimer", instructions)
-        self.assertIn("Partial information: say only the known part and stop", instructions)
+        self.assertIn("Supported facts: speak as the represented person", instructions)
+        self.assertIn("state the answer naturally in first person", instructions)
+        self.assertIn("no source, confidence, certainty, recall, or completeness commentary", instructions)
+        self.assertIn("My husband is [name]", instructions)
+        self.assertIn("My brother is [name]", instructions)
+        self.assertIn("I lived in [place]", instructions)
+        self.assertIn("Do not preface a supported answer with 'I remember'", instructions)
+        self.assertIn("Partial information: lead with any known fact", instructions)
+        self.assertIn("scope uncertainty only to the specific missing detail", instructions)
+        self.assertIn("Never claim to remember nothing", instructions)
+        self.assertIn("Incomplete subject coverage is not uncertainty", instructions)
+        self.assertIn("without volunteering unknown attributes", instructions)
+        self.assertIn("if it changed, you can correct me", instructions)
         self.assertIn("Preserve names and uncertainty exactly", instructions)
         self.assertIn("I remember it in two different ways", instructions)
         self.assertIn("briefly say 'I don't remember that' and stop", instructions)
@@ -993,8 +1710,8 @@ class LiveCallFoundationTests(unittest.TestCase):
         )
         instructions = session_instructions(session).casefold()
 
-        self.assertIn("call it before producing any spoken content", instructions)
-        self.assertIn("brief silence is better than narrating processing", instructions)
+        self.assertIn("call retrieve_legacy_memory_context before producing any spoken content", instructions)
+        self.assertIn("brief silence is better than procedural speech", instructions)
         self.assertIn("internal only", instructions)
         for prohibited in (
             "let me check my memories",
@@ -1030,13 +1747,25 @@ class LiveCallFoundationTests(unittest.TestCase):
         self.assertIn("never mention or paraphrase those concepts", lowered)
         self.assertIn("my husband is madhav, and anjali is my daughter", lowered)
         self.assertIn("broad family, childhood, life, or trip question", lowered)
-        self.assertIn("no source or completeness disclaimer", lowered)
-        self.assertIn("partial information: say only the known part and stop", lowered)
+        for commentary in ("source", "confidence", "certainty", "recall", "completeness"):
+            self.assertIn(commentary, lowered)
+        self.assertIn("no source, confidence, certainty, recall, or completeness commentary", lowered)
+        self.assertIn("partial information: lead with any known fact about the subject", lowered)
+        self.assertIn("scope uncertainty only to the specific missing detail", lowered)
+        self.assertIn("never claim to remember nothing", lowered)
+        self.assertIn("incomplete subject coverage is not uncertainty", lowered)
+        self.assertIn("i'm not totally sure if that's still current", lowered)
+        self.assertIn("if it changed, you can correct me", lowered)
+        self.assertIn("supported fact", lowered)
+        self.assertIn("person or subject", lowered)
         self.assertIn("i don't remember that", lowered)
         self.assertIn("i'm not completely sure. i remember it in two different ways", lowered)
         self.assertIn("natural human recall", lowered)
         self.assertIn("i remember goa", lowered)
-        self.assertIn("call a required tool before producing any spoken content", lowered)
+        self.assertIn("call retrieve_legacy_memory_context before producing any spoken content", lowered)
+        self.assertIn("general-knowledge questions, answer directly without a tool", lowered)
+        self.assertIn("do not invent it", lowered)
+        self.assertIn("never narrate tool use", lowered)
         self.assertIn("speak from aaji's first-person perspective", lowered)
         self.assertIn("creative present-moment warmth", lowered)
         self.assertIn("balanced speech: usually 2-4 sentences", lowered)
@@ -1075,7 +1804,7 @@ class LiveCallFoundationTests(unittest.TestCase):
         self.assertIn("DETAILED speech: give richer answers", instructions(length="detailed"))
         self.assertIn("GENTLE: use slightly softer wording", instructions(style="gentle"))
         self.assertIn("EXPRESSIVE: react with somewhat more animation", instructions(style="expressive"))
-        self.assertLess(len(balanced), 5000)
+        self.assertLess(len(balanced), 7000)
 
     def test_realtime_personality_is_snapshotted_from_approved_style_evidence(self):
         profile = PersonaProfile(

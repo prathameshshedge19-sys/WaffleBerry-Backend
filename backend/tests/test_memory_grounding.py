@@ -25,6 +25,7 @@ from app.services.memory.grounding import (
     MemoryGroundingBudget,
 )
 from app.services.memory.retrieval import MemoryRetrievalNotFoundError
+from app.services.memory.retrieval_ranking import MemoryRelevanceRanker
 
 
 class FakeAIService:
@@ -197,6 +198,87 @@ class CompanionMemoryGroundingTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("She is my younger sister.", retrieval.calls[0][3])
         self.assertIn("She is my younger sister.", [m.content for m in prepared.messages])
 
+    def test_true_unknown_requires_one_bounded_canonical_fallback(self):
+        retrieval = FakeRetrievalService([])
+        prepared = self.service(retrieval).prepare_live_call_input(
+            fake_db(), user_id=7, legacy_id=12, legacy_name="Aaji",
+            relationship="Grandmother", user_message="Do we have a bicycle?",
+            history=(),
+        )
+        self.assertEqual(len(retrieval.calls), 2)
+        self.assertTrue(prepared.fallback_search_attempted)
+        self.assertEqual(prepared.retrieval_status, "true_unknown")
+        self.assertEqual(prepared.grounded_turn.supported_relevant_evidence_count, 0)
+
+    def test_subject_taxonomy_expands_only_the_bounded_fallback_query(self):
+        family = MemoryRelevanceRanker.build_fallback_query(
+            "Can you tell me about your family?"
+        )
+        dogs = MemoryRelevanceRanker.build_fallback_query("Do you have dogs?")
+        television = MemoryRelevanceRanker.build_fallback_query("Do we have a TV?")
+        self.assertIn("sibling", family)
+        self.assertIn("spouse", family)
+        self.assertIn("pet", dogs)
+        self.assertIn("television", television)
+
+    def test_chat_and_live_call_share_one_structured_grounding_result_across_subjects(self):
+        fixtures = (
+            ("spouse", "My husband is Mohan."),
+            ("sibling", "My brother is Aditya."),
+            ("pet", "We have a Labrador named Bruno."),
+            ("vehicle", "Our car is a blue sedan."),
+            ("home", "Our house has a sunny balcony."),
+            ("garden", "The garden has jasmine."),
+            ("preference", "My favourite food is poha."),
+            ("trip", "We travelled to Goa together."),
+            ("occupation", "I worked as a teacher."),
+            ("birthplace", "I was born in Pune."),
+        )
+        for memory_id, (subject, summary) in enumerate(fixtures, 1):
+            with self.subTest(subject=subject):
+                service = self.service(FakeRetrievalService([
+                    ranked_memory(
+                        memory_id, title=f"Canonical {subject}",
+                        summary=summary, category=subject,
+                    )
+                ]))
+                db = fake_db()
+                chat = service.prepare_grounded_personal_turn(
+                    db, self.conversation(), f"Tell me about our {subject}",
+                    history_override=(), live_call=False,
+                )
+                live = service.prepare_grounded_personal_turn(
+                    db, self.conversation(), f"Tell me about our {subject}",
+                    history_override=(), live_call=True,
+                )
+                self.assertEqual(
+                    chat.grounded_turn.selected_memory_ids,
+                    live.grounded_turn.selected_memory_ids,
+                )
+                self.assertEqual(chat.grounded_turn.evidence_groups,
+                                 live.grounded_turn.evidence_groups)
+                self.assertEqual(chat.memory_ids, (memory_id,))
+                self.assertEqual(chat.grounded_turn.fact_confidence, "supported")
+                self.assertEqual(chat.grounded_turn.supported_relevant_evidence_count, 1)
+
+    def test_persona_instruction_layers_ban_internal_epistemic_narration(self):
+        kwargs = {
+            "display_name": "Aaji", "relationship": "grandmother",
+            "retrieval_available": True, "style_profile": {},
+        }
+        for prompt in (
+            PromptBuilder.build_legacy_persona_system_prompt(**kwargs),
+            PromptBuilder.build_live_call_legacy_persona_system_prompt(**kwargs),
+        ):
+            lowered = " ".join(prompt.casefold().split())
+            self.assertIn("user-facing speech firewall", lowered)
+            for concept in (
+                "stored information", "database", "canonical", "confidence",
+                "completeness", "tool call", "correct or remind",
+            ):
+                self.assertIn(concept, lowered)
+            self.assertIn("known fact naturally and stop", lowered)
+
     def test_live_call_context_does_not_write_or_expand_grounding_budget(self):
         db = fake_db()
         memories = [ranked_memory(index, summary=f"Approved fact {index}.") for index in range(1, 12)]
@@ -238,7 +320,8 @@ class CompanionMemoryGroundingTests(unittest.IsolatedAsyncioTestCase):
             fake_db(), self.conversation(), "Tell me about our family"
         )[0].content
         self.assertIn("examine every supplied memory", prompt)
-        self.assertIn("synthesize multiple compatible memories", prompt)
+        self.assertIn("normally answer with only the one or two most", prompt)
+        self.assertIn("Keep the remaining relevant information available", prompt)
         self.assertIn("do not append generic \"I don't remember more\"", prompt)
         self.assertIn("state the supported part clearly", prompt)
         self.assertIn("Never append uncertainty", prompt)
@@ -286,7 +369,7 @@ class CompanionMemoryGroundingTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Never guess", prompt)
 
     def test_no_match_and_unlinked_conversation_remain_ungrounded(self):
-        for legacy_id, expected_calls in ((12, 1), (None, 0)):
+        for legacy_id, expected_calls in ((12, 0), (None, 0)):
             retrieval = FakeRetrievalService([])
             messages = self.service(retrieval).prepare_ai_input(
                 fake_db(), self.conversation(legacy_id=legacy_id), "Hello"

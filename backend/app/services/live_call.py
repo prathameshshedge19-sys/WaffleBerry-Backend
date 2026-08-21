@@ -214,11 +214,14 @@ class LiveCallSession:
     ended_at: datetime | None = None
     conversation_style: str = "natural"
     response_length: str = "balanced"
+    conversation_id: int | None = None
+    source_session_id: str = field(default_factory=lambda: str(uuid4()))
     base_delivery_profile: str = "identity_neutral_v1"
     engine: str = "cascade"
     speech_renderer: str = "cascade_legacy"
     realtime_capable: bool = False
     persona_profile: PersonaProfile = field(default_factory=PersonaProfile)
+    conversation_context: str = ""
 
 
 class LiveCallSessionStore:
@@ -244,12 +247,14 @@ class LiveCallSessionStore:
         legacy_name: str,
         relationship: str,
         effective_voice: str,
+        conversation_id: int | None = None,
         conversation_style: str = "natural",
         response_length: str = "balanced",
         engine: str = "cascade",
         speech_renderer: str = "cascade_legacy",
         realtime_capable: bool = False,
         persona_profile: PersonaProfile | None = None,
+        conversation_context: str = "",
     ) -> LiveCallSession:
         now = datetime.now(timezone.utc)
         with self._lock:
@@ -263,6 +268,8 @@ class LiveCallSessionStore:
                 session_id=uuid4().hex,
                 transport_token=secrets.token_urlsafe(32),
                 user_id=user_id,
+                conversation_id=conversation_id,
+                source_session_id=str(uuid4()),
                 legacy_id=legacy_id,
                 legacy_name=legacy_name,
                 relationship=relationship,
@@ -276,6 +283,7 @@ class LiveCallSessionStore:
                 speech_renderer=speech_renderer,
                 realtime_capable=realtime_capable,
                 persona_profile=persona_profile or PersonaProfile(),
+                conversation_context=conversation_context,
             )
             self._sessions[session.session_id] = session
             self._runtime[session.session_id] = LiveCallRuntime()
@@ -880,6 +888,19 @@ class LiveCallTurnService:
             raise ValueError("External speech is not enabled for this call.")
         return await self._synthesize_live_call_phrase(
             session, text, LiveCallTone.NEUTRAL, kind=f"external:{generation_id[-8:]}",
+        )
+
+    async def render_validated_phrase(
+        self, session: LiveCallSession, text: str, *, generation_id: str,
+    ) -> SpeechResult:
+        """Render prevalidated personal text through the frozen selected voice."""
+        if session.speech_renderer not in {
+            "realtime_native", "external_streaming_tts", "external_nonstreaming_tts",
+        }:
+            raise ValueError("Validated speech is not enabled for this call.")
+        return await self._synthesize_live_call_phrase(
+            session, text, LiveCallTone.NEUTRAL,
+            kind=f"validated:{generation_id[-8:]}",
         )
 
     @staticmethod

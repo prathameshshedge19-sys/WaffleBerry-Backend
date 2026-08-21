@@ -4,6 +4,7 @@ import re
 from collections.abc import Iterable
 
 from app.services.ai.context_builder import ConversationMessage
+from app.services.turn_understanding import interpret_turn
 
 
 _WORD_PATTERN = re.compile(r"[^\W_]+", re.UNICODE)
@@ -12,6 +13,8 @@ _EXPLICIT_SWITCH_PATTERNS = (
     re.compile(r"\b(?:moving|move) on\b", re.IGNORECASE),
     re.compile(r"\b(?:instead|enough about)\b", re.IGNORECASE),
     re.compile(r"\b(?:now |next )?tell me about\b", re.IGNORECASE),
+    re.compile(r"^(?:and\s+)?what about\s+(?:the|my|our|your)?\b", re.IGNORECASE),
+    re.compile(r"^and\s+(?:the|my|our|your)\s+[\w'-]+", re.IGNORECASE),
 )
 _REFERENCE_TERMS = frozenset(
     {
@@ -38,6 +41,10 @@ _REFERENCE_TERMS = frozenset(
         "why",
     }
 )
+_SUBJECT_DETERMINERS = frozenset({"my", "our", "the", "your"})
+_ATTRIBUTE_REFERENCE_TERMS = frozenset({
+    "brand", "model", "name", "names", "size",
+})
 
 
 class ConversationContinuity:
@@ -77,16 +84,38 @@ class ConversationContinuity:
 
     @staticmethod
     def _needs_prior_context(message: str) -> bool:
-        if ConversationContinuity._is_explicit_switch(message):
+        if (
+            ConversationContinuity._is_explicit_switch(message)
+            or ConversationContinuity.has_explicit_subject(message)
+        ):
             return False
         words = [word.casefold() for word in _WORD_PATTERN.findall(message)]
         if not words:
             return False
-        return len(words) <= 6 or bool(_REFERENCE_TERMS.intersection(words))
+        return (
+            len(words) <= 6
+            or bool(_REFERENCE_TERMS.intersection(words))
+            or bool(_ATTRIBUTE_REFERENCE_TERMS.intersection(words))
+        )
 
     @staticmethod
     def _is_explicit_switch(message: str) -> bool:
         return any(pattern.search(message) for pattern in _EXPLICIT_SWITCH_PATTERNS)
+
+    @staticmethod
+    def has_explicit_subject(message: str) -> bool:
+        """Detect a short, concrete subject phrase that supersedes stale context."""
+        turn = interpret_turn(message)
+        normalized = " ".join(message.casefold().split())
+        normalized = re.sub(
+            r"^(?:(?:okay|ok|well|so|thanks|thank you|please)[,!\s]+)+", "", normalized,
+        )
+        return bool(turn.explicit_subjects) and bool(
+            re.match(r"^(?:and\s+)?what about\b", normalized)
+            or re.match(r"^(?:and\s+)?(?:the|my|our|your)\s+[\w'-]+[?!.]*$", normalized)
+            or re.match(r"^(?:now\s+|next\s+)?tell me about\b", normalized)
+            or len(_WORD_PATTERN.findall(normalized)) == 1
+        )
 
     @staticmethod
     def _is_user(message: ConversationMessage) -> bool:

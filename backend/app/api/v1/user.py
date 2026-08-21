@@ -12,8 +12,10 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 from app.db import SessionLocal, get_db
+from app.config import get_settings
 from app.dependencies.auth import get_current_user
-from app.dependencies.ai import get_chat_service, get_message_speech_service
+from app.dependencies.ai import get_ai_service, get_chat_service, get_message_speech_service
+from app.services.language_normalization import LanguageNormalizationService
 from app.models.user import User
 from app.schemas.user import (
     UserCreate, CompleteRegistrationRequest, UserLogin, UserResponse, SignupResponse, LoginResponse, VoiceProfileCreate, VoiceProfileResponse,
@@ -32,7 +34,10 @@ from app.crud.user import (
 from app.crud.memory import LegacyCRUD
 from app.models.memory import LegacyStatus
 
-from app.services.token_service import create_access_token
+from app.services.token_service import (
+    TokenValidationError, create_access_token, create_refresh_token,
+    decode_refresh_token, password_reset_token_matches,
+)
 from app.services.ai.exceptions import (
     AIAuthenticationError,
     AIConfigurationError,
@@ -53,6 +58,18 @@ from app.services.voice_catalogue import public_catalogue
 from app.services.memory.auto_learning import schedule_conversation_learning
 
 logger = logging.getLogger(__name__)
+
+
+def _set_refresh_cookie(response: Response, user: User) -> None:
+    settings = get_settings()
+    response.set_cookie(
+        key="waffleberry_refresh",
+        value=create_refresh_token(user.user_id, user.password_hash),
+        max_age=settings.refresh_token_expire_days * 24 * 60 * 60,
+        httponly=True, secure=not settings.debug,
+        samesite="lax" if settings.debug else "none",
+        path=f"{settings.api_v1_prefix}/refresh",
+    )
 
 
 router = APIRouter()
@@ -262,7 +279,8 @@ async def create_user(user: UserCreate, db: Session = Depends(get_db)):
 
 
 @router.post("/complete-registration", response_model=LoginResponse, status_code=201)
-async def complete_registration(request: CompleteRegistrationRequest, db: Session = Depends(get_db)):
+async def complete_registration(request: CompleteRegistrationRequest, response: Response,
+                                db: Session = Depends(get_db)):
     """Create and authenticate an account with a valid OTP authorization."""
     challenge = AuthChallengeService.consume_authorization(
         db, authorization=request.verification_token, purpose=EMAIL_VERIFICATION,
@@ -284,6 +302,7 @@ async def complete_registration(request: CompleteRegistrationRequest, db: Sessio
         db.rollback()
         logger.exception("Account completion failed.")
         raise HTTPException(status_code=409, detail="Unable to create account.")
+    _set_refresh_cookie(response, created_user)
     return {
         "access_token": create_access_token(created_user.user_id),
         "token_type": "bearer",
@@ -292,7 +311,7 @@ async def complete_registration(request: CompleteRegistrationRequest, db: Sessio
 
 
 @router.post("/login", response_model=LoginResponse)
-async def login(user: UserLogin, db: Session = Depends(get_db)):
+async def login(user: UserLogin, response: Response, db: Session = Depends(get_db)):
     """Authenticate a user with an email and password."""
 
     db_user = UserCRUD.get_user_by_email(db, user.email)
@@ -320,12 +339,33 @@ async def login(user: UserLogin, db: Session = Depends(get_db)):
         )
 
     access_token = create_access_token(authenticated_user.user_id)
+    _set_refresh_cookie(response, authenticated_user)
 
     return {
         "access_token": access_token,
         "token_type": "bearer",
         "user": authenticated_user,
     }
+
+
+@router.post("/refresh", response_model=LoginResponse)
+async def refresh_session(request: Request, response: Response,
+                          db: Session = Depends(get_db)):
+    """Rotate a valid HttpOnly refresh credential and issue a fresh access JWT."""
+    token = request.cookies.get("waffleberry_refresh")
+    try:
+        user_id, fingerprint = decode_refresh_token(token or "")
+    except TokenValidationError:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
+                            detail="Session renewal failed")
+    user = UserCRUD.get_user(db, user_id)
+    if (not user or not user.is_verified or not password_reset_token_matches(
+            user.user_id, user.password_hash, fingerprint)):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
+                            detail="Session renewal failed")
+    _set_refresh_cookie(response, user)
+    return {"access_token": create_access_token(user.user_id),
+            "token_type": "bearer", "user": user}
     
 @router.post("/verify-email", response_model=AuthorizationResponse)
 async def verify_email(
@@ -973,12 +1013,17 @@ async def create_message_stream(
     learning_user_text = str(message.content)
 
     try:
-        stream_plan = get_chat_service().stream_response_with_provenance(
+        chat_service = get_chat_service()
+        normalized_turn = await LanguageNormalizationService(
+            get_ai_service()
+        ).normalize_semantically(message.content)
+        stream_plan = chat_service.stream_response_with_provenance(
             db,
             conversation,
             message.content,
             conversation_style=(preferences.conversation_style if preferences else "natural"),
             response_length=(preferences.response_length if preferences else "balanced"),
+            semantic_message_override=normalized_turn.normalized_english_text,
         )
         response_stream = stream_plan.stream
     except AIServiceError as exc:

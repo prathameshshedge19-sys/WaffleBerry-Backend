@@ -101,7 +101,7 @@ class IdentityFactProjectionService:
     def remove_for_memory(db: Session, memory_id: int) -> int:
         return db.query(LegacyIdentityFact).filter(
             LegacyIdentityFact.source_memory_id == memory_id
-        ).delete(synchronize_session=False)
+        ).delete(synchronize_session="fetch")
 
     def backfill(self, db: Session, *, offset: int = 0, batch_size: int = 100, dry_run: bool = False):
         memories = db.query(Memory).filter(

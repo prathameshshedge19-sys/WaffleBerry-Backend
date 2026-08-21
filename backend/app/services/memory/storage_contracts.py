@@ -17,6 +17,13 @@ class MemoryPipelineSourceType(str, enum.Enum):
     LIVE_CALL = "live_call"
 
 
+class MemoryOperation(str, enum.Enum):
+    NEW = "new"
+    ENRICH = "enrich"
+    CORRECT = "correct"
+    ADD_ENTITY = "add_entity"
+
+
 class MemoryPipelineItem(BaseModel):
     candidate_index: int = Field(..., ge=0)
     validation_status: MemoryValidationStatus
@@ -29,6 +36,7 @@ class MemoryPipelineItem(BaseModel):
     extraction_confidence: Decimal | None = None
     validation_confidence: Decimal
     error_code: str | None = None
+    operation: MemoryOperation | None = None
 
     model_config = ConfigDict(extra="forbid")
 
@@ -55,6 +63,7 @@ class MemoryStorageReport(BaseModel):
     invalid_candidates_skipped: int = 0
     insufficient_candidates_skipped: int = 0
     validation_status_counts: dict[str, int] = Field(default_factory=dict)
+    operation_counts: dict[str, int] = Field(default_factory=dict)
     created_memory_ids: list[int] = Field(default_factory=list)
     items: list[MemoryPipelineItem] = Field(default_factory=list)
     errors: list[MemoryPipelineErrorDetail] = Field(default_factory=list)

@@ -3,6 +3,7 @@
 from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
 from app.models.user import User, UserSettings, VoiceProfile, VoiceSample, Conversation, Message, MessageRole
 from app.models.memory import (
     CompanionMemoryProvenance,
@@ -317,6 +318,50 @@ class MessageCRUD:
 
     DEFAULT_CONVERSATION_TITLE = "New Chat"
     AUTO_TITLE_MAX_LENGTH = 45
+
+    @staticmethod
+    def create_idempotent_source_message(
+        db: Session, conversation: Conversation, *, role: MessageRole,
+        content: str, source_session_id: str, source_event_id: str,
+    ) -> tuple[Message, bool]:
+        """Persist one canonical Live Call event, safely collapsing retries."""
+        key = {
+            "conversation_id": conversation.conversation_id,
+            "source": "live_call",
+            "source_session_id": source_session_id,
+            "source_event_id": source_event_id,
+            "role": role,
+        }
+        existing = db.query(Message).filter_by(**key).first()
+        if existing is not None:
+            return existing, False
+        message = Message(content=content, **key)
+        try:
+            with db.begin_nested():
+                db.add(message)
+                db.flush()
+            conversation.updated_at = datetime.now(timezone.utc)
+            if (role == MessageRole.USER
+                    and conversation.title == MessageCRUD.DEFAULT_CONVERSATION_TITLE):
+                has_prior_user = (
+                    db.query(Message.message_id)
+                    .filter(
+                        Message.conversation_id == conversation.conversation_id,
+                        Message.role == MessageRole.USER,
+                        Message.message_id != message.message_id,
+                    )
+                    .first()
+                    is not None
+                )
+                if not has_prior_user:
+                    conversation.title = MessageCRUD.generate_conversation_title(content)
+            db.commit()
+            db.refresh(message)
+            return message, True
+        except IntegrityError:
+            db.rollback()
+            existing = db.query(Message).filter_by(**key).one()
+            return existing, False
 
     @staticmethod
     def get_conversation_message(

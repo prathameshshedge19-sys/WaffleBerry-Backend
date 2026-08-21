@@ -31,6 +31,7 @@ from app.services.voice_profile_resolver import StandardVoiceResolver
 from app.services.personal_voice_speech_service import PersonalVoiceSpeechService
 from app.services.live_call import LiveCallTurnService
 from app.services.realtime_live_call import OpenAIRealtimeBootstrapProvider, RealtimeToolService
+from app.services.grounded_answer import GroundedAnswerService
 
 
 @lru_cache()
@@ -200,3 +201,8 @@ def get_realtime_bootstrap_provider() -> OpenAIRealtimeBootstrapProvider:
 @lru_cache()
 def get_realtime_tool_service() -> RealtimeToolService:
     return RealtimeToolService(get_chat_service())
+
+
+@lru_cache()
+def get_grounded_answer_service() -> GroundedAnswerService:
+    return GroundedAnswerService(get_ai_service())

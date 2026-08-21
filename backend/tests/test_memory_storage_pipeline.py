@@ -3,6 +3,7 @@
 import unittest
 from datetime import datetime, timezone
 from decimal import Decimal
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from sqlalchemy import create_engine
@@ -14,12 +15,14 @@ from app.crud.memory import MemoryCRUD
 from app.db import Base
 from app.models.memory import (
     Legacy,
+    LegacyIdentityFact,
     LegacyStatus,
     Memory,
     MemoryContradictionGroup,
     MemoryLink,
     MemoryProvenance,
     MemoryReviewStatus,
+    MemoryRevision,
     MemoryType,
     StoryMessage,
     StoryMessageRole,
@@ -36,6 +39,11 @@ from app.schemas.memory import (
 )
 from app.services.memory.storage_exceptions import MemorySourceError
 from app.services.memory.storage_pipeline import MemoryStoragePipeline
+from app.services.memory.review import MemoryReviewService
+from app.services.memory.storage_contracts import MemoryOperation
+from app.services.ai.context_builder import ContextBuilder
+from app.services.chat_service import ChatService
+from app.services.realtime_live_call import RealtimeToolService
 from app.services.memory.validation_contracts import (
     MemoryValidationAction,
     MemoryValidationResult,
@@ -51,6 +59,10 @@ class FakeExtractionService:
         return list(self.candidates)
 
     async def extract_conversation(self, legacy, conversation, messages):
+        return list(self.candidates)
+
+    async def extract_live_call_turn(self, legacy, **kwargs):
+        del legacy, kwargs
         return list(self.candidates)
 
 
@@ -183,6 +195,40 @@ class MemoryStoragePipelineTests(unittest.IsolatedAsyncioTestCase):
             user_id=self.user.user_id,
             legacy_id=self.legacy.legacy_id,
             story_session_id=self.story.story_session_id,
+        )
+
+    async def run_auto_chat(self, candidate, text):
+        conversation = Conversation(
+            user_id=self.user.user_id,
+            legacy_id=self.legacy.legacy_id,
+            title="Automatic learning source",
+        )
+        self.db.add(conversation)
+        self.db.flush()
+        message = Message(
+            conversation_id=conversation.conversation_id,
+            role=MessageRole.USER,
+            content=text,
+        )
+        self.db.add(message)
+        self.db.commit()
+        candidate = candidate.model_copy(update={
+            "provenance": [MemoryProvenanceCreate(
+                source_type="conversation",
+                conversation_id=conversation.conversation_id,
+                message_id=message.message_id,
+                speaker="user",
+                excerpt=text,
+            )]
+        })
+        return await MemoryStoragePipeline(
+            FakeExtractionService([candidate])
+        ).process_conversation(
+            self.db,
+            user_id=self.user.user_id,
+            legacy_id=self.legacy.legacy_id,
+            conversation_id=conversation.conversation_id,
+            metadata={"auto_learned": True},
         )
 
     def complete_story(self):
@@ -447,6 +493,352 @@ class MemoryStoragePipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(original.summary, original_summary)
         self.assertEqual(report.possible_enrichments_persisted, 1)
         self.assertEqual(self.db.query(MemoryLink).count(), 1)
+
+    async def test_chat_enriches_one_normal_dog_memory_in_place_for_both_modalities(self):
+        self.complete_story()
+        self.user_story_message.content = (
+            "The family dog was remembered, but its name and breed were not given."
+        )
+        self.db.commit()
+        original_candidate = self.candidate(
+            summary="The family dog was remembered, but its name and breed were not given.",
+            excerpt="The family dog was remembered, but its name and breed were not given.",
+        ).model_copy(update={
+            "title": "Family dog",
+            "category": "relationship",
+            "tags": ["family", "dog", "pet"],
+        })
+        first = await self.run_story([original_candidate])
+        memory_id = first.created_memory_ids[0]
+
+        enriched_candidate = self.candidate(
+            summary="The family dog was a Labrador named Bruno.",
+            excerpt="The family dog was a Labrador named Bruno.",
+            details=MemoryDetails(pet={
+                "species": "dog", "breed": "Labrador", "name": "Bruno",
+            }),
+        ).model_copy(update={
+            "title": "Family Labrador named Bruno",
+            "category": "relationship",
+            "tags": ["family", "dog", "pet", "labrador", "bruno"],
+        })
+        report = await self.run_auto_chat(
+            enriched_candidate, "The family dog was a Labrador named Bruno."
+        )
+
+        memories = self.db.query(Memory).all()
+        self.assertEqual(len(memories), 1, report.validation_status_counts)
+        current = self.db.get(Memory, memory_id)
+        self.assertEqual(report.possible_enrichments_persisted, 1)
+        self.assertEqual(report.items[0].operation, MemoryOperation.ENRICH)
+        self.assertEqual(current.summary, "The family dog was a Labrador named Bruno.")
+        self.assertEqual(current.title, "Family Labrador named Bruno")
+        self.assertEqual(current.details["pet"]["breed"], "Labrador")
+        self.assertEqual(current.details["pet"]["name"], "Bruno")
+        self.assertEqual(self.db.query(MemoryRevision).filter_by(memory_id=memory_id).count(), 1)
+        self.assertEqual(len(current.provenance), 2)
+
+        chat = ChatService(SimpleNamespace(), ContextBuilder(12))
+        prepared = chat.prepare_live_call_input(
+            self.db, user_id=self.user.user_id,
+            legacy_id=self.legacy.legacy_id, legacy_name="Mom",
+            relationship="mother", user_message="What was your dog's name and breed?",
+            history=(),
+        )
+        self.assertIn(memory_id, prepared.memory_ids)
+        self.assertIn("Bruno", prepared.memory_evidence[0]["summary"])
+        self.assertIn("Labrador", prepared.memory_evidence[0]["summary"])
+        session = SimpleNamespace(
+            session_id="dog-enrichment", user_id=self.user.user_id,
+            legacy_id=self.legacy.legacy_id, legacy_name="Mom",
+            relationship="mother", conversation_id=None,
+        )
+        tools = RealtimeToolService(chat)
+        tools.route_turn(session, 1, "What was your dog's name and breed?")
+        live = tools.execute(
+            self.db, session, "retrieve_legacy_memory_context", {}, turn_id=1,
+        )
+        self.assertIn("Bruno", live["memories"][0]["summary"])
+        self.assertIn("Labrador", live["memories"][0]["summary"])
+
+        correction = self.candidate(
+            summary="The family Labrador was actually named Luffy.",
+            excerpt="Actually his name was Luffy.",
+            details=MemoryDetails(pet={
+                "species": "dog", "breed": "Labrador", "name": "Luffy",
+            }),
+        ).model_copy(update={
+            "title": "Family Labrador named Luffy",
+            "category": "relationship",
+            "tags": ["family", "dog", "pet", "labrador", "luffy"],
+        })
+        corrected = await self.run_auto_chat(
+            correction, "Actually his name was Luffy."
+        )
+        self.db.expire_all()
+        current = self.db.get(Memory, memory_id)
+        self.assertEqual(corrected.possible_enrichments_persisted, 1)
+        self.assertEqual(corrected.items[0].operation, MemoryOperation.CORRECT)
+        self.assertEqual(self.db.query(Memory).count(), 1)
+        self.assertEqual(current.details["pet"]["name"], "Luffy")
+        self.assertIn("Luffy", current.summary)
+        self.assertNotIn("Bruno", current.summary)
+        self.assertEqual(self.db.query(MemoryRevision).filter_by(memory_id=memory_id).count(), 2)
+
+    async def test_multiple_dogs_are_not_collapsed_into_one_enrichment(self):
+        self.complete_story()
+        self.user_story_message.content = "The family had a dog named Luffy."
+        self.db.commit()
+        original = self.candidate(
+            summary="The family had a dog named Luffy.",
+            excerpt="The family had a dog named Luffy.",
+        ).model_copy(update={
+            "title": "Dog named Luffy", "category": "relationship",
+            "tags": ["family", "dog", "pet", "luffy"],
+        })
+        await self.run_story([original])
+        candidate = self.candidate(
+            summary="The family had two dogs, Luffy and Bruno.",
+            excerpt="The family had two dogs, Luffy and Bruno.",
+        ).model_copy(update={
+            "title": "Dogs Luffy and Bruno", "category": "relationship",
+            "tags": ["family", "dog", "pet", "luffy", "bruno"],
+        })
+        await self.run_auto_chat(
+            candidate, "The family had two dogs, Luffy and Bruno."
+        )
+        self.assertEqual(self.db.query(Memory).count(), 2)
+
+    async def test_another_named_entity_is_added_and_broadly_grounded(self):
+        self.complete_story()
+        self.user_story_message.content = "Bruno is our Labrador."
+        self.db.commit()
+        bruno = self.candidate(
+            summary="Bruno is our Labrador.", excerpt="Bruno is our Labrador.",
+            details=MemoryDetails(entity={
+                "type": "dog", "name": "Bruno", "breed": "Labrador",
+            }),
+        ).model_copy(update={
+            "title": "Dog named Bruno", "category": "relationship",
+            "tags": ["family", "dog", "pet", "labrador", "bruno"],
+        })
+        await self.run_story([bruno])
+        luffy = self.candidate(
+            summary="The family has another dog named Luffy, who is also a Labrador.",
+            excerpt="We have another dog named Luffy. He is also a Labrador.",
+            details=MemoryDetails(entity={
+                "type": "dog", "name": "Luffy", "breed": "Labrador",
+            }),
+        ).model_copy(update={
+            "title": "Dog named Luffy", "category": "relationship",
+            "tags": ["family", "dog", "pet", "labrador", "luffy"],
+        })
+        report = await self.run_auto_chat(
+            luffy, "We have another dog named Luffy. He is also a Labrador."
+        )
+        self.assertEqual(report.items[0].operation, MemoryOperation.ADD_ENTITY)
+        self.assertEqual(report.operation_counts, {"add_entity": 1})
+        self.assertEqual(self.db.query(Memory).count(), 2)
+        approved, total = MemoryReviewService().list_memories(
+            self.db, user_id=self.user.user_id,
+            legacy_id=self.legacy.legacy_id,
+            review_status=MemoryReviewStatus.APPROVED,
+        )
+        self.assertEqual(total, 2)
+        dashboard_text = " ".join(f"{item.title} {item.summary}" for item in approved)
+        self.assertIn("Bruno", dashboard_text)
+        self.assertIn("Luffy", dashboard_text)
+
+        chat = ChatService(SimpleNamespace(), ContextBuilder(12))
+        prepared = chat.prepare_live_call_input(
+            self.db, user_id=self.user.user_id,
+            legacy_id=self.legacy.legacy_id, legacy_name="Mom",
+            relationship="mother", user_message="Tell me about our dogs.", history=(),
+        )
+        chat_text = " ".join(item["summary"] for item in prepared.memory_evidence)
+        self.assertIn("Bruno", chat_text)
+        self.assertIn("Luffy", chat_text)
+        speech_prepared = chat.prepare_live_call_input(
+            self.db, user_id=self.user.user_id,
+            legacy_id=self.legacy.legacy_id, legacy_name="Mom",
+            relationship="mother",
+            user_message="Can you tell me about our docs.", history=(),
+        )
+        self.assertEqual(set(speech_prepared.memory_ids), set(prepared.memory_ids))
+        session = SimpleNamespace(
+            session_id="add-entity", user_id=self.user.user_id,
+            legacy_id=self.legacy.legacy_id, legacy_name="Mom",
+            relationship="mother", conversation_id=None,
+        )
+        tools = RealtimeToolService(chat)
+        tools.route_turn(session, 1, "Can you tell me about our docs.")
+        live = tools.execute(
+            self.db, session, "retrieve_legacy_memory_context", {}, turn_id=1,
+        )
+        live_text = " ".join(item["summary"] for item in live["memories"])
+        self.assertIn("Bruno", live_text)
+        self.assertIn("Luffy", live_text)
+        self.assertEqual(live["selected_memory_ids"], list(prepared.memory_ids))
+        self.assertEqual(
+            {name.casefold() for name in live["resolved_entities"]},
+            {"bruno", "luffy"},
+        )
+        self.assertFalse(live["uncertain"])
+
+        for turn_id, query in enumerate((
+            "Our dogs", "Their names", "Their breeds", "One more, remember",
+        ), start=2):
+            self.assertIn(
+                tools.route_turn(session, turn_id, query)["route"],
+                {"memory", "followup"},
+            )
+            followup = tools.execute(
+                self.db, session, "retrieve_legacy_memory_context", {}, turn_id=turn_id,
+            )
+            followup_text = " ".join(item["summary"] for item in followup["memories"])
+            self.assertIn("Bruno", followup_text)
+            self.assertIn("Luffy", followup_text)
+            self.assertEqual(set(followup["selected_memory_ids"]), set(prepared.memory_ids))
+            self.assertFalse(followup["uncertain"])
+
+    async def test_partial_subject_fact_is_supported_for_broad_specific_and_followup_queries(self):
+        self.complete_story()
+        self.user_story_message.content = "Our TV at home is 85 inches."
+        self.db.commit()
+        television = self.candidate(
+            summary="Our TV at home is 85 inches.",
+            excerpt="Our TV at home is 85 inches.",
+            participants=False,
+        ).model_copy(update={
+            "title": "85-inch TV at home",
+            "tags": ["household", "home", "tv"],
+        })
+        await self.run_story([television])
+
+        chat = ChatService(SimpleNamespace(), ContextBuilder(12))
+        prepared = chat.prepare_live_call_input(
+            self.db, user_id=self.user.user_id,
+            legacy_id=self.legacy.legacy_id, legacy_name="Mom",
+            relationship="mother", user_message="Tell me about our TV.", history=(),
+        )
+        self.assertEqual(len(prepared.memory_ids), 1)
+        self.assertIn("85 inches", prepared.memory_evidence[0]["summary"])
+        self.assertEqual(prepared.fact_confidence, "supported")
+        self.assertEqual(prepared.coverage, "partial")
+        self.assertFalse(prepared.has_uncertainty)
+
+        session = SimpleNamespace(
+            session_id="partial-tv", user_id=self.user.user_id,
+            legacy_id=self.legacy.legacy_id, legacy_name="Mom",
+            relationship="mother", conversation_id=None,
+        )
+        tools = RealtimeToolService(chat)
+        expected_ids = list(prepared.memory_ids)
+        for turn_id, query in enumerate((
+            "Tell me about our TV.",
+            "What size is our TV?",
+            "You remember the size.",
+        ), start=1):
+            route = tools.route_turn(session, turn_id, query)
+            self.assertIn(route["route"], {"memory", "followup"})
+            result = tools.execute(
+                self.db, session, route["tool_name"], {}, turn_id=turn_id,
+            )
+            self.assertEqual(result["selected_memory_ids"], expected_ids)
+            self.assertEqual(result["status"], "supported")
+            self.assertEqual(result["fact_confidence"], "supported")
+            self.assertFalse(result["uncertain"])
+            self.assertIn("85 inches", result["memories"][0]["summary"])
+        self.assertEqual(result["coverage"], "focused")
+
+    async def test_chat_cannot_replace_protected_spouse_identity(self):
+        self.complete_story()
+        self.user_story_message.content = "My husband is Mohan Deshmukh."
+        self.db.commit()
+        canonical = self.candidate(
+            summary="My husband is Mohan Deshmukh.",
+            excerpt="My husband is Mohan Deshmukh.",
+            details=MemoryDetails(identity_facts=[{
+                "fact_type": "spouse_name", "value": "Mohan Deshmukh",
+                "relationship": "husband", "confidence": 1,
+            }]),
+        ).model_copy(update={
+            "title": "Husband Mohan Deshmukh", "category": "relationship",
+            "tags": ["family", "husband", "Mohan Deshmukh"],
+        })
+        await self.run_story([canonical])
+        conversational_claim = self.candidate(
+            summary="Your husband's name is Sawan Deshmukh.",
+            excerpt="Your husband's name is Sawan Deshmukh.",
+            details=MemoryDetails(identity_facts=[{
+                "fact_type": "spouse_name", "value": "Sawan Deshmukh",
+                "relationship": "husband", "confidence": 1,
+            }]),
+        ).model_copy(update={
+            "title": "Husband Sawan Deshmukh", "category": "relationship",
+            "tags": ["family", "husband", "Sawan Deshmukh"],
+        })
+        report = await self.run_auto_chat(
+            conversational_claim, "Your husband's name is Sawan Deshmukh."
+        )
+        self.assertEqual(report.items[0].error_code, "protected_identity_mutation")
+        self.assertEqual(self.db.query(Memory).count(), 1)
+        unstructured_claim = conversational_claim.model_copy(update={
+            "details": MemoryDetails(),
+        })
+        unstructured_report = await self.run_auto_chat(
+            unstructured_claim, "Your husband's name is Sawan Deshmukh."
+        )
+        self.assertEqual(
+            unstructured_report.items[0].error_code,
+            "protected_identity_mutation",
+        )
+        self.assertEqual(self.db.query(Memory).count(), 1)
+        live_candidate = conversational_claim.model_copy(update={
+            "provenance": [MemoryProvenanceCreate(
+                source_type="live_call",
+                source_locator={"session_safe_id": "identity-firewall", "turn_id": 2},
+                speaker="user",
+                excerpt="Your husband's name is Sawan Deshmukh.",
+            )]
+        })
+        live_report = await MemoryStoragePipeline(
+            FakeExtractionService([live_candidate])
+        ).process_live_call_turn(
+            self.db, user_id=self.user.user_id,
+            legacy_id=self.legacy.legacy_id,
+            session_safe_id="identity-firewall", turn_id=2,
+            user_text="Your husband's name is Sawan Deshmukh.",
+        )
+        self.assertEqual(
+            live_report.items[0].error_code, "protected_identity_mutation"
+        )
+        self.assertEqual(self.db.query(Memory).count(), 1)
+        facts = self.db.query(LegacyIdentityFact).filter_by(
+            legacy_id=self.legacy.legacy_id,
+            fact_type="spouse_name",
+            status="active",
+        ).all()
+        self.assertEqual([fact.value for fact in facts], ["Mohan Deshmukh"])
+
+        chat = ChatService(SimpleNamespace(), ContextBuilder(12))
+        identity, _ = chat.retrieve_live_call_identity(
+            self.db, user_id=self.user.user_id,
+            legacy_id=self.legacy.legacy_id, query="Who is your husband?",
+        )
+        self.assertEqual([record["value"] for record in identity.records], ["Mohan Deshmukh"])
+        session = SimpleNamespace(
+            session_id="protected-spouse", user_id=self.user.user_id,
+            legacy_id=self.legacy.legacy_id, legacy_name="Mom", relationship="mother",
+        )
+        tools = RealtimeToolService(chat)
+        tools.route_turn(session, 1, "Who is your husband?")
+        live = tools.execute(
+            self.db, session, "get_legacy_identity_context", {}, turn_id=1,
+        )
+        self.assertEqual(
+            [record["value"] for record in live["identity"]], ["Mohan Deshmukh"],
+        )
 
     async def test_cross_legacy_story_source_is_rejected(self):
         with self.assertRaises(MemorySourceError):

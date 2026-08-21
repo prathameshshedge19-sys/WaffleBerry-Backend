@@ -1,5 +1,6 @@
 """Owner-scoped human review workflow for persisted Memory candidates."""
 
+import re
 from datetime import datetime, timezone
 
 from sqlalchemy import or_
@@ -218,6 +219,11 @@ class MemoryReviewService:
             memory.tag_links.clear()
             self._attach_tags(db, memory, edit.tags or [])
 
+        if "summary" in fields and (edit.edit_reason or "").casefold() == "user_correction":
+            self._reconcile_named_claim_correction(
+                db, memory, snapshot, explicitly_edited=fields,
+            )
+
         candidate = self._candidate_projection(memory)
         fingerprint = build_memory_fingerprint(legacy_id, candidate)
         other_memories = (
@@ -268,7 +274,7 @@ class MemoryReviewService:
         if memory.review_status == MemoryReviewStatus.APPROVED:
             db.query(LegacyIdentityFact).filter(
                 LegacyIdentityFact.source_memory_id == memory.memory_id
-            ).delete(synchronize_session=False)
+            ).delete(synchronize_session="fetch")
             db.flush()
             IdentityFactProjectionService().project_memory(db, memory)
         try:
@@ -280,6 +286,109 @@ class MemoryReviewService:
                 "An equivalent memory already exists for this legacy."
             ) from exc
         return self._to_response(db, memory, legacy_id)
+
+    @classmethod
+    def _reconcile_named_claim_correction(
+        cls, db: Session, memory: Memory, previous: dict,
+        *, explicitly_edited: set[str],
+    ) -> None:
+        """Keep current projections coherent after an authoritative name correction."""
+        new_name = cls._named_claim(memory.summary)
+        previous_summary_name = cls._named_claim(previous.get("summary"))
+        previous_title_name = cls._named_claim(previous.get("title"))
+        old_name = (
+            previous_title_name
+            if new_name and previous_title_name
+            and previous_title_name.casefold() != new_name.casefold()
+            else previous_summary_name
+        )
+        if not old_name or not new_name or old_name.casefold() == new_name.casefold():
+            return
+
+        if "title" not in explicitly_edited:
+            memory.title = cls._replace_claim(memory.title, old_name, new_name)
+        if "tags" not in explicitly_edited:
+            tag_names = [link.tag.name for link in memory.tag_links]
+            replaced_tag = any(name.casefold() == old_name.casefold() for name in tag_names)
+            reconciled = [
+                name for name in tag_names
+                if name.casefold() != old_name.casefold()
+            ]
+            if replaced_tag and not any(
+                name.casefold() == new_name.casefold() for name in reconciled
+            ):
+                reconciled.append(new_name)
+            memory.tag_links.clear()
+            cls._attach_tags(db, memory, reconciled)
+        if "participants" not in explicitly_edited:
+            for participant in memory.participants:
+                if participant.name.casefold() == old_name.casefold():
+                    participant.name = new_name
+        if "details" not in explicitly_edited and memory.details is not None:
+            memory.details = cls._replace_exact_values(
+                memory.details, old_name, new_name,
+            )
+
+    @staticmethod
+    def _named_claim_single_token_legacy(value: str | None) -> str | None:
+        if not value:
+            return None
+        match = re.search(
+            r"\b(?:named|name\s+(?:is|was)|"
+            r"(?:spouse|husband|wife|brother|sister|mother|father|son|daughter)"
+            r"\s+(?:is|was|named))\s+([^\W\d_][\w'’-]*)",
+            value,
+            flags=re.IGNORECASE | re.UNICODE,
+        )
+        return match.group(1) if match else None
+
+    @staticmethod
+    def _named_claim(value: str | None) -> str | None:
+        """Extract a bounded proper name from supported named/relationship claims."""
+        if not value:
+            return None
+        relationship = (
+            r"(?:spouse|husband|wife|brother|sister|mother|father|son|daughter)"
+        )
+        name_token = r"[^\W\d_][\w'\N{RIGHT SINGLE QUOTATION MARK}-]*"
+        match = re.search(
+            rf"\b(?:named\s+|name\s+(?:is|was)\s+|"
+            rf"{relationship}['\u2019]s\s+"
+            rf"(?:full\s+)?name\s+(?:is|was)\s+|"
+            rf"{relationship}\s+(?:(?:is|was|named)\s+)?)"
+            rf"({name_token}(?:\s+{name_token}){{0,5}})",
+            value,
+            flags=re.IGNORECASE | re.UNICODE,
+        )
+        if not match:
+            return None
+        tokens = []
+        for token in match.group(1).split():
+            first_letter = next((char for char in token if char.isalpha()), "")
+            if not first_letter or not first_letter.isupper():
+                break
+            tokens.append(token)
+        return " ".join(tokens) or None
+
+    @staticmethod
+    def _replace_claim(value: str, old: str, new: str) -> str:
+        return re.sub(
+            rf"(?<!\w){re.escape(old)}(?!\w)", new, value,
+            flags=re.IGNORECASE,
+        )
+
+    @classmethod
+    def _replace_exact_values(cls, value, old: str, new: str):
+        if isinstance(value, dict):
+            return {
+                key: cls._replace_exact_values(item, old, new)
+                for key, item in value.items()
+            }
+        if isinstance(value, list):
+            return [cls._replace_exact_values(item, old, new) for item in value]
+        if isinstance(value, str) and value.casefold() == old.casefold():
+            return new
+        return value
 
     def delete(
         self, db: Session, *, user_id: int, legacy_id: int, memory_id: int,

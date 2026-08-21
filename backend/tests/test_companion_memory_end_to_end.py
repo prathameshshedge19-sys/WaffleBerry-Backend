@@ -44,8 +44,8 @@ class CapturingGrounding(CompanionMemoryGrounding):
         super().__init__()
         self.last_context = None
 
-    def select(self, memories):
-        selection = super().select(memories)
+    def select(self, memories, *, compact=False):
+        selection = super().select(memories, compact=compact)
         self.last_context = selection.context
         return selection
 

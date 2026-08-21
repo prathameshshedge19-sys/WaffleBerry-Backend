@@ -69,6 +69,30 @@ def test_completed_registration_returns_login_contract_and_persisting_token(clie
     assert login.json()["user"] == payload["user"]
 
 
+def test_login_refresh_cookie_rotates_access_token_without_credentials(client_and_db):
+    client, db = client_and_db
+    UserCRUD.create_user(
+        db, full_name="Long Call User", email="call@example.com", password="Secure123",
+    )
+    login = client.post(
+        "/api/v1/login", json={"email": "call@example.com", "password": "Secure123"},
+    )
+    assert login.status_code == 200
+    cookie = login.cookies.get("waffleberry_refresh")
+    assert cookie
+    assert "HttpOnly" in login.headers["set-cookie"]
+
+    renewed = client.post("/api/v1/refresh")
+    assert renewed.status_code == 200
+    assert renewed.json()["token_type"] == "bearer"
+    assert renewed.json()["user"]["email"] == "call@example.com"
+    assert renewed.json()["access_token"]
+
+    client.cookies.delete("waffleberry_refresh")
+    rejected = client.post("/api/v1/refresh")
+    assert rejected.status_code == 401
+
+
 def test_registration_failures_never_return_authentication(client_and_db):
     client, db = client_and_db
     _, otp = AuthChallengeService.issue(

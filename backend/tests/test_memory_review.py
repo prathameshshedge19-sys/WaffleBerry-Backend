@@ -3,17 +3,22 @@
 import unittest
 from datetime import timedelta
 from decimal import Decimal
+from types import SimpleNamespace
 
+from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 import app.models  # noqa: F401
 from app.crud.memory import MemoryCRUD
-from app.db import Base
+from app.db import Base, get_db
+from app.dependencies.auth import get_current_user
 from app.dependencies.ai import get_memory_storage_pipeline
+from app.main import app
 from app.models.memory import (
     Legacy,
+    LegacyIdentityFact,
     Memory,
     MemoryLink,
     MemoryReviewStatus,
@@ -26,6 +31,7 @@ from app.models.memory import (
 from app.models.user import User
 from app.schemas.memory import (
     MemoryCandidateCreate,
+    MemoryDetails,
     MemoryParticipantCreate,
     MemoryProvenanceCreate,
     MemoryReviewEditRequest,
@@ -36,6 +42,10 @@ from app.services.memory.review import (
     MemoryReviewNotFoundError,
     MemoryReviewService,
 )
+from app.services.memory.retrieval import MemoryRetrievalService
+from app.services.ai.context_builder import ContextBuilder
+from app.services.chat_service import ChatService
+from app.services.realtime_live_call import RealtimeToolService
 
 
 class MemoryReviewTests(unittest.TestCase):
@@ -264,6 +274,286 @@ class MemoryReviewTests(unittest.TestCase):
         )
         revision = self.db.query(MemoryRevision).one()
         self.assertEqual(revision.previous_content["summary"], original)
+
+    def test_user_correction_reconciles_named_claim_and_preserves_history(self):
+        self.message.content = "We have a Labrador named Luffy."
+        self.db.commit()
+        candidate = self.candidate(
+            "The family has a Labrador named Luffy.",
+            excerpt="We have a Labrador named Luffy.",
+        )
+        candidate.title = "Family Labrador named Luffy"
+        candidate.tags = ["family", "dog", "pet", "labrador", "luffy"]
+        memory = self.create_memory(candidate)
+        self.service.approve(
+            self.db, user_id=self.owner.user_id,
+            legacy_id=self.legacy.legacy_id, memory_id=memory.memory_id,
+            expected_updated_at=memory.updated_at,
+        )
+        memory = self.db.get(Memory, memory.memory_id)
+        provenance_ids = [item.provenance_id for item in memory.provenance]
+
+        result = self.service.edit(
+            self.db, user_id=self.owner.user_id,
+            legacy_id=self.legacy.legacy_id, memory_id=memory.memory_id,
+            edit=self.edit_request(
+                memory,
+                summary="The family has a Labrador named Bruno.",
+                edit_reason="user_correction",
+            ),
+        )
+
+        self.assertEqual(result.summary, "The family has a Labrador named Bruno.")
+        self.assertEqual(result.title, "Family Labrador named Bruno")
+        self.assertEqual(
+            {tag.casefold() for tag in result.tags},
+            {"family", "dog", "pet", "labrador", "bruno"},
+        )
+        revision = self.db.query(MemoryRevision).one()
+        self.assertIn("named Luffy", revision.previous_content["summary"])
+        self.assertEqual(
+            [item.provenance_id for item in self.db.get(Memory, memory.memory_id).provenance],
+            provenance_ids,
+        )
+        self.assertIn("named Luffy", memory.provenance[0].excerpt)
+        self.assertFalse(result.has_contradiction)
+
+        retrieval = MemoryRetrievalService()
+        corrected = retrieval.search_approved(
+            self.db, user_id=self.owner.user_id,
+            legacy_id=self.legacy.legacy_id, query="Bruno",
+        )
+        stale = retrieval.search_approved(
+            self.db, user_id=self.owner.user_id,
+            legacy_id=self.legacy.legacy_id, query="Luffy",
+        )
+        self.assertEqual([item.memory_id for item in corrected.memories], [memory.memory_id])
+        self.assertEqual(stale.memories, [])
+
+    def test_non_claim_summary_edit_preserves_independent_metadata(self):
+        memory = self.create_memory()
+        original_title = memory.title
+        original_tags = [link.tag.name for link in memory.tag_links]
+        result = self.service.edit(
+            self.db, user_id=self.owner.user_id,
+            legacy_id=self.legacy.legacy_id, memory_id=memory.memory_id,
+            edit=self.edit_request(
+                memory, summary="Mom was born in Pune and enjoyed teaching.",
+                edit_reason="user_correction",
+            ),
+        )
+        self.assertEqual(result.title, original_title)
+        self.assertEqual(result.tags, original_tags)
+
+    def test_spouse_name_correction_reprojects_chat_and_live_call_identity(self):
+        self.message.content = "My husband is Rohan."
+        self.db.commit()
+        candidate = self.candidate(
+            "My husband is Rohan.", excerpt="My husband is Rohan.",
+        )
+        candidate.title = "Husband Rohan"
+        candidate.details = MemoryDetails(
+            identity_facts=[{
+                "fact_type": "spouse_name", "value": "Rohan",
+                "relationship": "husband", "confidence": 1,
+            }],
+        )
+        candidate.tags = ["family", "husband", "rohan"]
+        memory = self.create_memory(candidate)
+        self.service.approve(
+            self.db, user_id=self.owner.user_id,
+            legacy_id=self.legacy.legacy_id, memory_id=memory.memory_id,
+            expected_updated_at=memory.updated_at,
+        )
+        memory = self.db.get(Memory, memory.memory_id)
+
+        result = self.service.edit(
+            self.db, user_id=self.owner.user_id,
+            legacy_id=self.legacy.legacy_id, memory_id=memory.memory_id,
+            edit=self.edit_request(
+                memory, summary="My husband is Mohan.",
+                edit_reason="user_correction",
+            ),
+        )
+        self.assertEqual(result.summary, "My husband is Mohan.")
+        self.assertNotIn("Rohan", result.title)
+        self.assertIn("Mohan", result.title)
+        revision = self.db.query(MemoryRevision).one()
+        self.assertIn("Rohan", revision.previous_content["summary"])
+        self.assertIn("Rohan", memory.provenance[0].excerpt)
+        self.assertFalse(result.has_contradiction)
+
+        chat = ChatService(SimpleNamespace(), ContextBuilder(12))
+        identity, _ = chat.retrieve_live_call_identity(
+            self.db, user_id=self.owner.user_id,
+            legacy_id=self.legacy.legacy_id,
+            query="Who is your husband?",
+        )
+        self.assertEqual([record["value"] for record in identity.records], ["Mohan"])
+
+        session = SimpleNamespace(
+            session_id="corrected-spouse", user_id=self.owner.user_id,
+            legacy_id=self.legacy.legacy_id, legacy_name="Mom",
+            relationship="mother",
+        )
+        tools = RealtimeToolService(chat)
+        tools.route_turn(session, 1, "Who is your husband?")
+        live = tools.execute(
+            self.db, session, "get_legacy_identity_context", {}, turn_id=1,
+        )
+        self.assertEqual([record["value"] for record in live["identity"]], ["Mohan"])
+
+    def test_dashboard_patch_reconciles_possessive_multi_token_spouse_name(self):
+        self.message.content = "My husband's full name is Rohan Deshmukh."
+        self.db.commit()
+        candidate = self.candidate(
+            "My husband's full name is Rohan Deshmukh.",
+            excerpt="My husband's full name is Rohan Deshmukh.",
+        )
+        candidate.title = "Husband Rohan Deshmukh"
+        candidate.details = MemoryDetails(
+            identity_facts=[{
+                "fact_type": "spouse_name", "value": "Rohan Deshmukh",
+                "relationship": "husband", "confidence": 1,
+            }],
+        )
+        candidate.participants = [
+            MemoryParticipantCreate(name="Mom", relationship="mother", role="subject"),
+            MemoryParticipantCreate(
+                name="Rohan Deshmukh", relationship="husband", role="mentioned_person",
+            ),
+        ]
+        candidate.tags = ["family", "husband", "Rohan Deshmukh"]
+        memory = self.create_memory(candidate)
+        self.service.approve(
+            self.db, user_id=self.owner.user_id,
+            legacy_id=self.legacy.legacy_id, memory_id=memory.memory_id,
+            expected_updated_at=memory.updated_at,
+        )
+        original_updated_at = memory.updated_at
+        chat = ChatService(SimpleNamespace(), ContextBuilder(12))
+        before, _ = chat.retrieve_live_call_identity(
+            self.db, user_id=self.owner.user_id,
+            legacy_id=self.legacy.legacy_id, query="Who is your husband?",
+        )
+        self.assertEqual([record["value"] for record in before.records], ["Rohan Deshmukh"])
+
+        app.dependency_overrides[get_db] = lambda: self.db
+        app.dependency_overrides[get_current_user] = lambda: self.owner
+        try:
+            response = TestClient(app).patch(
+                f"/api/v1/legacies/{self.legacy.legacy_id}/memories/{memory.memory_id}",
+                json={
+                    "expected_updated_at": original_updated_at.isoformat(),
+                    "summary": "My husband's full name is Mohan Deshmukh.",
+                    "edit_reason": "user_correction",
+                },
+            )
+        finally:
+            app.dependency_overrides.clear()
+        self.assertEqual(response.status_code, 200, response.text)
+
+        self.db.expire_all()
+        current = self.db.get(Memory, memory.memory_id)
+        self.assertEqual(current.summary, "My husband's full name is Mohan Deshmukh.")
+        self.assertEqual(current.title, "Husband Mohan Deshmukh")
+        self.assertEqual(
+            current.details["identity_facts"][0]["value"], "Mohan Deshmukh",
+        )
+        self.assertEqual(
+            {participant.name for participant in current.participants},
+            {"Mom", "Mohan Deshmukh"},
+        )
+        self.assertIn("Mohan Deshmukh", {link.tag.name for link in current.tag_links})
+        self.assertNotIn("Rohan Deshmukh", {link.tag.name for link in current.tag_links})
+        facts = self.db.query(LegacyIdentityFact).filter(
+            LegacyIdentityFact.legacy_id == self.legacy.legacy_id,
+            LegacyIdentityFact.fact_type == "spouse_name",
+            LegacyIdentityFact.status == "active",
+        ).all()
+        self.assertEqual([(fact.value, fact.source_memory_id) for fact in facts], [
+            ("Mohan Deshmukh", memory.memory_id),
+        ])
+        revision = self.db.query(MemoryRevision).filter_by(
+            memory_id=memory.memory_id,
+        ).one()
+        self.assertIn("Rohan Deshmukh", revision.previous_content["summary"])
+        self.assertIn("Rohan Deshmukh", current.provenance[0].excerpt)
+
+        corrected, _ = chat.retrieve_live_call_identity(
+            self.db, user_id=self.owner.user_id,
+            legacy_id=self.legacy.legacy_id, query="Who is your husband?",
+        )
+        self.assertEqual([record["value"] for record in corrected.records], ["Mohan Deshmukh"])
+        session = SimpleNamespace(
+            session_id="dashboard-correction", user_id=self.owner.user_id,
+            legacy_id=self.legacy.legacy_id, legacy_name="Mom", relationship="mother",
+        )
+        tools = RealtimeToolService(chat)
+        tools.route_turn(session, 1, "Who is your husband?")
+        live = tools.execute(
+            self.db, session, "get_legacy_identity_context", {}, turn_id=1,
+        )
+        self.assertEqual(
+            [record["value"] for record in live["identity"]], ["Mohan Deshmukh"],
+        )
+
+        app.dependency_overrides[get_db] = lambda: self.db
+        app.dependency_overrides[get_current_user] = lambda: self.owner
+        try:
+            response = TestClient(app).patch(
+                f"/api/v1/legacies/{self.legacy.legacy_id}/memories/{memory.memory_id}",
+                json={
+                    "expected_updated_at": current.updated_at.isoformat(),
+                    "summary": "My husband's full name is Sawan Deshmukh.",
+                    "edit_reason": "user_correction",
+                },
+            )
+        finally:
+            app.dependency_overrides.clear()
+        self.assertEqual(response.status_code, 200, response.text)
+        self.db.expire_all()
+        current = self.db.get(Memory, memory.memory_id)
+        self.assertEqual(current.title, "Husband Sawan Deshmukh")
+        self.assertEqual(current.details["identity_facts"][0]["value"], "Sawan Deshmukh")
+        self.assertEqual(
+            [fact.value for fact in self.db.query(LegacyIdentityFact).filter(
+                LegacyIdentityFact.legacy_id == self.legacy.legacy_id,
+                LegacyIdentityFact.fact_type == "spouse_name",
+                LegacyIdentityFact.status == "active",
+            ).all()],
+            ["Sawan Deshmukh"],
+        )
+        revisions = self.db.query(MemoryRevision).filter_by(
+            memory_id=memory.memory_id,
+        ).order_by(MemoryRevision.revision_number).all()
+        self.assertEqual(len(revisions), 2)
+        self.assertIn("Mohan Deshmukh", revisions[-1].previous_content["summary"])
+        corrected, _ = chat.retrieve_live_call_identity(
+            self.db, user_id=self.owner.user_id,
+            legacy_id=self.legacy.legacy_id, query="Who is your husband?",
+        )
+        self.assertEqual([record["value"] for record in corrected.records], ["Sawan Deshmukh"])
+        tools.route_turn(session, 2, "Who is your husband?")
+        live = tools.execute(
+            self.db, session, "get_legacy_identity_context", {},
+            call_id="after-dashboard-correction", turn_id=2,
+        )
+        self.assertEqual(
+            [record["value"] for record in live["identity"]], ["Sawan Deshmukh"],
+        )
+
+    def test_named_claim_parser_supports_real_spouse_phrasings(self):
+        cases = {
+            "My husband's full name is Mohan Deshmukh.": "Mohan Deshmukh",
+            "My husband's name is Mohan Deshmukh.": "Mohan Deshmukh",
+            "My husband is Mohan Deshmukh.": "Mohan Deshmukh",
+            "My spouse's full name is Jean-Luc O'Neill.": "Jean-Luc O'Neill",
+            "My wife is Élodie D’Arcy.": "Élodie D’Arcy",
+        }
+        for sentence, expected in cases.items():
+            with self.subTest(sentence=sentence):
+                self.assertEqual(self.service._named_claim(sentence), expected)
 
     def test_edit_contract_cannot_edit_provenance(self):
         self.assertNotIn(

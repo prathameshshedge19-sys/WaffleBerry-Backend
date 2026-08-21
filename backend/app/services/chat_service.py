@@ -17,7 +17,7 @@ from app.crud.memory import LegacyCRUD
 from app.services.ai.ai_service import AIService
 from app.services.ai.context_builder import ContextBuilder, ConversationMessage
 from app.services.ai.provider import AIMessage
-from app.services.ai.exceptions import MemoryGroundingError
+from app.services.ai.exceptions import AIInvalidResponseError, MemoryGroundingError
 from app.services.ai.exceptions import AIProviderError
 from app.services.ai.external_knowledge import (
     attach_external_context,
@@ -38,6 +38,7 @@ from app.services.memory.fidelity import (
     MemoryFidelityService,
 )
 from app.services.memory.multilingual_retrieval import detect_query_language_mode
+from app.services.language_normalization import LanguageNormalizationService
 from app.services.memory.name_resolution import (
     comparable_name,
     NameResolution,
@@ -50,6 +51,8 @@ from app.services.memory.retrieval import (
 )
 from app.services.memory.retrieval_ranking import MemoryRelevanceRanker
 from app.services.persona_profile import PersonaProfile, PersonaProfileService
+from app.services.grounded_answer import GroundedAnswerService
+from app.services.memory.legacy_context import LegacyMemoryEngine
 
 
 logger = logging.getLogger(__name__)
@@ -65,6 +68,30 @@ def _safe_log(level: int, event: str, **metadata) -> None:
             sort_keys=True,
         ),
     )
+
+
+@dataclass(frozen=True)
+class EvidenceGroup:
+    kind: str
+    evidence_id: int | None
+    epistemic_status: str
+    payload: dict
+
+
+@dataclass(frozen=True)
+class GroundedTurnContext:
+    selected_identity_fact_ids: tuple[int, ...] = ()
+    selected_memory_ids: tuple[int, ...] = ()
+    evidence_groups: tuple[EvidenceGroup, ...] = ()
+    resolved_entities: tuple[str, ...] = ()
+    topic_anchor: str = ""
+    fact_confidence: str = "unsupported"
+    coverage: str = "none"
+    conflict_count: int = 0
+    uncertain: bool = False
+    supported_relevant_evidence_count: int = 0
+    fallback_search_attempted: bool = False
+    retrieval_status: str = "ok"
 
 
 @dataclass(frozen=True)
@@ -89,6 +116,15 @@ class PreparedCompanionInput:
     matched_candidate_count: int = 0
     query_intent: str = "unknown"
     query_language_mode: str = "unknown"
+    query_broad: bool = False
+    fact_confidence: str = "unsupported"
+    coverage: str = "none"
+    grounded_turn: GroundedTurnContext = GroundedTurnContext()
+    fallback_search_attempted: bool = False
+    retrieval_status: str = "ok"
+    profile_engine_invoked: bool = False
+    profile_fact_count: int = 0
+    detailed_memory_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -129,6 +165,44 @@ class ChatService:
             return {"subject": perspectives[0], "subjects": perspectives}
         return {"subject": "multiple", "subjects": perspectives}
 
+    @staticmethod
+    def _memory_entities(memory, legacy_name: str) -> list[str]:
+        """Expose grounded named entities without treating the Persona as an answer entity."""
+        legacy_key = comparable_name(legacy_name)
+        names = [
+            name for name in memory.participant_names
+            if comparable_name(name) != legacy_key
+        ]
+        details = getattr(memory, "details", None)
+        extra = getattr(details, "model_extra", None) or {}
+        for value in extra.values():
+            if isinstance(value, dict):
+                name = value.get("name")
+                if isinstance(name, str) and name.strip():
+                    names.append(name.strip())
+        for source in (memory.title, memory.summary):
+            names.extend(
+                match.strip(" .,'\"")
+                for match in re.findall(
+                    r"\bnamed\s+([^,.;]+?)(?=\s+(?:who|that|which|and)\b|$)",
+                    source,
+                    flags=re.IGNORECASE,
+                )
+                if match.strip(" .,'\"")
+            )
+        return list(dict.fromkeys(names))
+
+    @staticmethod
+    def _unique_names(names) -> tuple[str, ...]:
+        result = []
+        seen = set()
+        for name in names:
+            key = comparable_name(name)
+            if key and key not in seen:
+                seen.add(key)
+                result.append(name)
+        return tuple(result)
+
     """Load conversation context and prepare provider-neutral AI input."""
 
     def __init__(
@@ -142,6 +216,7 @@ class ChatService:
         conversation_continuity: ConversationContinuity | None = None,
         identity_retrieval: IdentityFactRetrievalService | None = None,
         name_resolver: ProperNameResolver | None = None,
+        legacy_memory_engine: LegacyMemoryEngine | None = None,
     ) -> None:
         self._ai_service = ai_service
         self._context_builder = context_builder
@@ -156,6 +231,9 @@ class ChatService:
             identity_retrieval or IdentityFactRetrievalService()
         )
         self._name_resolver = name_resolver or ProperNameResolver()
+        self._legacy_memory_engine = legacy_memory_engine or LegacyMemoryEngine(
+            retrieval=self._memory_retrieval,
+        )
 
     def prepare_ai_input(
         self,
@@ -165,7 +243,7 @@ class ChatService:
         *, conversation_style: str = "natural", response_length: str = "balanced",
     ) -> list[AIMessage]:
         """Return provider messages while retaining the established contract."""
-        return self._prepare_companion_input(
+        return self.prepare_grounded_personal_turn(
             db,
             conversation,
             user_message,
@@ -173,7 +251,27 @@ class ChatService:
             response_length=response_length,
         ).messages
 
-    def _prepare_companion_input(
+    def bounded_conversation_history(
+        self, db: Session, conversation: Conversation,
+    ) -> tuple[dict[str, str], ...]:
+        """Return the canonical Chat-sized history window for another modality."""
+        history = (
+            db.query(Message)
+            .filter(Message.conversation_id == conversation.conversation_id)
+            .order_by(Message.created_at.desc(), Message.message_id.desc())
+            .limit(self._context_builder.history_query_limit)
+            .all()
+        )
+        history.reverse()
+        items = []
+        for message in history:
+            role = self._context_builder._normalize_role(message.role)
+            content = message.content.strip()
+            if role in {"user", "assistant"} and content:
+                items.append({"role": role, "content": content})
+        return tuple(items)
+
+    def prepare_grounded_personal_turn(
         self,
         db: Session,
         conversation: Conversation,
@@ -183,8 +281,11 @@ class ChatService:
         live_call: bool = False,
         conversation_style: str = "natural",
         response_length: str = "balanced",
+        semantic_message_override: str | None = None,
     ) -> PreparedCompanionInput:
-        """Prepare messages and internal grounding provenance together."""
+        """Run the one bounded canonical identity-and-memory grounding preparation."""
+        if not isinstance(user_message, str) or not user_message.strip():
+            raise AIInvalidResponseError("A substantive user message is required.")
         if history_override is None:
             history = (
                 db.query(Message)
@@ -212,19 +313,60 @@ class ChatService:
         persona_display_name = None
         persona_relationship = None
         retrieval_available = True
+        fallback_search_attempted = False
         persona_profile = PersonaProfile()
         fidelity_plan = MemoryFidelityAnalyzer().analyze([])
-        query_classification = MemoryRelevanceRanker.classify_query(user_message)
+        normalized_turn = LanguageNormalizationService().normalize_user_turn(user_message)
+        semantic_message = semantic_message_override or normalized_turn.normalized_english_text
+        query_classification = MemoryRelevanceRanker.classify_query(semantic_message)
+        response_query_classification = query_classification
         query_intent = query_classification.intent
         query_language_mode = detect_query_language_mode(user_message)
-        knowledge_plan = ExternalKnowledgeClassifier.classify(user_message)
+        knowledge_plan = ExternalKnowledgeClassifier.classify(semantic_message)
         name_resolution = NameResolution()
         identity_result = IdentityGroundingResult(None, None)
         legacy_id = getattr(conversation, "legacy_id", None)
+        personal_turn = GroundedAnswerService.is_personal(
+            semantic_message,
+            active_topic=any(
+                getattr(item, "role", None) in {"user", "assistant"}
+                for item in history
+            ),
+        )
+        if (
+            not personal_turn
+            and knowledge_plan.query_mode == "autobiographical_memory"
+            and GroundedAnswerService.classify_turn(semantic_message) != "social"
+        ):
+            personal_turn = True
+        # Older injected retrieval doubles predate the profile API. Keep their
+        # established orchestration contract while production uses strict
+        # PERSONAL/GENERAL/SOCIAL routing through the shared engine.
+        if (
+            not hasattr(self._memory_retrieval, "retrieve_approved")
+            and GroundedAnswerService.classify_turn(semantic_message) != "social"
+        ):
+            personal_turn = True
+        if legacy_id is not None and not personal_turn:
+            legacy = getattr(conversation, "legacy", None)
+            if legacy is None or legacy.owner_user_id != conversation.user_id:
+                legacy = LegacyCRUD.get_user_legacy(
+                    db, legacy_id, conversation.user_id,
+                )
+            if legacy is None:
+                raise MemoryGroundingError("Legacy identity could not be prepared.")
+            persona_display_name = legacy.display_name
+            persona_relationship = legacy.relationship
+            try:
+                persona_profile = self._persona_profiles.build(db, legacy_id=legacy_id)
+            except SQLAlchemyError:
+                db.rollback()
+                persona_profile = PersonaProfile()
         if (
             legacy_id is not None
             and isinstance(user_message, str)
             and user_message.strip()
+            and personal_turn
         ):
             try:
                 legacy = getattr(conversation, "legacy", None)
@@ -261,7 +403,7 @@ class ChatService:
                     db,
                     user_id=conversation.user_id,
                     legacy_id=legacy_id,
-                    query=user_message,
+                    query=semantic_message,
                 )
             except SQLAlchemyError:
                 db.rollback()
@@ -270,7 +412,7 @@ class ChatService:
                 identity_arguments = {
                     "user_id": conversation.user_id,
                     "legacy_id": legacy_id,
-                    "query": user_message,
+                    "query": semantic_message,
                 }
                 if name_resolution.fact_type is not None:
                     identity_arguments["fact_type_override"] = (
@@ -283,16 +425,27 @@ class ChatService:
                     db,
                     **identity_arguments,
                 )
+                if (
+                    not identity_result.records
+                    and (
+                        response_query_classification.intent == "family"
+                        or bool(re.search(r"\b(?:family|household)\b", semantic_message, re.I))
+                    )
+                ):
+                    identity_result = self._identity_retrieval.retrieve_family_projection(
+                        db, user_id=conversation.user_id, legacy_id=legacy_id,
+                        query=semantic_message,
+                    )
             except SQLAlchemyError:
                 db.rollback()
                 identity_result = IdentityGroundingResult(
-                    detect_identity_intent(user_message),
+                    detect_identity_intent(semantic_message),
                     None,
                 )
             try:
                 retrieval_query = self._conversation_continuity.build_retrieval_query(
                     history,
-                    user_message,
+                    semantic_message,
                 )
                 retrieval_query = name_resolution.expand_query(retrieval_query)
                 query_classification = MemoryRelevanceRanker.classify_query(
@@ -306,6 +459,17 @@ class ChatService:
                     legacy_id=legacy_id,
                     query=retrieval_query,
                 )
+                if not ranked.memories and not identity_result.records:
+                    fallback_search_attempted = True
+                    fallback_query = MemoryRelevanceRanker.build_fallback_query(
+                        retrieval_query
+                    )
+                    ranked = self._memory_retrieval.search_approved(
+                        db,
+                        user_id=conversation.user_id,
+                        legacy_id=legacy_id,
+                        query=fallback_query,
+                    )
             except SQLAlchemyError:
                 db.rollback()
                 retrieval_available = False
@@ -354,12 +518,18 @@ class ChatService:
             else:
                 approved_candidate_count = ranked.approved_memory_count
                 matched_candidate_count = ranked.matched_memory_count
-                selection = (
-                    self._memory_grounding.select(ranked.memories, compact=True)
-                    if live_call else self._memory_grounding.select(ranked.memories)
+                # Evidence selection is modality-neutral. Rendering may differ,
+                # but Chat and Live Call receive the same canonical fact set.
+                selection = self._memory_grounding.select(
+                    [] if identity_result.fact_type is not None and identity_result.records
+                    else ranked.memories,
+                    compact=True,
                 )
-                grounding_context = selection.context
                 memory_grounding_context = selection.context
+                grounding_context = (
+                    selection.context if live_call
+                    else self._memory_grounding.build_context(list(selection.memories))
+                )
                 identity_context = (
                     identity_result.compact_context
                     if live_call and identity_result.compact_context is not None
@@ -381,8 +551,16 @@ class ChatService:
                         "memory_id": memory.memory_id,
                         "title": memory.title,
                         "summary": memory.summary,
+                        "entities": self._memory_entities(
+                            memory, conversation.legacy.display_name,
+                        ),
                         "uncertainty": memory.uncertainty_note,
                         "conflict": memory.contradiction_group_id is not None,
+                        "epistemic_status": (
+                            "conflicted" if memory.contradiction_group_id is not None
+                            else "uncertain" if memory.uncertainty_note
+                            else "supported"
+                        ),
                         **self._memory_perspective(
                             memory, conversation.legacy.display_name,
                         ),
@@ -520,6 +698,140 @@ class ChatService:
                 grounding_context_created=False,
                 provider_call_attempted=False,
             )
+        # The shared engine is the final factual selector for every personal
+        # modality.  The established retrieval above remains temporarily as
+        # diagnostic compatibility while consumers migrate, but cannot alter
+        # the evidence supplied to Chat or Live Call.
+        shared_context = None
+        if (
+            personal_turn and legacy_id is not None
+            and hasattr(self._memory_retrieval, "retrieve_approved")
+        ):
+            shared_context = self._legacy_memory_engine.prepare_legacy_context(
+                db,
+                user_id=conversation.user_id,
+                legacy_id=legacy_id,
+                conversation_id=getattr(conversation, "conversation_id", None),
+                user_message=semantic_message,
+                recent_history=history,
+            )
+            grounding_context = shared_context.prompt_context()
+            profile_memory_facts = tuple(
+                fact for fact in shared_context.profile_facts
+                if fact.source_kind == "memory"
+            )
+            memory_ids = tuple(dict.fromkeys((
+                *(fact.source_id for fact in profile_memory_facts),
+                *(item.memory_id for item in shared_context.detailed_memories),
+            )))
+            memory_evidence = tuple([
+                *({
+                    "memory_id": fact.source_id,
+                    "title": fact.key,
+                    "summary": fact.value,
+                    "entities": list(fact.entities),
+                    "uncertainty": fact.uncertainty,
+                    "conflict": fact.conflicting,
+                    "epistemic_status": (
+                        "conflicted" if fact.conflicting
+                        else "uncertain" if fact.uncertainty else "supported"
+                    ),
+                    "subject": "self",
+                    "subjects": ["self"],
+                    "relevance_level": level,
+                } for fact, level in zip(
+                    shared_context.profile_facts,
+                    shared_context.relevance_levels,
+                    strict=False,
+                ) if fact.source_kind == "memory"),
+                *({
+                    "memory_id": item.memory_id,
+                    "title": item.title,
+                    "summary": item.summary,
+                    "entities": self._memory_entities(
+                        item, shared_context.profile.display_name,
+                    ),
+                    "uncertainty": item.uncertainty_note,
+                    "conflict": item.contradiction_group_id is not None,
+                    "epistemic_status": (
+                        "conflicted" if item.contradiction_group_id is not None
+                        else "uncertain" if item.uncertainty_note else "supported"
+                    ),
+                    "relevance_level": 2,
+                    **self._memory_perspective(
+                        item, shared_context.profile.display_name,
+                    ),
+                } for item in shared_context.detailed_memories),
+            ])
+            identity_evidence = shared_context.identity_facts
+            retrieved_at = datetime.now(timezone.utc) if memory_ids else None
+            identity_context = grounding_context
+            memory_grounding_context = grounding_context
+            fallback_search_attempted = fallback_search_attempted or (
+                shared_context.retrieval_status == "true_unknown"
+            )
+
+        resolved_entities = self._unique_names([
+            *(shared_context.resolved_entities if shared_context else ()),
+            *([name_resolution.canonical_value]
+              if name_resolution.canonical_value else []),
+            *(
+                entity
+                for memory in memory_evidence
+                for entity in memory.get("entities", ())
+            ),
+        ])
+        conflict_count = (int(identity_result.conflict_present)
+                          + int(fidelity_plan.has_conflict))
+        fact_confidence = (
+            "conflicted" if conflict_count
+            else "uncertain" if fidelity_plan.has_uncertainty
+            else "supported" if (memory_ids or identity_evidence)
+            else "unsupported"
+        )
+        is_broad = (
+            response_query_classification.broad
+            or ConversationContinuity.has_explicit_subject(semantic_message)
+        )
+        coverage = (
+            "none" if not (memory_ids or identity_evidence)
+            else "partial" if is_broad else "focused"
+        )
+        evidence_groups = tuple([
+            *(EvidenceGroup(
+                "identity", record.get("identity_fact_id"),
+                "conflicted" if record.get("conflicting")
+                else "uncertain" if record.get("uncertainty_note")
+                else "supported", dict(record),
+            ) for record in identity_evidence),
+            *(EvidenceGroup(
+                "memory", record.get("memory_id"),
+                record.get("epistemic_status", "supported"), dict(record),
+            ) for record in memory_evidence),
+        ])
+        grounded_turn = GroundedTurnContext(
+            selected_identity_fact_ids=tuple(
+                group.evidence_id for group in evidence_groups
+                if group.kind == "identity" and group.evidence_id is not None
+            ),
+            selected_memory_ids=memory_ids,
+            evidence_groups=evidence_groups,
+            resolved_entities=resolved_entities,
+            topic_anchor=semantic_message.strip(),
+            fact_confidence=fact_confidence,
+            coverage=coverage,
+            conflict_count=conflict_count,
+            uncertain=fidelity_plan.has_uncertainty,
+            supported_relevant_evidence_count=sum(
+                group.epistemic_status == "supported" for group in evidence_groups
+            ),
+            fallback_search_attempted=fallback_search_attempted,
+            retrieval_status=(
+                "error" if not retrieval_available
+                else "true_unknown" if not evidence_groups
+                else "ok"
+            ),
+        )
         return PreparedCompanionInput(
             messages=self._apply_presentation_preferences(self._context_builder.build_chat_messages(
                 history,
@@ -554,11 +866,9 @@ class ChatService:
                 and identity_result.compact_context is not None
             ),
             identity_count=identity_result.candidate_count,
-            conflict_count=(int(identity_result.conflict_present)
-                            + int(fidelity_plan.has_conflict)),
+            conflict_count=conflict_count,
             has_uncertainty=fidelity_plan.has_uncertainty,
-            resolved_entities=((name_resolution.canonical_value,)
-                               if name_resolution.canonical_value else ()),
+            resolved_entities=resolved_entities,
             memory_evidence=memory_evidence,
             identity_evidence=identity_evidence,
             approved_candidate_count=approved_candidate_count,
@@ -566,6 +876,22 @@ class ChatService:
             query_intent=getattr(query_intent, "value", str(query_intent)),
             query_language_mode=getattr(
                 query_language_mode, "value", str(query_language_mode)
+            ),
+            query_broad=(
+                response_query_classification.broad
+                or ConversationContinuity.has_explicit_subject(semantic_message)
+            ),
+            fact_confidence=fact_confidence,
+            coverage=coverage,
+            grounded_turn=grounded_turn,
+            fallback_search_attempted=fallback_search_attempted,
+            retrieval_status=grounded_turn.retrieval_status,
+            profile_engine_invoked=shared_context is not None,
+            profile_fact_count=(
+                shared_context.profile_relevant_fact_count if shared_context else 0
+            ),
+            detailed_memory_count=(
+                shared_context.detailed_relevant_memory_count if shared_context else 0
             ),
         )
 
@@ -591,12 +917,16 @@ class ChatService:
         *, conversation_style: str = "natural", response_length: str = "balanced",
     ) -> CompanionGeneration:
         """Generate text and return internal supplied-memory provenance."""
-        prepared = self._prepare_companion_input(
+        normalized_turn = await LanguageNormalizationService(
+            self._ai_service
+        ).normalize_semantically(user_message)
+        prepared = self.prepare_grounded_personal_turn(
             db,
             conversation,
             user_message,
             conversation_style=conversation_style,
             response_length=response_length,
+            semantic_message_override=normalized_turn.normalized_english_text,
         )
         db.rollback()
         self._log_provider_attempt(prepared, conversation)
@@ -672,14 +1002,16 @@ class ChatService:
         conversation: Conversation,
         user_message: str,
         *, conversation_style: str = "natural", response_length: str = "balanced",
+        semantic_message_override: str | None = None,
     ) -> CompanionStreamPlan:
         """Prepare stream and provenance before provider iteration begins."""
-        prepared = self._prepare_companion_input(
+        prepared = self.prepare_grounded_personal_turn(
             db,
             conversation,
             user_message,
             conversation_style=conversation_style,
             response_length=response_length,
+            semantic_message_override=semantic_message_override,
         )
         # Log while the request-scoped ORM object is still attached.  FastAPI
         # may close yield dependencies before a StreamingResponse body starts.
@@ -764,12 +1096,31 @@ class ChatService:
                 relationship=relationship,
             ),
         )
-        return self._prepare_companion_input(
+        return self.prepare_grounded_personal_turn(
             db,
             transient_conversation,
             user_message,
             history_override=history,
             live_call=True,
+        )
+
+    def prepare_conversation_live_call_input(
+        self, db: Session, *, conversation: Conversation, user_message: str,
+    ) -> PreparedCompanionInput:
+        """Prepare a voice turn from the same durable bounded history as Chat."""
+        history = (
+            db.query(Message)
+            .filter(Message.conversation_id == conversation.conversation_id)
+            .order_by(Message.created_at.desc(), Message.message_id.desc())
+            .limit(self._context_builder.history_query_limit + 1)
+            .all()
+        )
+        history.reverse()
+        if (history and history[-1].role == "user"
+                and history[-1].content.strip() == user_message.strip()):
+            history.pop()
+        return self.prepare_grounded_personal_turn(
+            db, conversation, user_message, history_override=history, live_call=True,
         )
 
     def retrieve_live_call_identity(

@@ -175,7 +175,7 @@ class NameResolution:
             return query
         if unicodedata.normalize("NFKC", self.canonical_value).casefold() in unicodedata.normalize("NFKC", query).casefold():
             return query
-        return f"{query} {self.canonical_value}"
+        return f"{query}\n{self.canonical_value}"
 
 
 @dataclass(frozen=True)

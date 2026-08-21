@@ -1,6 +1,8 @@
 """Transactional orchestration from trusted text sources to Memory candidates."""
 
+import enum
 import logging
+import re
 from collections import Counter
 from datetime import datetime, timezone
 from time import perf_counter
@@ -22,6 +24,8 @@ from app.models.memory import (
     LegacyIdentityFact,
     LegacyStatus,
     Memory,
+    MemoryParticipant,
+    MemoryRevision,
     MemoryReviewStatus,
     StoryMessage,
     StorySession,
@@ -41,6 +45,7 @@ from app.services.memory.provenance import (
 from app.services.memory.storage_contracts import (
     MemoryPipelineErrorDetail,
     MemoryPipelineItem,
+    MemoryOperation,
     MemoryPipelineSourceType,
     MemoryStorageReport,
 )
@@ -56,6 +61,13 @@ from app.services.memory.validation_contracts import MemoryValidationStatus
 
 
 logger = logging.getLogger(__name__)
+
+
+class MemoryAuthorityClass(str, enum.Enum):
+    """Authority boundary for automatic conversational memory writes."""
+
+    PROTECTED_IDENTITY = "protected_identity"
+    NORMAL_MEMORY = "normal_memory"
 
 class MemoryStoragePipeline:
     """Extract, validate, and atomically persist each eligible candidate."""
@@ -289,7 +301,10 @@ class MemoryStoragePipeline:
 
             if (
                 auto_approve
-                and source_type == MemoryPipelineSourceType.CONVERSATION
+                and source_type in {
+                    MemoryPipelineSourceType.CONVERSATION,
+                    MemoryPipelineSourceType.LIVE_CALL,
+                }
                 and self._is_protected_chat_identity_mutation(
                     db, legacy_id, result.normalized_candidate
                 )
@@ -384,6 +399,29 @@ class MemoryStoragePipeline:
                     message="Eligible validation result had no candidate.",
                 )
             )
+            return
+        operation = self._classify_operation(
+            db, legacy_id, result.status, candidate, result.related_memory_ids,
+        )
+        item.operation = operation
+        if (
+            auto_approve
+            and source_type in {
+                MemoryPipelineSourceType.CONVERSATION,
+                MemoryPipelineSourceType.LIVE_CALL,
+            }
+            and result.status == MemoryValidationStatus.POSSIBLE_ENRICHMENT
+            and self._merge_normal_memory_enrichment(
+                db=db,
+                user_id=user_id,
+                legacy_id=legacy_id,
+                candidate=candidate,
+                operation=operation,
+                related_memory_ids=result.related_memory_ids,
+                item=item,
+                report=report,
+            )
+        ):
             return
         fingerprint = build_memory_fingerprint(legacy_id, candidate)
         duplicate = MemoryCRUD.get_memory_by_fingerprint(
@@ -487,6 +525,7 @@ class MemoryStoragePipeline:
         item.contradiction_group_id = memory.contradiction_group_id
         report.memories_created += 1
         report.created_memory_ids.append(memory.memory_id)
+        self._record_operation(report, operation)
         existing.append(memory)
         if result.status == MemoryValidationStatus.POSSIBLE_ENRICHMENT:
             report.possible_enrichments_persisted += 1
@@ -540,10 +579,7 @@ class MemoryStoragePipeline:
             if hasattr(candidate.details, "model_dump") else candidate.details
         )
         claims = details.get("identity_facts", []) if isinstance(details, dict) else []
-        protected = {
-            "full_name", "spouse_name", "child_name", "parent_name",
-            "sibling_name",
-        }
+        protected = {fact_type.value for fact_type in IdentityFactType}
         return [
             claim for claim in claims
             if isinstance(claim, dict)
@@ -552,17 +588,271 @@ class MemoryStoragePipeline:
         ]
 
     @classmethod
+    def authority_class(cls, candidate) -> MemoryAuthorityClass:
+        return (
+            MemoryAuthorityClass.PROTECTED_IDENTITY
+            if cls._protected_identity_claims(candidate)
+            else MemoryAuthorityClass.NORMAL_MEMORY
+        )
+
+    @classmethod
+    def _merge_normal_memory_enrichment(
+        cls,
+        *,
+        db: Session,
+        user_id: int,
+        legacy_id: int,
+        candidate,
+        operation: MemoryOperation,
+        related_memory_ids: Sequence[int],
+        item: MemoryPipelineItem,
+        report: MemoryStorageReport,
+    ) -> bool:
+        """Revision and enrich one unambiguous non-identity canonical memory."""
+        unique_ids = list(dict.fromkeys(related_memory_ids))
+        if (
+            cls.authority_class(candidate)
+            == MemoryAuthorityClass.PROTECTED_IDENTITY
+            or len(unique_ids) != 1
+            or operation not in {MemoryOperation.ENRICH, MemoryOperation.CORRECT}
+        ):
+            return False
+        memory = db.query(Memory).filter(
+            Memory.legacy_id == legacy_id,
+            Memory.memory_id == unique_ids[0],
+            Memory.review_status == MemoryReviewStatus.APPROVED,
+            Memory.superseded_by_memory_id.is_(None),
+        ).with_for_update().first()
+        if memory is None:
+            return False
+        if db.query(LegacyIdentityFact.identity_fact_id).filter(
+            LegacyIdentityFact.source_memory_id == memory.memory_id,
+        ).first() is not None:
+            return False
+
+        previous = cls._memory_snapshot(memory)
+        next_revision = (
+            db.query(MemoryRevision.revision_number)
+            .filter(MemoryRevision.memory_id == memory.memory_id)
+            .order_by(MemoryRevision.revision_number.desc())
+            .limit(1).scalar() or 0
+        ) + 1
+        try:
+            with db.begin_nested():
+                db.add(MemoryRevision(
+                    memory_id=memory.memory_id,
+                    revision_number=next_revision,
+                    edited_by_user_id=user_id,
+                    previous_content=previous,
+                    edit_reason="conversation_enrichment",
+                ))
+                memory.summary = candidate.summary
+                from app.services.memory.review import MemoryReviewService
+                MemoryReviewService._reconcile_named_claim_correction(
+                    db, memory, previous, explicitly_edited={"summary"},
+                )
+                memory.title = candidate.title
+                memory.details = cls._merge_details(
+                    memory.details,
+                    candidate.details.model_dump(mode="json")
+                    if candidate.details is not None else None,
+                )
+                memory.emotional_significance = (
+                    candidate.emotional_significance
+                    or memory.emotional_significance
+                )
+                memory.importance = max(
+                    value for value in (memory.importance, candidate.importance)
+                    if value is not None
+                )
+                memory.extraction_confidence = max(
+                    value for value in (
+                        memory.extraction_confidence,
+                        candidate.extraction_confidence,
+                    ) if value is not None
+                )
+                memory.uncertainty_note = (
+                    candidate.uncertainty_note or memory.uncertainty_note
+                )
+                cls._merge_participants(memory, candidate.participants)
+                cls._merge_tags(db, memory, candidate.tags)
+                memory.provenance.extend(
+                    MemoryCRUD._build_provenance(source)
+                    for source in candidate.provenance
+                )
+                memory.normalized_fingerprint = build_memory_fingerprint(
+                    legacy_id, candidate
+                )
+                memory.embedding = None
+                memory.embedding_model = None
+                memory.embedding_version = None
+                memory.embedding_dimensions = None
+                memory.embedded_at = None
+                memory.updated_at = datetime.now(timezone.utc)
+                db.flush()
+            db.commit()
+            db.refresh(memory)
+        except Exception:
+            db.rollback()
+            return False
+        item.persisted = True
+        item.memory_id = memory.memory_id
+        report.possible_enrichments_persisted += 1
+        cls._record_operation(report, operation)
+        return True
+
+    @classmethod
+    def _classify_operation(
+        cls, db: Session, legacy_id: int, status: MemoryValidationStatus,
+        candidate, related_memory_ids: Sequence[int],
+    ) -> MemoryOperation:
+        summary = " ".join(candidate.summary.casefold().split())
+        strong_add = bool(re.search(
+            r"\b(?:another|additional|second|third|both|two|three|multiple|several)\b",
+            summary,
+        ))
+        correction = bool(re.search(
+            r"\b(?:actually|correction|rather than|instead of|not (?:a|an|the))\b",
+            summary,
+        ))
+        if strong_add:
+            return MemoryOperation.ADD_ENTITY
+        if status != MemoryValidationStatus.POSSIBLE_ENRICHMENT:
+            return MemoryOperation.NEW
+        unique_ids = list(dict.fromkeys(related_memory_ids))
+        if len(unique_ids) != 1:
+            return MemoryOperation.NEW
+        memory = db.query(Memory).filter(
+            Memory.legacy_id == legacy_id,
+            Memory.memory_id == unique_ids[0],
+        ).first()
+        if memory is None:
+            return MemoryOperation.NEW
+        from app.services.memory.review import MemoryReviewService
+        new_name = (
+            MemoryReviewService._named_claim(candidate.summary)
+            or MemoryReviewService._named_claim(candidate.title)
+        )
+        old_name = (
+            MemoryReviewService._named_claim(memory.summary)
+            or MemoryReviewService._named_claim(memory.title)
+        )
+        distinct_names = bool(
+            new_name and old_name and new_name.casefold() != old_name.casefold()
+        )
+        if distinct_names and not correction:
+            return MemoryOperation.ADD_ENTITY
+        if distinct_names or correction:
+            return MemoryOperation.CORRECT
+        return MemoryOperation.ENRICH
+
+    @staticmethod
+    def _record_operation(
+        report: MemoryStorageReport, operation: MemoryOperation,
+    ) -> None:
+        report.operation_counts[operation.value] = (
+            report.operation_counts.get(operation.value, 0) + 1
+        )
+
+    @staticmethod
+    def _merge_details(existing, incoming):
+        if incoming is None:
+            return existing
+        if existing is None:
+            return incoming
+        if isinstance(existing, dict) and isinstance(incoming, dict):
+            merged = dict(existing)
+            for key, value in incoming.items():
+                if value in (None, "", [], {}):
+                    continue
+                merged[key] = MemoryStoragePipeline._merge_details(
+                    merged.get(key), value
+                )
+            return merged
+        if isinstance(existing, list) and isinstance(incoming, list):
+            return existing + [item for item in incoming if item not in existing]
+        return incoming
+
+    @staticmethod
+    def _merge_participants(memory: Memory, participants: Sequence) -> None:
+        known = {
+            (item.name.casefold(), (item.relationship or "").casefold(), item.role or "")
+            for item in memory.participants
+        }
+        for participant in participants:
+            key = (
+                participant.name.casefold(),
+                (participant.relationship or "").casefold(),
+                participant.role or "",
+            )
+            if key not in known:
+                memory.participants.append(MemoryParticipant(
+                    **participant.model_dump()
+                ))
+                known.add(key)
+
+    @staticmethod
+    def _merge_tags(db: Session, memory: Memory, tags: Sequence[str]) -> None:
+        existing = {link.tag.name.casefold() for link in memory.tag_links}
+        MemoryCRUD._attach_tags(
+            db, memory,
+            [tag for tag in tags if tag.casefold() not in existing],
+        )
+
+    @staticmethod
+    def _memory_snapshot(memory: Memory) -> dict:
+        return {
+            "title": memory.title,
+            "summary": memory.summary,
+            "category": memory.category,
+            "memory_type": getattr(memory.memory_type, "value", memory.memory_type),
+            "details": memory.details,
+            "emotional_significance": memory.emotional_significance,
+            "importance": memory.importance,
+            "uncertainty_note": memory.uncertainty_note,
+            "participants": [{
+                "name": item.name,
+                "relationship": item.relationship,
+                "role": item.role,
+            } for item in memory.participants],
+            "tags": [link.tag.name for link in memory.tag_links],
+        }
+
+    @classmethod
     def _is_protected_chat_identity_mutation(
         cls, db: Session, legacy_id: int, candidate
     ) -> bool:
         """Protect established canonical names only during automatic Chat writes."""
         claims = cls._protected_identity_claims(candidate)
-        if not claims:
-            return False
         legacy = db.query(Legacy).filter(Legacy.legacy_id == legacy_id).first()
         existing = db.query(LegacyIdentityFact).filter(
             LegacyIdentityFact.legacy_id == legacy_id
         ).all()
+        if not claims:
+            summary = normalize_identity_value(
+                str(getattr(candidate, "summary", "") or "")
+            )
+            keywords = {
+                IdentityFactType.FULL_NAME.value: ("full name",),
+                IdentityFactType.PREFERRED_NAME.value: ("preferred name", "called"),
+                IdentityFactType.SPOUSE_NAME.value: ("spouse", "husband", "wife"),
+                IdentityFactType.CHILD_NAME.value: ("child", "son", "daughter"),
+                IdentityFactType.PARENT_NAME.value: ("parent", "mother", "father"),
+                IdentityFactType.SIBLING_NAME.value: ("sibling", "brother", "sister"),
+                IdentityFactType.BIRTH_DATE.value: ("born", "birth date", "birthday"),
+                IdentityFactType.BIRTHPLACE.value: ("born in", "birthplace"),
+                IdentityFactType.HOMETOWN.value: ("hometown",),
+                IdentityFactType.OCCUPATION.value: ("occupation", "worked as", "job"),
+                IdentityFactType.EDUCATION.value: ("education", "studied at", "degree"),
+            }
+            for fact in existing:
+                fact_type = str(getattr(fact.fact_type, "value", fact.fact_type))
+                if (
+                    any(label in summary for label in keywords.get(fact_type, ()))
+                    and normalize_identity_value(fact.value) not in summary
+                ):
+                    return True
+            return False
         for claim in claims:
             fact_type = str(getattr(
                 claim.get("fact_type"), "value", claim.get("fact_type")

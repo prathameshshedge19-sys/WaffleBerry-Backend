@@ -12,10 +12,10 @@ from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisco
 from sqlalchemy.orm import Session
 
 from app.crud.memory import LegacyCRUD
-from app.crud.user import UserCRUD
+from app.crud.user import ConversationCRUD, MessageCRUD, UserCRUD
 from app.db import get_db
 from app.dependencies.auth import get_current_user
-from app.models.user import User
+from app.models.user import Message, MessageRole, User
 from app.schemas.live_call import (
     LiveCallOperationalEvent,
     LiveCallMemoryTurn,
@@ -23,6 +23,9 @@ from app.schemas.live_call import (
     LiveCallSessionEndResponse,
     LiveCallSessionResponse,
     RealtimeBootstrapResponse,
+    RealtimeRouteRequest,
+    RealtimeRouteResponse,
+    RealtimeAssistantTurn,
     RealtimeSpeechRequest,
     RealtimeSpeechResponse,
     RealtimeToolRequest,
@@ -38,12 +41,19 @@ from app.services.voice_profile_resolver import StandardVoiceResolver
 from app.services.persona_profile import PersonaProfileService
 from app.config import get_settings
 from app.dependencies.ai import (
+    get_ai_service,
+    get_chat_service,
     get_live_call_turn_service,
     get_realtime_bootstrap_provider,
     get_realtime_tool_service,
+    get_grounded_answer_service,
 )
+from app.services.grounded_answer import GroundedAnswerService
 from app.services.live_call import LiveCallTurnService
+from app.services.chat_service import ChatService
 from app.services.ai.exceptions import AITimeoutError
+from app.services.ai.ai_service import AIService
+from app.services.language_normalization import LanguageNormalizationService
 from app.services.ai.transcription_service import AudioValidationError
 from app.services.realtime_live_call import (
     OpenAIRealtimeBootstrapProvider,
@@ -51,7 +61,10 @@ from app.services.realtime_live_call import (
     RealtimeToolService,
     choose_live_call_delivery,
 )
-from app.services.memory.auto_learning import schedule_live_call_learning
+from app.services.memory.auto_learning import (
+    schedule_conversation_learning,
+    schedule_live_call_learning,
+)
 
 
 router = APIRouter()
@@ -217,6 +230,57 @@ def _effective_voice(db: Session, user_id: int, relationship: str) -> str:
 
 
 @router.post(
+    "/live-call/realtime/{session_id}/route",
+    response_model=RealtimeRouteResponse,
+)
+async def route_realtime_turn(
+    session_id: str,
+    request: RealtimeRouteRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    tools: RealtimeToolService = Depends(get_realtime_tool_service),
+    ai_service: AIService = Depends(get_ai_service),
+):
+    session = live_call_sessions.authorize_user(session_id, current_user.user_id)
+    if session is None or session.engine != "realtime":
+        raise HTTPException(status_code=404, detail="Call session was not found.")
+    try:
+        recent_language = (
+            tools.recent_language_context(session)
+            if hasattr(tools, "recent_language_context") else None
+        )
+        normalized_turn = await LanguageNormalizationService(
+            ai_service
+        ).normalize_semantically(request.text, recent_language)
+        if isinstance(tools, RealtimeToolService):
+            route = tools.route_turn(
+                session, request.turn_id, request.text, normalized_turn=normalized_turn,
+            )
+        else:
+            route = tools.route_turn(session, request.turn_id, request.text)
+            if normalized_turn.response_language != "english":
+                route = {**route, "response_language": normalized_turn.response_language}
+    except ValueError:
+        raise HTTPException(status_code=409, detail="Live Call turn is stale or invalid.") from None
+    conversation = ConversationCRUD.get_user_conversation(
+        db, session.conversation_id, current_user.user_id,
+    )
+    if conversation is None or conversation.legacy_id != session.legacy_id:
+        raise HTTPException(status_code=404, detail="Call conversation was not found.")
+    _message, user_created = MessageCRUD.create_idempotent_source_message(
+        db, conversation, role=MessageRole.USER, content=request.text,
+        source_session_id=session.source_session_id,
+        source_event_id=f"turn:{request.turn_id}",
+    )
+    logger.info(
+        "TURN_PERSISTENCE turn_id=%s response_owner=pending user_persisted=true "
+        "assistant_persisted=false completion_status=%s",
+        request.turn_id, "created" if user_created else "duplicate",
+    )
+    return RealtimeRouteResponse(**route)
+
+
+@router.post(
     "/live-call/session",
     response_model=LiveCallSessionResponse,
     status_code=status.HTTP_201_CREATED,
@@ -225,12 +289,25 @@ async def create_live_call_session(
     request: LiveCallSessionCreate,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    chat_service: ChatService = Depends(get_chat_service),
 ):
     legacy = LegacyCRUD.get_user_legacy(
         db, request.legacy_id, current_user.user_id
     )
     if legacy is None or getattr(legacy.status, "value", legacy.status) != "active":
         raise HTTPException(status_code=404, detail="Legacy was not found.")
+    if request.conversation_id is None:
+        conversation = ConversationCRUD.create_conversation(
+            db, user_id=current_user.user_id, legacy_id=legacy.legacy_id,
+        )
+    else:
+        conversation = ConversationCRUD.get_user_conversation(
+            db, request.conversation_id, current_user.user_id,
+        )
+        if conversation is None:
+            raise HTTPException(status_code=404, detail="Conversation was not found.")
+        if conversation.legacy_id != legacy.legacy_id:
+            raise HTTPException(status_code=409, detail="Conversation belongs to another Legacy.")
     # Construct cached provider clients before the WebSocket greeting path.
     # This performs no transcription, generation, embedding, or synthesis call.
     get_live_call_turn_service()
@@ -242,6 +319,7 @@ async def create_live_call_session(
     )
     session = live_call_sessions.create(
         user_id=current_user.user_id,
+        conversation_id=conversation.conversation_id,
         legacy_id=legacy.legacy_id,
         legacy_name=legacy.display_name,
         relationship=legacy.relationship,
@@ -254,6 +332,11 @@ async def create_live_call_session(
         persona_profile=PersonaProfileService().build(
             db, legacy_id=legacy.legacy_id,
         ),
+        conversation_context=json.dumps(
+            chat_service.bounded_conversation_history(db, conversation),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ),
     )
     logger.info(
         "LIVE_CALL_ENGINE session_id=%s effective_voice=%s feature_enabled=%s "
@@ -263,6 +346,7 @@ async def create_live_call_session(
     )
     return LiveCallSessionResponse(
         session_id=session.session_id,
+        conversation_id=session.conversation_id,
         transport_token=session.transport_token,
         legacy_name=session.legacy_name,
         relationship=session.relationship,
@@ -340,6 +424,7 @@ async def execute_realtime_tool(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
     tools: RealtimeToolService = Depends(get_realtime_tool_service),
+    answers: GroundedAnswerService = Depends(get_grounded_answer_service),
 ):
     session = live_call_sessions.authorize_user(session_id, current_user.user_id)
     if session is None or session.engine != "realtime":
@@ -348,7 +433,7 @@ async def execute_realtime_tool(
         result = await asyncio.wait_for(
             asyncio.to_thread(
                 tools.execute, db, session, request.name, request.arguments,
-                request.call_id,
+                request.call_id, request.turn_id,
             ),
             timeout=get_settings().live_call_realtime_tool_timeout_seconds,
         )
@@ -361,6 +446,29 @@ async def execute_realtime_tool(
             request.name,
         )
         result = {"status": "error", "uncertain": True}
+    if result.get("status") in {"supported", "conflicted", "unsupported"}:
+        query = str(result.get("topic_anchor") or request.arguments.get("query") or "")
+        if hasattr(tools, "prepare_rendering_result"):
+            result = tools.prepare_rendering_result(session, query, result)
+        try:
+            plan, answer, source = await answers.produce(query, result)
+        except Exception:
+            logger.exception("live_call_grounded_answer_failed session_id=%s", session_id)
+            plan = answers.plan(query, result)
+            answer, source = answers.localized_fallback(
+                plan,
+                str(result.get("original_query") or query),
+                str(result.get("response_language") or ""),
+            ), "deterministic_fallback"
+        if hasattr(tools, "record_rendered_facts"):
+            tools.record_rendered_facts(session, plan)
+        result = {**result, "answer_plan": plan.public_dict(),
+                  "validated_text": answer, "answer_source": source}
+        if hasattr(tools, "register_validated_response"):
+            tools.register_validated_response(
+                session, request.turn_id, f"validated-{request.call_id}",
+                answer_plan_status=plan.status, text=answer,
+            )
     return RealtimeToolResponse(call_id=request.call_id, result=result)
 
 
@@ -377,11 +485,13 @@ async def render_realtime_external_speech(
     session = live_call_sessions.authorize_user(session_id, current_user.user_id)
     if session is None or session.engine != "realtime":
         raise HTTPException(status_code=404, detail="Call session was not found.")
-    if session.speech_renderer not in {"external_streaming_tts", "external_nonstreaming_tts"}:
-        raise HTTPException(status_code=409, detail="External speech is not enabled for this call.")
+    if session.speech_renderer not in {
+        "realtime_native", "external_streaming_tts", "external_nonstreaming_tts",
+    }:
+        raise HTTPException(status_code=409, detail="Validated speech is not enabled for this call.")
     started = monotonic()
     try:
-        speech = await service.render_external_phrase(
+        speech = await service.render_validated_phrase(
             session, request.text.strip(), generation_id=request.generation_id,
         )
     except ValueError:
@@ -437,7 +547,8 @@ async def record_live_call_operational_event(
         "turn_recovered_count=%s recovery_count=%s response_failure_count=%s "
         "external_tts_failure_count=%s memory_route_count=%s "
         "memory_supported_count=%s memory_unsupported_count=%s "
-        "memory_error_count=%s memory_timeout_count=%s",
+        "memory_error_count=%s memory_timeout_count=%s startup_phase=%s "
+        "failure_code=%s peer_state=%s data_channel_state=%s",
         event.event, _safe_session_id(session_id), session.engine,
         session.speech_renderer, session.effective_voice, event.outcome,
         event.failure_category, event.duration_ms, event.turn_started_count,
@@ -447,6 +558,8 @@ async def record_live_call_operational_event(
         event.memory_route_count, event.memory_supported_count,
         event.memory_unsupported_count, event.memory_error_count,
         event.memory_timeout_count,
+        event.startup_phase or "na", event.failure_code or "na",
+        event.peer_state or "na", event.data_channel_state or "na",
     )
 
 
@@ -459,13 +572,70 @@ async def learn_realtime_memory_turn(
     session = live_call_sessions.authorize_user(session_id, current_user.user_id)
     if session is None or session.engine != "realtime":
         raise HTTPException(status_code=404, detail="Call session was not found.")
-    if live_call_sessions.claim_memory_learning_turn(session_id, turn.turn_id):
-        schedule_live_call_learning(
-            user_id=session.user_id, legacy_id=session.legacy_id,
-            session_safe_id=_safe_session_id(session_id), turn_id=turn.turn_id,
-            user_text=turn.text,
-        )
+    # Canonical conversation persistence owns learning now. Retain this endpoint
+    # as a compatibility no-op for older clients during rollout.
     return {"accepted": True}
+
+
+@router.post("/live-call/realtime/{session_id}/assistant-turn", status_code=202)
+async def persist_realtime_assistant_turn(
+    session_id: str,
+    turn: RealtimeAssistantTurn,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    tools: RealtimeToolService = Depends(get_realtime_tool_service),
+    answers: GroundedAnswerService = Depends(get_grounded_answer_service),
+):
+    session = live_call_sessions.authorize_user(session_id, current_user.user_id)
+    if session is None or session.engine != "realtime":
+        raise HTTPException(status_code=404, detail="Call session was not found.")
+    persistence_decision = (
+        tools.assistant_turn_decision(
+            session, turn.turn_id, turn.response_id, turn.text,
+            response_owner=turn.response_owner,
+            playback_completed=turn.playback_completed,
+        )
+        if hasattr(tools, "assistant_turn_decision")
+        else "create" if tools.accepts_assistant_turn(session, turn.turn_id)
+        else "ignore"
+    )
+    if persistence_decision in {"duplicate", "ignore", "conflict"}:
+        return {
+            "accepted": persistence_decision == "duplicate",
+            "created": False,
+            "status": persistence_decision,
+        }
+    conversation = ConversationCRUD.get_user_conversation(
+        db, session.conversation_id, current_user.user_id,
+    )
+    if conversation is None or conversation.legacy_id != session.legacy_id:
+        raise HTTPException(status_code=404, detail="Call conversation was not found.")
+    _message, created = MessageCRUD.create_idempotent_source_message(
+        db, conversation, role=MessageRole.ASSISTANT, content=turn.text,
+        source_session_id=session.source_session_id,
+        source_event_id=f"turn:{turn.turn_id}",
+    )
+    if created:
+        user_message = (
+            db.query(Message)
+            .filter(
+                Message.conversation_id == conversation.conversation_id,
+                Message.source == "live_call",
+                Message.source_session_id == session.source_session_id,
+                Message.source_event_id == f"turn:{turn.turn_id}",
+                Message.role == MessageRole.USER,
+            )
+            .first()
+        )
+        if (user_message is not None
+                and (not hasattr(tools, "should_learn_user_turn")
+                     or tools.should_learn_user_turn(session, turn.turn_id))):
+            schedule_conversation_learning(
+                user_id=session.user_id, legacy_id=session.legacy_id,
+                conversation_id=conversation.conversation_id,
+                user_text=user_message.content,
+            )
+    return {"accepted": True, "created": created, "status": "created" if created else "duplicate"}
 
 
 def _transport_token(websocket: WebSocket) -> str | None:

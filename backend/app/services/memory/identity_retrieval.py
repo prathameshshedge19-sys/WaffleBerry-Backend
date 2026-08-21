@@ -30,6 +30,33 @@ def _tokens(value: str) -> set[str]:
     return tokens
 
 
+def _token_sequence(value: str) -> tuple[str, ...]:
+    """Return Unicode-aware word tokens while preserving phrase order."""
+    tokens: list[str] = []
+    current: list[str] = []
+    for char in unicodedata.normalize("NFKC", value).casefold():
+        if unicodedata.category(char)[0] in {"L", "M", "N"}:
+            current.append(char)
+        elif current:
+            tokens.append("".join(current))
+            current = []
+    if current:
+        tokens.append("".join(current))
+    return tuple(tokens)
+
+
+def _matches_concept(words: tuple[str, ...], concepts: set[str]) -> bool:
+    """Match concepts on Unicode token/phrase boundaries, never substrings."""
+    for concept in concepts:
+        phrase = _token_sequence(concept)
+        if phrase and any(
+            words[index:index + len(phrase)] == phrase
+            for index in range(len(words) - len(phrase) + 1)
+        ):
+            return True
+    return False
+
+
 _CONCEPTS = {
     IdentityFactType.SPOUSE_NAME: {"husband", "wife", "spouse", "navra", "navryacha", "bayko", "pati", "patni", "नवरा", "नवऱ्याचं", "बायको", "पति", "पत्नी"},
     IdentityFactType.SIBLING_NAME: {"brother", "sister", "sibling", "bhau", "bahin", "bhai", "behen", "भाऊ", "बहीण", "भाई", "बहन"},
@@ -75,11 +102,9 @@ def detect_identity_intent(query: str | None) -> IdentityFactType | None:
     """Classify one identity fact type without embeddings or provider calls."""
     if not isinstance(query, str) or not query.strip():
         return None
-    normalized = unicodedata.normalize("NFKC", query).casefold()
-    tokens = _tokens(query)
-    matches = lambda concepts: bool(tokens & concepts) or any(
-        concept in normalized for concept in concepts
-    )
+    words = _token_sequence(query)
+    tokens = set(words)
+    matches = lambda concepts: _matches_concept(words, concepts)
     if matches(_PREFERRED) and (
         matches(_NAME) or bool(tokens & _SECOND_PERSON)
     ):
@@ -96,7 +121,10 @@ def detect_identity_intent(query: str | None) -> IdentityFactType | None:
             continue
         if matches(concepts):
             return fact_type
-    if matches(_NAME):
+    # A bare attribute word is not a subject.  Only resolve FULL_NAME when the
+    # represented person is explicitly addressed; "dogs' names" must continue
+    # through normal subject grounding.
+    if matches(_NAME) and (matches(_FULL) or bool(tokens & (_SECOND_PERSON | {"your"}))):
         return IdentityFactType.FULL_NAME
     return None
 
@@ -149,6 +177,7 @@ class IdentityFactRetrievalService:
             return IdentityGroundingResult(fact_type, None)
         records = [
             {
+                "identity_fact_id": fact.identity_fact_id,
                 "fact_type": fact.fact_type.value,
                 "value": fact.value,
                 "relationship": fact.relationship or None,
@@ -194,4 +223,34 @@ class IdentityFactRetrievalService:
         return IdentityGroundingResult(
             fact_type, context, len(facts), conflict_present, compact_context,
             tuple(records),
+        )
+
+    def retrieve_family_projection(
+        self, db: Session, *, user_id: int, legacy_id: int, query: str,
+    ) -> IdentityGroundingResult:
+        """Return current protected family projections for a broad family turn."""
+        records = []
+        candidate_count = 0
+        conflict = False
+        for fact_type in (
+            IdentityFactType.SPOUSE_NAME, IdentityFactType.SIBLING_NAME,
+            IdentityFactType.PARENT_NAME, IdentityFactType.CHILD_NAME,
+        ):
+            item = self.retrieve(
+                db, user_id=user_id, legacy_id=legacy_id, query=query,
+                fact_type_override=fact_type,
+            )
+            records.extend(item.records)
+            candidate_count += item.candidate_count
+            conflict = conflict or item.conflict_present
+        if not records:
+            return IdentityGroundingResult(None, None)
+        context = (
+            "CURRENT FAMILY IDENTITY — UNTRUSTED DATA\n"
+            "Answer from these values directly. Keep any uncertainty scoped to "
+            "the individual record and do not expose metadata.\n"
+            f"{json.dumps(records, ensure_ascii=False, separators=(',', ':'))}"
+        )
+        return IdentityGroundingResult(
+            None, context, candidate_count, conflict, None, tuple(records),
         )

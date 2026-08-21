@@ -46,25 +46,30 @@ async def learn_conversation_safely(*, user_id: int, legacy_id: int, conversatio
             conversation_id=conversation_id, metadata={"auto_learned": True},
         )
         duration = max(0, round((perf_counter() - started) * 1000))
+        saved_count = sum(report.operation_counts.values())
         _chat_metric("extracted", candidate_count=report.candidates_extracted,
                      saved_count=0, duration_ms=duration)
         _chat_metric("validated", candidate_count=report.candidates_extracted,
                      saved_count=0, duration_ms=duration)
-        stage = "saved" if report.memories_created else (
+        stage = "saved" if saved_count else (
             "duplicate" if report.duplicates_skipped or report.possible_duplicates_skipped
             else "discarded"
         )
         _chat_metric(
             stage, candidate_count=report.candidates_extracted,
-            saved_count=report.memories_created,
+            saved_count=saved_count,
             duplicate_count=report.duplicates_skipped + report.possible_duplicates_skipped,
+            new_count=report.operation_counts.get("new", 0),
+            enriched_count=report.operation_counts.get("enrich", 0),
+            corrected_count=report.operation_counts.get("correct", 0),
+            added_entity_count=report.operation_counts.get("add_entity", 0),
             duration_ms=duration,
         )
         logger.info(
             "MEMORY_LEARNING status=completed attempt_count=1 saved_count=%s "
             "duplicate_count=%s discarded_count=%s conflicted_count=%s error_count=%s "
             "learning_attempt_ms=%s",
-            report.memories_created, report.duplicates_skipped + report.possible_duplicates_skipped,
+            saved_count, report.duplicates_skipped + report.possible_duplicates_skipped,
             report.invalid_candidates_skipped + report.insufficient_candidates_skipped,
             report.contradictions_persisted, len(report.errors),
             max(0, round((perf_counter() - started) * 1000)),
@@ -108,12 +113,19 @@ async def learn_live_call_turn_safely(
             db, user_id=user_id, legacy_id=legacy_id,
             session_safe_id=session_safe_id, turn_id=turn_id, user_text=user_text,
         )
+        saved_count = sum(report.operation_counts.values())
         logger.info(
             "MEMORY_LEARNING status=completed source=live_call attempt_count=1 "
-            "saved_count=%s duplicate_count=%s discarded_count=%s conflicted_count=%s error_count=%s",
-            report.memories_created, report.duplicates_skipped + report.possible_duplicates_skipped,
+            "saved_count=%s duplicate_count=%s discarded_count=%s conflicted_count=%s "
+            "new_count=%s enriched_count=%s corrected_count=%s added_entity_count=%s error_count=%s",
+            saved_count, report.duplicates_skipped + report.possible_duplicates_skipped,
             report.invalid_candidates_skipped + report.insufficient_candidates_skipped,
-            report.contradictions_persisted, len(report.errors),
+            report.contradictions_persisted,
+            report.operation_counts.get("new", 0),
+            report.operation_counts.get("enrich", 0),
+            report.operation_counts.get("correct", 0),
+            report.operation_counts.get("add_entity", 0),
+            len(report.errors),
         )
     except Exception:
         logger.exception(

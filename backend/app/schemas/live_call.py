@@ -8,11 +8,13 @@ from pydantic import BaseModel, ConfigDict, Field
 
 class LiveCallSessionCreate(BaseModel):
     legacy_id: int = Field(gt=0)
+    conversation_id: int | None = Field(default=None, gt=0)
     engine: Literal["auto", "realtime", "cascade"] = "auto"
 
 
 class LiveCallSessionResponse(BaseModel):
     session_id: str
+    conversation_id: int
     transport_token: str
     transport: Literal["websocket", "webrtc"] = "websocket"
     engine: Literal["cascade", "realtime"] = "cascade"
@@ -71,6 +73,21 @@ class LiveCallOperationalEvent(BaseModel):
     memory_unsupported_count: int = Field(default=0, ge=0, le=10_000)
     memory_error_count: int = Field(default=0, ge=0, le=10_000)
     memory_timeout_count: int = Field(default=0, ge=0, le=10_000)
+    startup_phase: Literal[
+        "controller_created", "microphone_start", "microphone_ready", "session_creating",
+        "session_created", "bootstrap_start", "bootstrap_received", "peer_created",
+        "local_track_added", "offer_created", "local_description_set", "sdp_request_start",
+        "sdp_response_received", "remote_description_set", "data_channel_wait",
+        "data_channel_open", "remote_track_received", "greeting_requested", "ready",
+        "startup_failed", "cleanup",
+    ] | None = None
+    failure_code: str | None = Field(default=None, min_length=1, max_length=64, pattern=r"^[a-z0-9_]+$")
+    peer_state: Literal[
+        "new", "connecting", "connected", "disconnected", "failed", "closed", "unavailable"
+    ] | None = None
+    data_channel_state: Literal[
+        "connecting", "open", "closing", "closed", "unavailable"
+    ] | None = None
 
 
 class LiveCallMemoryTurn(BaseModel):
@@ -89,6 +106,7 @@ class RealtimeBootstrapResponse(BaseModel):
 
 
 class RealtimeToolRequest(BaseModel):
+    turn_id: int = Field(gt=0, le=10_000)
     call_id: str = Field(min_length=1, max_length=200)
     name: Literal["get_legacy_identity_context", "retrieve_legacy_memory_context"]
     arguments: dict = Field(default_factory=dict)
@@ -97,6 +115,31 @@ class RealtimeToolRequest(BaseModel):
 class RealtimeToolResponse(BaseModel):
     call_id: str
     result: dict
+
+
+class RealtimeRouteRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    turn_id: int = Field(gt=0, le=10_000)
+    text: str = Field(min_length=1, max_length=500)
+
+
+class RealtimeRouteResponse(BaseModel):
+    route: Literal["direct", "identity", "memory", "followup"]
+    tool_name: Literal[
+        "get_legacy_identity_context", "retrieve_legacy_memory_context"
+    ] | None = None
+    response_language: Literal["english", "marathi", "hindi"] = "english"
+
+
+class RealtimeAssistantTurn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    turn_id: int = Field(gt=0, le=10_000)
+    response_id: str = Field(min_length=1, max_length=200)
+    text: str = Field(min_length=1, max_length=4000)
+    response_owner: Literal["native_realtime", "validated_personal"] = "native_realtime"
+    playback_completed: bool = False
 
 
 class RealtimeSpeechRequest(BaseModel):

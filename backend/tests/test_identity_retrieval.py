@@ -82,6 +82,24 @@ class IdentityIntentTests(unittest.TestCase):
             with self.subTest(query=query):
                 self.assertIsNone(detect_identity_intent(query))
 
+    def test_romanized_relationship_terms_do_not_match_inside_unrelated_words(self):
+        for query in (
+            "What is the capital of Germany?",
+            "What is capitalism?",
+            "Tell me about hospital care.",
+            "What does capitulate mean?",
+        ):
+            with self.subTest(query=query):
+                self.assertIsNone(detect_identity_intent(query))
+
+        for query, expected in (
+            ("Who was your pita?", IdentityFactType.PARENT_NAME),
+            ("Who is your husband?", IdentityFactType.SPOUSE_NAME),
+            ("What was your brother's name?", IdentityFactType.SIBLING_NAME),
+        ):
+            with self.subTest(query=query):
+                self.assertEqual(detect_identity_intent(query), expected)
+
 
 class IdentityRetrievalTests(unittest.TestCase):
     @classmethod

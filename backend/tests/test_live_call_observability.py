@@ -53,6 +53,20 @@ def test_memory_unsupported_is_counted_separately_from_error_and_timeout():
     assert value.memory_timeout_count == 1
 
 
+def test_startup_failure_boundary_is_allowlisted_and_bounded():
+    value = event(
+        outcome="startup_failed", failure_category="sdp_exchange",
+        startup_phase="sdp_request_start", failure_code="sdp_provider_rejected",
+        peer_state="connecting", data_channel_state="connecting",
+    )
+    assert value.startup_phase == "sdp_request_start"
+    assert value.failure_code == "sdp_provider_rejected"
+    with pytest.raises(ValidationError):
+        event(startup_phase="private free form phase")
+    with pytest.raises(ValidationError):
+        event(failure_code="raw browser message with spaces")
+
+
 def test_operational_log_uses_safe_correlation_and_aggregate_fields(caplog):
     live_call_sessions.clear()
     session = live_call_sessions.create(
@@ -63,13 +77,17 @@ def test_operational_log_uses_safe_correlation_and_aggregate_fields(caplog):
     caplog.set_level(logging.INFO, logger="app.api.v1.live_call")
     asyncio.run(record_live_call_operational_event(
         session.session_id,
-        event(turn_started_count=2, turn_completed_count=1, turn_failed_count=1),
+        event(turn_started_count=2, turn_completed_count=1, turn_failed_count=1,
+              startup_phase="data_channel_wait", failure_code="data_channel_timeout",
+              peer_state="connecting", data_channel_state="connecting"),
         SimpleNamespace(user_id=7),
     ))
     message = next(record.getMessage() for record in caplog.records
                    if "LIVE_CALL_OPERATIONAL" in record.getMessage())
     assert "event=call_ended" in message
     assert "turn_started_count=2" in message
+    assert "startup_phase=data_channel_wait" in message
+    assert "failure_code=data_channel_timeout" in message
     assert session.session_id not in message
     for private in ("Private Name", "Private Relation", "transport_token"):
         assert private not in message

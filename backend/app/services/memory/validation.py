@@ -198,10 +198,14 @@ class MemoryValidationService:
                 self._candidate_subjects(normalized)
                 & self._existing_subjects(memory)
             )
+            topic_overlap = bool((
+                {tag.casefold() for tag in normalized.tags}
+                & self._existing_tags(memory)
+            ) - {"family"})
             if (
                 same_category
                 and subject_overlap
-                and score >= 0.35
+                and (score >= 0.35 or topic_overlap)
                 and self._adds_information(normalized, memory)
             ):
                 enrichment_matches.append((memory.memory_id, score))

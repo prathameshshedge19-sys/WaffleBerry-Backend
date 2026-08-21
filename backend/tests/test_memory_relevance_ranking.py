@@ -112,6 +112,108 @@ class MemoryRelevanceRankerTests(unittest.TestCase):
                     self.ranker.classify_query_intent(query), expected
                 )
 
+    def test_family_and_pet_taxonomy_is_paraphrase_invariant(self):
+        for query in (
+            "tell me about your family", "who is in your family",
+            "family members", "names of your family members", "who are your relatives",
+        ):
+            with self.subTest(query=query):
+                self.assertEqual(self.ranker.classify_query_intent(query), "family")
+        for query in (
+            "do you have dogs", "what animals do we have", "what pets did you have",
+        ):
+            with self.subTest(query=query):
+                self.assertEqual(self.ranker.classify_query_intent(query), "pets")
+
+    def test_broad_personal_subject_queries_retrieve_known_specific_attributes(self):
+        cases = (
+            ("Tell me about our TV.", self.item(41, title="85-inch TV", summary="Our TV is 85 inches.")),
+            ("Tell me about our car.", self.item(42, title="Family car", summary="Our car is a Toyota.")),
+            ("Tell me about our house.", self.item(43, title="Family house", summary="Our house is in Pune.")),
+            ("Tell me about our garden.", self.item(44, title="Home garden", summary="Our garden has roses.")),
+            ("Tell me about our dog.", self.item(45, title="Dog named Bruno", summary="Our dog Bruno is a Labrador.", tags=["dog", "labrador"])),
+            ("Tell me about our trip.", self.item(46, title="Goa trip", summary="Our trip was to Goa.")),
+        )
+        for query, memory in cases:
+            with self.subTest(query=query):
+                classification = self.ranker.classify_query(query)
+                self.assertTrue(classification.broad)
+                self.assertEqual(
+                    [item.memory_id for item in self.ranker.rank([memory], query)],
+                    [memory.memory_id],
+                )
+
+    def test_broad_speech_transcript_tolerates_one_safe_subject_token_error(self):
+        dog = self.item(
+            47, title="Dog named Bruno", summary="Our dogs are Bruno and Luffy.",
+            tags=["dog", "pet", "labrador"],
+        )
+        self.assertEqual(
+            [item.memory_id for item in self.ranker.rank(
+                [dog], "Can you tell me about our docs?"
+            )],
+            [47],
+        )
+        self.assertEqual(self.ranker.rank([dog], "Tell me about our cars."), [])
+
+    def test_personal_pet_questions_are_memory_scoped_but_general_pet_questions_are_not(self):
+        for query in (
+            "What was your dog's name?", "Tell me about your cat.",
+            "What pets did you have?",
+        ):
+            with self.subTest(query=query):
+                self.assertEqual(self.ranker.classify_query_intent(query), "pets")
+
+        for query in ("What is a Labrador?", "What food can dogs eat?"):
+            with self.subTest(query=query):
+                self.assertIsNone(self.ranker.classify_query_intent(query))
+
+        memories = [
+            self.item(
+                40, title="Our dog Bruno", summary="My dog's name was Bruno.",
+                participant_names=["Bruno"], participant_relationships=["pet"],
+                tags=["dog"],
+            ),
+            self.item(
+                41, title="Our cat Mili", summary="Mili was our cat.",
+                participant_names=["Mili"], participant_relationships=["pet"],
+                tags=["cat"],
+            ),
+        ]
+        self.assertEqual(
+            [item.memory_id for item in self.ranker.rank(memories, "What was your dog's name?")],
+            [40],
+        )
+        self.assertEqual(
+            [item.memory_id for item in self.ranker.rank(memories, "Tell me about your cat")],
+            [41],
+        )
+        self.assertEqual(
+            [item.memory_id for item in self.ranker.rank(memories, "What was your cat's name?")],
+            [41],
+        )
+        self.assertEqual(
+            [item.memory_id for item in self.ranker.rank(memories, "Tell me about your dog")],
+            [40],
+        )
+        self.assertEqual(
+            {item.memory_id for item in self.ranker.rank(memories, "What pets did you have?")},
+            {40, 41},
+        )
+
+        generic_pet = self.item(
+            42, title="A beloved companion", summary="My pet followed me everywhere.",
+            participant_relationships=["pet"], tags=["pet"],
+        )
+        dog_with_generic = self.ranker.rank(
+            [memories[0], memories[1], generic_pet],
+            "What was your dog's name?",
+        )
+        self.assertEqual(
+            [item.memory_id for item in dog_with_generic],
+            [40, 42],
+        )
+
     def test_teaching_relationship_retrieves_without_implying_profession(self):
         teaching = self.item(
             2,
@@ -393,6 +495,19 @@ class MemoryRelevanceServiceTests(unittest.TestCase):
         )
         self.assertEqual(result.memories, [])
         self.assertEqual(result.matched_memory_count, 0)
+
+    def test_approved_pet_name_memory_is_retrieved_by_personal_pet_question(self):
+        memory = self.add_memory(
+            MemoryReviewStatus.APPROVED,
+            "Our dog Bruno",
+        )
+        result = self.service.search_approved(
+            self.db, user_id=self.owner.user_id,
+            legacy_id=self.legacy.legacy_id,
+            query="What was your dog's name?",
+        )
+        self.assertEqual([item.memory_id for item in result.memories], [memory.memory_id])
+        self.assertIn("dog", result.memories[0].matched_terms)
 
     def test_cross_owner_and_missing_legacy_use_same_not_found(self):
         for user_id, legacy_id in (
