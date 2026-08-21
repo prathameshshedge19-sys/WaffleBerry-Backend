@@ -406,7 +406,8 @@ class OpenAIProvider(AIProvider):
 
     def _log_provider_failure(self, exc: OpenAIError, *, operation: str) -> None:
         """Log machine-readable provider metadata without response content."""
-        if not getattr(self._settings, "debug", False):
+        settings = getattr(self, "_settings", None)
+        if not getattr(settings, "debug", False):
             return
         status_code = getattr(exc, "status_code", None)
         logger.error(
@@ -419,7 +420,7 @@ class OpenAIProvider(AIProvider):
             self._safe_metadata(self._error_type(exc)),
             self._safe_metadata(self._request_id(exc)),
             self._failure_classification(exc, status_code),
-            self._settings.ai_model.strip(),
+            settings.ai_model.strip(),
             operation,
         )
 
@@ -482,7 +483,8 @@ class OpenAIProvider(AIProvider):
             error = body.get("error", body)
             if isinstance(error, Mapping):
                 code = error.get("code")
-                return code if isinstance(code, str) else None
+                if isinstance(code, str):
+                    return code
         code = getattr(exc, "code", None)
         return code if isinstance(code, str) else None
 

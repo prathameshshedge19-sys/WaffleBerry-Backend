@@ -383,7 +383,7 @@ class SpeechEndpointTests(unittest.TestCase):
         self.assertEqual(response.status_code, 503)
         self.assertEqual(
             response.json()["detail"]["code"],
-            "speech_provider_unavailable",
+            "ai_service_unavailable",
         )
         self.assertNotIn("provider secret", response.text)
 

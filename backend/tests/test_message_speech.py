@@ -18,6 +18,7 @@ from app.models.user import Conversation, Message, MessageRole, User, UserSettin
 from app.services.ai.exceptions import (
     AIProviderError,
     AIProviderUnavailableError,
+    AIQuotaExceededError,
     AIRateLimitError,
     AITimeoutError,
 )
@@ -26,6 +27,7 @@ from app.services.message_speech_service import (
     MessageSpeechError,
     MessageSpeechService,
 )
+from app.services.quota import QuotaService
 from app.services.voice_profile_resolver import (
     StandardVoiceProfile,
     StandardVoiceResolver,
@@ -224,6 +226,17 @@ class MessageSpeechAuthorizationTests(MessageSpeechTestCase):
             self.speech.calls[0]["text"],
             self.assistant_message.content,
         )
+        self.assertEqual(QuotaService(self.session).get_daily_usage(self.owner).voice_plays, 1)
+
+    def test_tenth_voice_generation_succeeds_and_eleventh_is_blocked(self):
+        usage = QuotaService(self.session).get_daily_usage(self.owner)
+        usage.voice_plays = 9
+        self.session.commit()
+        self.assertEqual(self.client.post(self.endpoint(), json={}).status_code, 200)
+        blocked = self.client.post(self.endpoint(), json={})
+        self.assertEqual(blocked.status_code, 429)
+        self.assertEqual(blocked.json()["detail"]["feature"], "voice_play")
+        self.assertEqual(len(self.speech.calls), 1)
 
     def test_other_user_cannot_discover_conversation_or_message(self):
         app.dependency_overrides[get_current_user] = lambda: self.other_user
@@ -453,11 +466,12 @@ class MessageSpeechFailureIsolationTests(MessageSpeechTestCase):
     def test_provider_failures_are_safe_and_do_not_change_chat_data(self):
         failures = (
             (AITimeoutError("provider secret"), 504, "speech_timeout"),
-            (AIRateLimitError("provider secret"), 429, "speech_rate_limited"),
+            (AIQuotaExceededError("provider secret"), 503, "ai_service_unavailable"),
+            (AIRateLimitError("provider secret"), 503, "ai_service_unavailable"),
             (
                 AIProviderUnavailableError("provider secret"),
                 503,
-                "speech_provider_unavailable",
+                "ai_service_unavailable",
             ),
             (AIProviderError("provider secret"), 502, "speech_generation_failed"),
         )
@@ -490,6 +504,9 @@ class MessageSpeechFailureIsolationTests(MessageSpeechTestCase):
                 self.assertEqual(conversation.title, original_title)
                 self.assertEqual(conversation.updated_at, original_updated_at)
                 self.assertEqual(messages, original_messages)
+                self.assertEqual(
+                    QuotaService(self.session).get_daily_usage(self.owner).voice_plays, 0
+                )
 
     def test_implementation_contains_no_write_or_companion_generation_path(self):
         with open(

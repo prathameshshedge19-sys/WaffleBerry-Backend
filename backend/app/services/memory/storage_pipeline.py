@@ -3,6 +3,7 @@
 import enum
 import logging
 import re
+from contextlib import nullcontext
 from collections import Counter
 from datetime import datetime, timezone
 from time import perf_counter
@@ -31,7 +32,8 @@ from app.models.memory import (
     StorySession,
     StorySessionStatus,
 )
-from app.models.user import Conversation, Message
+from app.models.user import Conversation, Message, User
+from app.services.quota import QuotaService
 from app.services.memory.extractor import MemoryExtractionService
 from app.services.memory.canonical_perspective import (
     CanonicalMemoryPerspectiveService,
@@ -449,59 +451,84 @@ class MemoryStoragePipeline:
             report.candidates_accepted_for_persistence -= 1
             return
 
+        will_auto_approve = self._should_auto_approve_candidate(
+            user_id=user_id,
+            legacy_status=legacy_status,
+            source_type=source_type,
+            story_session=story_session,
+            validation_status=result.status,
+            auto_learned=auto_approve,
+        )
+        capacity_guard = nullcontext(None)
+        if will_auto_approve:
+            user = db.get(User, user_id)
+            capacity_guard = QuotaService(db).memory_capacity_guard(
+                user, legacy_id
+            )
         try:
-            with db.begin_nested():
-                self._require_related_memories(
-                    db, legacy_id, result.related_memory_ids
-                )
-                group = None
-                if result.status == MemoryValidationStatus.CONTRADICTION:
-                    group = (
-                        MemoryCRUD
-                        .get_or_create_contradiction_group_for_memories(
-                            db,
-                            legacy_id,
-                            result.related_memory_ids,
-                            candidate.title,
-                        )
+            with capacity_guard as capacity:
+                if capacity is not None and not capacity.allowed:
+                    item.error_code = "memory_quota_exceeded"
+                    report.new_memory_skipped_due_to_quota = True
+                    report.errors.append(MemoryPipelineErrorDetail(
+                        code=item.error_code,
+                        candidate_index=item.candidate_index,
+                        message=(
+                            "A new canonical memory was skipped because this "
+                            "Legacy is at capacity."
+                        ),
+                    ))
+                    logger.info(
+                        "MEMORY_LEARNING source=%s stage=discarded "
+                        "candidate_count=1 saved_count=0 "
+                        "discard_reason=memory_quota_exceeded",
+                        source_type.value,
                     )
-                    candidate = candidate.model_copy(
-                        update={
-                            "contradiction_group_id":
-                                group.contradiction_group_id
-                        }
+                    return
+                with db.begin_nested():
+                    self._require_related_memories(
+                        db, legacy_id, result.related_memory_ids
                     )
-                memory = MemoryCRUD.add_memory_candidate(
-                    db,
-                    legacy_id,
-                    candidate,
-                    normalized_fingerprint=fingerprint,
-                )
-                if result.status == MemoryValidationStatus.POSSIBLE_ENRICHMENT:
-                    for related_id in result.related_memory_ids:
-                        MemoryCRUD.add_memory_link(
-                            db,
-                            legacy_id,
-                            memory.memory_id,
-                            related_id,
-                            "possible_enrichment",
+                    group = None
+                    if result.status == MemoryValidationStatus.CONTRADICTION:
+                        group = (
+                            MemoryCRUD
+                            .get_or_create_contradiction_group_for_memories(
+                                db,
+                                legacy_id,
+                                result.related_memory_ids,
+                                candidate.title,
+                            )
                         )
-                if self._should_auto_approve(
-                    memory=memory,
-                    user_id=user_id,
-                    legacy_status=legacy_status,
-                    source_type=source_type,
-                    story_session=story_session,
-                    validation_status=result.status,
-                    auto_learned=auto_approve,
-                ):
-                    memory.review_status = MemoryReviewStatus.APPROVED
-                    memory.reviewed_at = datetime.now(timezone.utc)
-                    memory.reviewed_by_user_id = user_id
-                    db.flush()
-                    IdentityFactProjectionService().project_memory(db, memory)
-            db.commit()
-            db.refresh(memory)
+                        candidate = candidate.model_copy(
+                            update={
+                                "contradiction_group_id":
+                                    group.contradiction_group_id
+                            }
+                        )
+                    memory = MemoryCRUD.add_memory_candidate(
+                        db,
+                        legacy_id,
+                        candidate,
+                        normalized_fingerprint=fingerprint,
+                    )
+                    if result.status == MemoryValidationStatus.POSSIBLE_ENRICHMENT:
+                        for related_id in result.related_memory_ids:
+                            MemoryCRUD.add_memory_link(
+                                db,
+                                legacy_id,
+                                memory.memory_id,
+                                related_id,
+                                "possible_enrichment",
+                            )
+                    if will_auto_approve:
+                        memory.review_status = MemoryReviewStatus.APPROVED
+                        memory.reviewed_at = datetime.now(timezone.utc)
+                        memory.reviewed_by_user_id = user_id
+                        db.flush()
+                        IdentityFactProjectionService().project_memory(db, memory)
+                db.commit()
+                db.refresh(memory)
         except IntegrityError:
             db.rollback()
             duplicate = MemoryCRUD.get_memory_by_fingerprint(
@@ -607,6 +634,31 @@ class MemoryStoragePipeline:
             MemoryAuthorityClass.PROTECTED_IDENTITY
             if cls._protected_identity_claims(candidate)
             else MemoryAuthorityClass.NORMAL_MEMORY
+        )
+
+    @staticmethod
+    def _should_auto_approve_candidate(
+        *, user_id: int, legacy_status: LegacyStatus,
+        source_type: MemoryPipelineSourceType,
+        story_session: StorySession | None,
+        validation_status: MemoryValidationStatus,
+        auto_learned: bool = False,
+    ) -> bool:
+        return (
+            ((source_type == MemoryPipelineSourceType.STORY_SESSION
+              and story_session is not None
+              and story_session.status == StorySessionStatus.COMPLETED
+              and story_session.created_by_user_id == user_id)
+             or (source_type in {MemoryPipelineSourceType.CONVERSATION,
+                                 MemoryPipelineSourceType.LIVE_CALL}
+                 and auto_learned))
+            and legacy_status == LegacyStatus.ACTIVE
+            and validation_status in {
+                MemoryValidationStatus.ACCEPTED,
+                MemoryValidationStatus.POSSIBLE_ENRICHMENT,
+                MemoryValidationStatus.POSSIBLE_DUPLICATE,
+                MemoryValidationStatus.CONTRADICTION,
+            }
         )
 
     @classmethod

@@ -609,6 +609,75 @@ class MemoryStoragePipelineTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(self.db.query(Memory).count(), 2)
 
+    async def test_full_legacy_skips_new_chat_memory_without_failing_learning(self):
+        self.db.add_all([
+            Memory(
+                legacy_id=self.legacy.legacy_id,
+                memory_type=MemoryType.ATOMIC,
+                category="life",
+                title=f"Capacity {index}",
+                summary=f"Approved fixture {index}",
+                normalized_fingerprint=f"full-chat-{index}",
+                review_status=MemoryReviewStatus.APPROVED,
+            )
+            for index in range(100)
+        ])
+        self.db.commit()
+        candidate = self.candidate(
+            summary="The family bought a red sofa yesterday.",
+            excerpt="We bought a red sofa yesterday.",
+        ).model_copy(update={"title": "Red sofa"})
+        report = await self.run_auto_chat(
+            candidate, "We bought a red sofa yesterday."
+        )
+        self.assertTrue(report.new_memory_skipped_due_to_quota, report)
+        self.assertEqual(report.items[0].error_code, "memory_quota_exceeded")
+        self.assertEqual(self.db.query(Memory).filter_by(
+            legacy_id=self.legacy.legacy_id,
+            review_status=MemoryReviewStatus.APPROVED,
+        ).count(), 100)
+
+    async def test_full_legacy_skips_new_live_call_memory_without_interruption(self):
+        self.db.add_all([
+            Memory(
+                legacy_id=self.legacy.legacy_id,
+                memory_type=MemoryType.ATOMIC,
+                category="life",
+                title=f"Call capacity {index}",
+                summary=f"Approved call fixture {index}",
+                normalized_fingerprint=f"full-call-{index}",
+                review_status=MemoryReviewStatus.APPROVED,
+            )
+            for index in range(100)
+        ])
+        self.db.commit()
+        candidate = self.candidate(
+            summary="The family bought a blue table yesterday.",
+            excerpt="We bought a blue table yesterday.",
+        ).model_copy(update={
+            "title": "Blue table",
+            "provenance": [MemoryProvenanceCreate(
+                source_type="live_call",
+                source_locator={"session_safe_id": "quota-call", "turn_id": 1},
+                speaker="user",
+                excerpt="We bought a blue table yesterday.",
+            )],
+        })
+        report = await MemoryStoragePipeline(
+            FakeExtractionService([candidate])
+        ).process_live_call_turn(
+            self.db, user_id=self.user.user_id,
+            legacy_id=self.legacy.legacy_id,
+            session_safe_id="quota-call", turn_id=1,
+            user_text="We bought a blue table yesterday.",
+        )
+        self.assertTrue(report.new_memory_skipped_due_to_quota, report)
+        self.assertEqual(report.items[0].error_code, "memory_quota_exceeded")
+        self.assertEqual(self.db.query(Memory).filter_by(
+            legacy_id=self.legacy.legacy_id,
+            review_status=MemoryReviewStatus.APPROVED,
+        ).count(), 100)
+
     async def test_another_named_entity_is_added_and_broadly_grounded(self):
         self.complete_story()
         self.user_story_message.content = "Bruno is our Labrador."

@@ -32,6 +32,7 @@ from app.models.user import Message, MessageRole, User
 from app.models.memory import Memory, MemoryProvenance, MemoryReviewStatus, MemoryType
 from app.schemas.memory import LegacyCreate
 from app.services.live_call import LiveCallSessionStore, LiveCallTurnService, live_call_sessions
+from app.services.quota import QuotaService
 from app.services.ai.provider import SpeechResult
 from app.services.ai.exceptions import AIProviderError
 from app.services.ai.context_builder import ContextBuilder
@@ -261,6 +262,13 @@ class LiveCallFoundationTests(unittest.TestCase):
             session["session_id"], session["transport_token"]
         ))
         self.assertEqual(discarded, [session["session_id"], session["session_id"]])
+
+    def test_live_call_lifecycle_does_not_consume_chat_voice_plays(self):
+        session = self.create_session()
+        self.client.delete(f"/api/v1/live-call/session/{session['session_id']}")
+        self.assertEqual(
+            QuotaService(self.db).get_daily_usage(self.owner).voice_plays, 0
+        )
 
     def test_websocket_contract_ready_validation_and_clean_end(self):
         session = self.create_session()

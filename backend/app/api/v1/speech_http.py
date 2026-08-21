@@ -27,9 +27,9 @@ def speech_http_error(exc: Exception) -> HTTPException:
         )
     elif isinstance(exc, (AIRateLimitError, AIQuotaExceededError)):
         status_code, code, message = (
-            status.HTTP_429_TOO_MANY_REQUESTS,
-            "speech_rate_limited",
-            "Speech generation is temporarily unavailable.",
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "ai_service_unavailable",
+            "WaffleBerry is temporarily unavailable. Please try again later.",
         )
     elif isinstance(exc, AITimeoutError):
         status_code, code, message = (
@@ -43,8 +43,8 @@ def speech_http_error(exc: Exception) -> HTTPException:
     ):
         status_code, code, message = (
             status.HTTP_503_SERVICE_UNAVAILABLE,
-            "speech_provider_unavailable",
-            "Speech generation is temporarily unavailable.",
+            "ai_service_unavailable",
+            "WaffleBerry is temporarily unavailable. Please try again later.",
         )
     elif isinstance(exc, (AIInvalidResponseError, AIProviderError, ValueError)):
         status_code, code, message = (

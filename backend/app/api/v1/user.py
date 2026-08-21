@@ -56,6 +56,7 @@ from app.services.message_speech_service import (
 )
 from app.services.voice_catalogue import public_catalogue
 from app.services.memory.auto_learning import schedule_conversation_learning
+from app.services.quota import ChatQuotaReservation, QuotaService, VoiceQuotaReservation
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +74,40 @@ def _set_refresh_cookie(response: Response, user: User) -> None:
 
 
 router = APIRouter()
+
+
+def _reserve_chat_or_raise(db: Session, user: User) -> ChatQuotaReservation:
+    reservation = QuotaService(db).reserve_chat(user)
+    if reservation.decision.allowed:
+        return reservation
+    detail = QuotaService.exceeded_detail(reservation.decision)
+    raise HTTPException(
+        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+        detail={
+            "error": detail.error,
+            "feature": detail.feature.value,
+            "plan": detail.plan.value,
+            "resets_at": detail.resets_at.isoformat() if detail.resets_at else None,
+            "upgrade_available": detail.upgrade_available,
+        },
+    )
+
+
+def _reserve_voice_or_raise(db: Session, user: User) -> VoiceQuotaReservation:
+    reservation = QuotaService(db).reserve_voice_play(user)
+    if reservation.decision.allowed:
+        return reservation
+    detail = QuotaService.exceeded_detail(reservation.decision)
+    raise HTTPException(
+        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+        detail={
+            "error": detail.error,
+            "feature": detail.feature.value,
+            "plan": detail.plan.value,
+            "resets_at": detail.resets_at.isoformat() if detail.resets_at else None,
+            "upgrade_available": detail.upgrade_available,
+        },
+    )
 
 
 def get_message_speech_service_for_request() -> MessageSpeechService:
@@ -193,23 +228,21 @@ def _safe_ai_error(exc: AIServiceError) -> tuple[int, str, str]:
     """Map an internal AI failure to HTTP status, safe code, and message."""
     if isinstance(exc, AIQuotaExceededError):
         return (
-            status.HTTP_429_TOO_MANY_REQUESTS,
-            exc.code,
-            "Berry is temporarily unavailable because the AI usage balance "
-            "has been exhausted.",
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "ai_service_unavailable",
+            "WaffleBerry is temporarily unavailable. Please try again later.",
         )
     if isinstance(exc, AIRateLimitError):
         return (
-            status.HTTP_429_TOO_MANY_REQUESTS,
-            exc.code,
-            "Berry is receiving too many requests right now. "
-            "Please try again shortly.",
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "ai_service_unavailable",
+            "WaffleBerry is temporarily unavailable. Please try again later.",
         )
     if isinstance(exc, (AIAuthenticationError, AIConfigurationError)):
         return (
             status.HTTP_503_SERVICE_UNAVAILABLE,
-            exc.code,
-            "Berry's AI service is not configured correctly.",
+            "ai_service_unavailable",
+            "WaffleBerry is temporarily unavailable. Please try again later.",
         )
     if isinstance(exc, AITimeoutError):
         return (
@@ -220,15 +253,14 @@ def _safe_ai_error(exc: AIServiceError) -> tuple[int, str, str]:
     if isinstance(exc, AIConnectionError):
         return (
             status.HTTP_503_SERVICE_UNAVAILABLE,
-            exc.code,
-            "Berry could not reach the AI service. Please try again.",
+            "ai_service_unavailable",
+            "WaffleBerry is temporarily unavailable. Please try again later.",
         )
     if isinstance(exc, AIProviderUnavailableError):
         return (
             status.HTTP_503_SERVICE_UNAVAILABLE,
-            exc.code,
-            "Berry's AI service is temporarily unavailable. "
-            "Please try again shortly.",
+            "ai_service_unavailable",
+            "WaffleBerry is temporarily unavailable. Please try again later.",
         )
     if isinstance(exc, AIInvalidResponseError):
         return (
@@ -883,6 +915,7 @@ async def synthesize_message_speech(
     ),
 ) -> Response:
     """Generate speech from an owned persisted assistant message."""
+    reservation = _reserve_voice_or_raise(db, current_user)
     try:
         result = await service.synthesize_assistant_message(
             db=db,
@@ -892,6 +925,7 @@ async def synthesize_message_speech(
             response_format=options.response_format,
         )
     except MessageSpeechError as exc:
+        QuotaService(db).refund_voice_play(reservation)
         raise HTTPException(
             status_code=exc.status_code,
             detail={
@@ -900,6 +934,7 @@ async def synthesize_message_speech(
             },
         ) from None
     except Exception as exc:
+        QuotaService(db).refund_voice_play(reservation)
         raise speech_http_error(exc) from None
 
     return speech_audio_response(
@@ -933,7 +968,7 @@ async def create_message(
     _require_active_conversation_legacy(
         db, conversation, current_user.user_id
     )
-    preferences = UserCRUD.get_settings(db, current_user.user_id)
+    reservation = _reserve_chat_or_raise(db, current_user)
 
     # Capture post-commit values before SQLAlchemy can expire/detach ORM state.
     learning_user_id = int(current_user.user_id)
@@ -942,6 +977,7 @@ async def create_message(
     learning_user_text = str(message.content)
 
     try:
+        preferences = UserCRUD.get_settings(db, current_user.user_id)
         generation = await get_chat_service().generate_response_with_provenance(
             db,
             conversation,
@@ -949,7 +985,16 @@ async def create_message(
             conversation_style=(preferences.conversation_style if preferences else "natural"),
             response_length=(preferences.response_length if preferences else "balanced"),
         )
+        user_message, assistant_message, conversation = MessageCRUD.create_message_pair(
+            db,
+            conversation,
+            message.content,
+            generation.content,
+            grounded_memory_ids=generation.memory_ids,
+            memories_retrieved_at=generation.retrieved_at,
+        )
     except AIServiceError as exc:
+        QuotaService(db).refund_chat(reservation)
         logger.exception(
             "AI generation failed (category=%s, operation=non_streaming, "
             "conversation_id=%d).",
@@ -957,15 +1002,9 @@ async def create_message(
             conversation_id,
         )
         raise _ai_http_exception(exc) from None
-
-    user_message, assistant_message, conversation = MessageCRUD.create_message_pair(
-        db,
-        conversation,
-        message.content,
-        generation.content,
-        grounded_memory_ids=generation.memory_ids,
-        memories_retrieved_at=generation.retrieved_at,
-    )
+    except BaseException:
+        QuotaService(db).refund_chat(reservation)
+        raise
     schedule_conversation_learning(
         user_id=learning_user_id, legacy_id=learning_legacy_id,
         conversation_id=learning_conversation_id,
@@ -1003,7 +1042,7 @@ async def create_message_stream(
     _require_active_conversation_legacy(
         db, conversation, current_user.user_id
     )
-    preferences = UserCRUD.get_settings(db, current_user.user_id)
+    reservation = _reserve_chat_or_raise(db, current_user)
 
     # Streaming continues across transaction commits and response yields. Capture
     # every late-lifecycle value before SQLAlchemy can expire/detach ORM state.
@@ -1013,6 +1052,7 @@ async def create_message_stream(
     learning_user_text = str(message.content)
 
     try:
+        preferences = UserCRUD.get_settings(db, current_user.user_id)
         chat_service = get_chat_service()
         normalized_turn = await LanguageNormalizationService(
             get_ai_service()
@@ -1027,12 +1067,16 @@ async def create_message_stream(
         )
         response_stream = stream_plan.stream
     except AIServiceError as exc:
+        QuotaService(db).refund_chat(reservation)
         logger.exception(
             "AI stream setup failed (category=%s, conversation_id=%d).",
             getattr(exc, "code", "ai_service_error"),
             conversation_id,
         )
         raise _ai_http_exception(exc) from None
+    except BaseException:
+        QuotaService(db).refund_chat(reservation)
+        raise
 
     user_message, conversation = MessageCRUD.create_user_message(
         db,
@@ -1051,6 +1095,7 @@ async def create_message_stream(
 
     async def event_stream():
         chunks: list[str] = []
+        completed = False
 
         try:
             yield _sse_event("start", start_payload)
@@ -1100,6 +1145,7 @@ async def create_message_stream(
                         updated_conversation
                     ).model_dump(mode="json"),
                 }
+                completed = True
             finally:
                 stream_db.close()
             # Generation and assistant persistence are complete. Create only the
@@ -1164,6 +1210,12 @@ async def create_message_stream(
                     },
                 )
         finally:
+            if not completed:
+                refund_db = SessionLocal()
+                try:
+                    QuotaService(refund_db).refund_chat(reservation)
+                finally:
+                    refund_db.close()
             close_stream = getattr(response_stream, "aclose", None)
             if close_stream is not None:
                 await close_stream()

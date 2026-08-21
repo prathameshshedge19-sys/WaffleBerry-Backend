@@ -7,6 +7,7 @@ import logging
 import inspect
 import re
 import secrets
+import math
 from threading import RLock
 from time import monotonic
 from collections.abc import AsyncIterator, Callable
@@ -222,6 +223,13 @@ class LiveCallSession:
     realtime_capable: bool = False
     persona_profile: PersonaProfile = field(default_factory=PersonaProfile)
     conversation_context: str = ""
+    quota_usage_id: int | None = None
+    quota_reserved_seconds: int = 0
+    quota_exempt: bool = False
+    quota_plan: str = "free"
+    quota_resets_at: datetime | None = None
+    quota_started_at: float | None = None
+    quota_finalized: bool = False
 
 
 class LiveCallSessionStore:
@@ -255,6 +263,11 @@ class LiveCallSessionStore:
         realtime_capable: bool = False,
         persona_profile: PersonaProfile | None = None,
         conversation_context: str = "",
+        quota_usage_id: int | None = None,
+        quota_reserved_seconds: int = 0,
+        quota_exempt: bool = False,
+        quota_plan: str = "free",
+        quota_resets_at: datetime | None = None,
     ) -> LiveCallSession:
         now = datetime.now(timezone.utc)
         with self._lock:
@@ -284,6 +297,11 @@ class LiveCallSessionStore:
                 realtime_capable=realtime_capable,
                 persona_profile=persona_profile or PersonaProfile(),
                 conversation_context=conversation_context,
+                quota_usage_id=quota_usage_id,
+                quota_reserved_seconds=quota_reserved_seconds,
+                quota_exempt=quota_exempt,
+                quota_plan=quota_plan,
+                quota_resets_at=quota_resets_at,
             )
             self._sessions[session.session_id] = session
             self._runtime[session.session_id] = LiveCallRuntime()
@@ -348,9 +366,37 @@ class LiveCallSessionStore:
             session = self._sessions.get(session_id)
             if session is None or session.state == "ended":
                 return None
-            connected = replace(session, state="connected")
+            connected = replace(
+                session, state="connected",
+                quota_started_at=session.quota_started_at or monotonic(),
+            )
             self._sessions[session_id] = connected
             return connected
+
+    def active_for_user(self, user_id: int) -> LiveCallSession | None:
+        with self._lock:
+            return next((session for session in self._sessions.values()
+                         if session.user_id == user_id and session.state != "ended"), None)
+
+    def claim_quota_finalization(self, session_id: str) -> tuple[int | None, int, int] | None:
+        """Return accounting exactly once; connected fractions round up consistently."""
+        with self._lock:
+            session = self._sessions.get(session_id)
+            if session is None or session.quota_finalized:
+                return None
+            elapsed = 0
+            if session.quota_started_at is not None:
+                elapsed = math.ceil(max(0.0, monotonic() - session.quota_started_at))
+            used = min(session.quota_reserved_seconds, elapsed)
+            self._sessions[session_id] = replace(session, quota_finalized=True)
+            return session.quota_usage_id, session.quota_reserved_seconds, used
+
+    def quota_exhausted(self, session_id: str) -> bool:
+        with self._lock:
+            session = self._sessions.get(session_id)
+            return bool(session and not session.quota_exempt
+                        and session.quota_started_at is not None
+                        and monotonic() - session.quota_started_at >= session.quota_reserved_seconds)
 
     def end(self, session_id: str, *, user_id: int) -> LiveCallSession | None:
         now = datetime.now(timezone.utc)
@@ -392,6 +438,9 @@ class LiveCallSessionStore:
             if (runtime is None or session is None or session.state == "ended"
                     or datetime.now(timezone.utc) >= session.expires_at):
                 return "session_ended"
+            if (not session.quota_exempt and session.quota_started_at is not None
+                    and monotonic() - session.quota_started_at >= session.quota_reserved_seconds):
+                return "quota_exceeded"
             if runtime.active_turn_id is not None:
                 return "turn_in_progress"
             if turn_id != runtime.next_turn_id:

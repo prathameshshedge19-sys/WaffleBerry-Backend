@@ -11,12 +11,14 @@ from app.models.user import (
     Conversation,
     Message,
     MessageRole,
+    PlanTier,
     TrainingStatus,
     User,
     UserSettings,
     VoiceProfile,
     VoiceSample,
 )
+from app.models.quota import UserDailyUsage
 from app.models.memory import (
     CompanionMemoryProvenance,
     Legacy,
@@ -59,6 +61,7 @@ __all__ = [
     "MemoryType",
     "Message",
     "MessageRole",
+    "PlanTier",
     "Project",
     "StoryMessage",
     "StoryMessageRole",
@@ -67,6 +70,7 @@ __all__ = [
     "Tag",
     "TrainingStatus",
     "User",
+    "UserDailyUsage",
     "UserSettings",
     "VoiceProfile",
     "VoiceSample",

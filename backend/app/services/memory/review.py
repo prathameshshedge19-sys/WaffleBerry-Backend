@@ -1,6 +1,7 @@
 """Owner-scoped human review workflow for persisted Memory candidates."""
 
 import re
+from contextlib import nullcontext
 from datetime import datetime, timezone
 
 from sqlalchemy import or_
@@ -31,6 +32,8 @@ from app.schemas.memory import (
 )
 from app.services.memory.fingerprint import build_memory_fingerprint
 from app.services.memory.identity_facts import IdentityFactProjectionService
+from app.models.user import User
+from app.services.quota import QuotaDecision, QuotaService
 
 
 class MemoryReviewError(Exception):
@@ -51,6 +54,14 @@ class MemoryReviewDuplicateError(MemoryReviewConflictError):
 
 class MemoryReviewArchivedError(MemoryReviewConflictError):
     """Raised when archived Legacy memory content would be mutated."""
+
+
+class MemoryReviewQuotaError(MemoryReviewConflictError):
+    """Raised when approving a candidate would exceed canonical capacity."""
+
+    def __init__(self, decision: QuotaDecision):
+        super().__init__("Memory capacity has been reached.")
+        self.decision = decision
 
 
 class MemoryReviewService:
@@ -412,15 +423,27 @@ class MemoryReviewService:
         target: MemoryReviewStatus,
     ) -> MemoryReviewResponse:
         self._require_legacy(db, legacy_id, user_id, require_active=True)
-        memory = self._locked_candidate(db, legacy_id, memory_id)
-        self._require_fresh(memory, expected_updated_at)
-        memory.review_status = target
-        memory.reviewed_at = datetime.now(timezone.utc)
-        memory.reviewed_by_user_id = user_id
-        memory.updated_at = datetime.now(timezone.utc)
-        db.flush()
-        IdentityFactProjectionService().project_memory(db, memory)
-        db.commit()
+        user = db.get(User, user_id)
+        guard = (
+            QuotaService(db).memory_capacity_guard(user, legacy_id)
+            if target == MemoryReviewStatus.APPROVED
+            else nullcontext(None)
+        )
+        with guard:
+            memory = self._locked_candidate(db, legacy_id, memory_id)
+            self._require_fresh(memory, expected_updated_at)
+            if target == MemoryReviewStatus.APPROVED:
+                decision = QuotaService(db).check_memory_capacity(user, legacy_id)
+                if not decision.allowed:
+                    db.rollback()
+                    raise MemoryReviewQuotaError(decision)
+            memory.review_status = target
+            memory.reviewed_at = datetime.now(timezone.utc)
+            memory.reviewed_by_user_id = user_id
+            memory.updated_at = datetime.now(timezone.utc)
+            db.flush()
+            IdentityFactProjectionService().project_memory(db, memory)
+            db.commit()
         db.refresh(memory)
         return self._to_response(db, memory, legacy_id)
 

@@ -10,6 +10,14 @@ from app.db import Base
 import enum
 
 
+class PlanTier(str, enum.Enum):
+    """Backend-owned subscription tier used for quota configuration."""
+
+    FREE = "free"
+    PLUS = "plus"
+    PRO = "pro"
+
+
 class User(Base):
     """User model - stores registered users."""
     
@@ -20,6 +28,21 @@ class User(Base):
     email = Column(String(255), unique=True, nullable=False, index=True)
     password_hash = Column(String(255), nullable=False)
     is_verified = Column(Boolean, default=False, nullable=False)
+    plan = Column(
+        Enum(
+            PlanTier,
+            values_callable=lambda values: [value.value for value in values],
+            native_enum=False,
+            validate_strings=True,
+            create_constraint=True,
+            name="plan_tier",
+        ),
+        nullable=False,
+        default=PlanTier.FREE,
+        server_default=PlanTier.FREE.value,
+    )
+    quota_exempt = Column(Boolean, nullable=False, default=False, server_default="false")
+    timezone = Column(String(255), nullable=False, default="UTC", server_default="UTC")
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     conversations = relationship(
@@ -30,6 +53,11 @@ class User(Base):
     legacies = relationship(
         "Legacy",
         back_populates="owner",
+        cascade="all, delete-orphan",
+    )
+    daily_usage = relationship(
+        "UserDailyUsage",
+        back_populates="user",
         cascade="all, delete-orphan",
     )
     

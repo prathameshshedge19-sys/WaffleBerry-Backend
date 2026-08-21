@@ -52,7 +52,10 @@ def test_completed_registration_returns_login_contract_and_persisting_token(clie
     payload = response.json()
     assert set(payload) == {"access_token", "token_type", "user"}
     assert payload["token_type"] == "bearer"
-    assert set(payload["user"]) == {"user_id", "full_name", "email", "created_at"}
+    assert set(payload["user"]) == {
+        "user_id", "full_name", "email", "plan", "created_at"
+    }
+    assert payload["user"]["plan"] == "free"
 
     refresh = client.get(
         "/api/v1/me", headers={"Authorization": f"Bearer {payload['access_token']}"},

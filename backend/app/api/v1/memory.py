@@ -26,9 +26,11 @@ from app.services.memory.review import (
     MemoryReviewConflictError,
     MemoryReviewDuplicateError,
     MemoryReviewNotFoundError,
+    MemoryReviewQuotaError,
     MemoryReviewService,
 )
 from app.dependencies.ai import get_memory_embedding_service
+from app.services.quota import QuotaService
 
 
 router = APIRouter()
@@ -231,6 +233,18 @@ def approve_memory(
             memory_id=memory_id,
             expected_updated_at=action.expected_updated_at,
         )
+    except MemoryReviewQuotaError as exc:
+        detail = QuotaService.exceeded_detail(exc.decision)
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail={
+                "error": detail.error,
+                "feature": detail.feature.value,
+                "plan": detail.plan.value,
+                "resets_at": None,
+                "upgrade_available": detail.upgrade_available,
+            },
+        ) from None
     except (MemoryReviewNotFoundError, MemoryReviewConflictError) as exc:
         raise _safe_review_error(exc) from None
 

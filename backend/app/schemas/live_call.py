@@ -36,6 +36,9 @@ class LiveCallSessionResponse(BaseModel):
     conversation_style: Literal["natural", "gentle", "expressive"] = "natural"
     response_length: Literal["short", "balanced", "detailed"] = "balanced"
     expires_at: datetime
+    available_seconds: int | None = Field(default=None, ge=0)
+    quota_plan: str
+    quota_resets_at: datetime | None = None
 
 
 class LiveCallSessionEndResponse(BaseModel):

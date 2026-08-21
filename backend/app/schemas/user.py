@@ -4,7 +4,7 @@ from pydantic import BaseModel, ConfigDict, Field, EmailStr, field_validator
 from datetime import datetime
 from typing import Literal, Optional
 
-from app.models.user import MessageRole
+from app.models.user import MessageRole, PlanTier
 
 
 VoiceId = Literal[
@@ -17,12 +17,15 @@ VoiceId = Literal[
 
 class UserBase(BaseModel):
     """Base user schema."""
+    model_config = ConfigDict(extra="forbid")
     full_name: str = Field(..., min_length=1, max_length=255)
     email: EmailStr
 
 
 class UserCreate(UserBase):
     """Begin registration without collecting a password."""
+
+    accepted_terms: Literal[True]
 
 
 class PasswordFields(BaseModel):
@@ -85,10 +88,10 @@ class AuthorizationResponse(BaseModel):
 class UserResponse(UserBase):
     """Schema for user response."""
     user_id: int
+    plan: PlanTier
     created_at: datetime
     
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True, extra="forbid")
 
 
 class SignupResponse(BaseModel):
@@ -328,6 +331,7 @@ class ConsentResponse(BaseModel):
 
 class UserSettingsCreate(BaseModel):
     """Schema for user settings."""
+    model_config = ConfigDict(extra="forbid")
     theme: str = Field(default="light", pattern="^(light|dark)$")
     language: str = Field(default="English")
     speech_speed: str = Field(default="normal", pattern="^(slow|normal|fast)$")
@@ -341,5 +345,4 @@ class UserSettingsResponse(UserSettingsCreate):
     created_at: datetime
     updated_at: datetime
     
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True, extra="forbid")

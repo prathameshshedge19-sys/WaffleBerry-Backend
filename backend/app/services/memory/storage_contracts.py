@@ -67,6 +67,7 @@ class MemoryStorageReport(BaseModel):
     created_memory_ids: list[int] = Field(default_factory=list)
     items: list[MemoryPipelineItem] = Field(default_factory=list)
     errors: list[MemoryPipelineErrorDetail] = Field(default_factory=list)
+    new_memory_skipped_due_to_quota: bool = False
     duration_ms: int = Field(default=0, ge=0)
 
     model_config = ConfigDict(extra="forbid")

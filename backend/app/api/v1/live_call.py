@@ -66,6 +66,7 @@ from app.services.memory.auto_learning import (
     schedule_conversation_learning,
     schedule_live_call_learning,
 )
+from app.services.quota import QuotaService
 
 
 router = APIRouter()
@@ -74,6 +75,28 @@ console_logger = logging.getLogger("uvicorn.error")
 STREAMING_STT_START_TIMEOUT_SECONDS = 10
 STREAMING_STT_CHUNK_TIMEOUT_SECONDS = 2
 STREAMING_STT_FINAL_TIMEOUT_SECONDS = 30
+
+
+def _live_call_quota_detail(decision) -> dict:
+    detail = QuotaService.exceeded_detail(decision)
+    return {
+        "error": detail.error, "feature": detail.feature.value,
+        "plan": detail.plan.value,
+        "resets_at": detail.resets_at.isoformat() if detail.resets_at else None,
+        "upgrade_available": detail.upgrade_available,
+    }
+
+
+def _finalize_live_call_quota(db: Session, session_id: str) -> None:
+    accounting = live_call_sessions.claim_quota_finalization(session_id)
+    if accounting is not None:
+        QuotaService(db).finalize_live_call(*accounting)
+
+
+def _guard_live_call_turn(session_id: str, db: Session, user: User) -> None:
+    if live_call_sessions.quota_exhausted(session_id):
+        decision = QuotaService(db).get_live_call_remaining_seconds(user)
+        raise HTTPException(status_code=429, detail=_live_call_quota_detail(decision))
 
 
 def _safe_session_id(session_id: str) -> str:
@@ -245,6 +268,7 @@ async def route_realtime_turn(
     session = live_call_sessions.authorize_user(session_id, current_user.user_id)
     if session is None or session.engine != "realtime":
         raise HTTPException(status_code=404, detail="Call session was not found.")
+    _guard_live_call_turn(session_id, db, current_user)
     try:
         recent_language = (
             tools.recent_language_context(session)
@@ -318,6 +342,18 @@ async def create_live_call_session(
     delivery = choose_live_call_delivery(
         settings, effective_voice, request.engine
     )
+    persona_profile = PersonaProfileService().build(db, legacy_id=legacy.legacy_id)
+    conversation_context = json.dumps(
+        chat_service.bounded_conversation_history(db, conversation),
+        ensure_ascii=False, separators=(",", ":"),
+    )
+    previous = live_call_sessions.active_for_user(current_user.user_id)
+    if previous is not None:
+        _finalize_live_call_quota(db, previous.session_id)
+        live_call_sessions.end(previous.session_id, user_id=current_user.user_id)
+    reservation = QuotaService(db).reserve_live_call(current_user)
+    if not reservation.decision.allowed:
+        raise HTTPException(status_code=429, detail=_live_call_quota_detail(reservation.decision))
     session = live_call_sessions.create(
         user_id=current_user.user_id,
         conversation_id=conversation.conversation_id,
@@ -330,14 +366,13 @@ async def create_live_call_session(
         engine=delivery.conversation_engine,
         speech_renderer=delivery.speech_renderer,
         realtime_capable=delivery.realtime_capable,
-        persona_profile=PersonaProfileService().build(
-            db, legacy_id=legacy.legacy_id,
-        ),
-        conversation_context=json.dumps(
-            chat_service.bounded_conversation_history(db, conversation),
-            ensure_ascii=False,
-            separators=(",", ":"),
-        ),
+        persona_profile=persona_profile,
+        conversation_context=conversation_context,
+        quota_usage_id=reservation.usage_id,
+        quota_reserved_seconds=reservation.reserved_seconds,
+        quota_exempt=reservation.decision.quota_exempt,
+        quota_plan=reservation.decision.plan.value,
+        quota_resets_at=reservation.decision.resets_at,
     )
     logger.info(
         "LIVE_CALL_ENGINE session_id=%s effective_voice=%s feature_enabled=%s "
@@ -363,6 +398,9 @@ async def create_live_call_session(
         realtime_capable=session.realtime_capable,
         speech_renderer=session.speech_renderer,
         transport="webrtc" if session.engine == "realtime" else "websocket",
+        available_seconds=None if session.quota_exempt else session.quota_reserved_seconds,
+        quota_plan=session.quota_plan,
+        quota_resets_at=session.quota_resets_at,
     )
 
 
@@ -403,8 +441,11 @@ async def bootstrap_realtime_call(
         if retry_after is not None:
             headers = {"Retry-After": str(retry_after)}
         raise HTTPException(
-            status_code=502,
-            detail={"message": "Realtime call startup failed.", "code": category},
+            status_code=503,
+            detail={
+                "message": "WaffleBerry is temporarily unavailable. Please try again later.",
+                "code": "ai_service_unavailable",
+            },
             headers=headers,
         ) from None
     return RealtimeBootstrapResponse(
@@ -531,6 +572,7 @@ async def render_realtime_external_speech(
 async def end_live_call_session(
     session_id: str,
     current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
     tools: RealtimeToolService = Depends(get_realtime_tool_service),
 ):
     session = live_call_sessions.end(
@@ -538,6 +580,7 @@ async def end_live_call_session(
     )
     if session is None:
         raise HTTPException(status_code=404, detail="Call session was not found.")
+    _finalize_live_call_quota(db, session_id)
     tools.discard_session(session_id)
     return LiveCallSessionEndResponse(session_id=session.session_id)
 
@@ -547,11 +590,16 @@ async def record_live_call_operational_event(
     session_id: str,
     event: LiveCallOperationalEvent,
     current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
     """Emit allowlisted aggregate telemetry without conversation or provider payloads."""
     session = live_call_sessions.authorize_user(session_id, current_user.user_id)
     if session is None:
         raise HTTPException(status_code=404, detail="Call session was not found.")
+    if event.event == "call_started":
+        session = live_call_sessions.mark_connected(session_id) or session
+    elif event.event == "call_ended":
+        _finalize_live_call_quota(db, session_id)
     logger.info(
         "LIVE_CALL_OPERATIONAL event=%s session_safe_id=%s engine=%s renderer=%s "
         "voice=%s status=%s failure_category=%s duration_ms=%s "
@@ -601,6 +649,7 @@ async def persist_realtime_assistant_turn(
     session = live_call_sessions.authorize_user(session_id, current_user.user_id)
     if session is None or session.engine != "realtime":
         raise HTTPException(status_code=404, detail="Call session was not found.")
+    _guard_live_call_turn(session_id, db, current_user)
     persistence_decision = (
         tools.assistant_turn_decision(
             session, turn.turn_id, turn.response_id, turn.text,
@@ -931,6 +980,7 @@ async def live_call_transport(
                 for stream in transcription_streams.values():
                     await stream.close()
                 transcription_streams.clear()
+                _finalize_live_call_quota(db, session_id)
                 live_call_sessions.end_transport(session_id)
                 await websocket.send_json({
                     "version": LIVE_CALL_EVENT_VERSION,
