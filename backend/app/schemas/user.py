@@ -1,6 +1,6 @@
 """Pydantic schemas for Voice Profiles."""
 
-from pydantic import BaseModel, ConfigDict, Field, EmailStr, field_validator
+from pydantic import BaseModel, ConfigDict, Field, EmailStr, StrictBool, field_validator
 from datetime import datetime
 from typing import Literal, Optional
 
@@ -49,6 +49,21 @@ class UserLogin(BaseModel):
     """Schema for authenticating a user."""
     email: EmailStr
     password: str
+
+
+class GoogleLoginRequest(BaseModel):
+    """Untrusted GIS credential envelope; identity comes from verification."""
+    model_config = ConfigDict(extra="forbid")
+    credential: str = Field(..., min_length=1)
+    accepted_terms: StrictBool = False
+
+    @field_validator("credential")
+    @classmethod
+    def reject_blank_credential(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("credential must not be blank")
+        return value
 
 class VerifyEmailRequest(BaseModel):
     """Request body for email verification."""

@@ -18,7 +18,7 @@ from app.dependencies.ai import get_ai_service, get_chat_service, get_message_sp
 from app.services.language_normalization import LanguageNormalizationService
 from app.models.user import User
 from app.schemas.user import (
-    UserCreate, CompleteRegistrationRequest, UserLogin, UserResponse, SignupResponse, LoginResponse, VoiceProfileCreate, VoiceProfileResponse,
+    UserCreate, CompleteRegistrationRequest, UserLogin, GoogleLoginRequest, UserResponse, SignupResponse, LoginResponse, VoiceProfileCreate, VoiceProfileResponse,
     VoiceProfileUpdate, VoiceSampleCreate, VoiceSampleResponse,
     ConversationCreate, ConversationUpdate, ConversationResponse,
     MessageCreate, MessagePairResponse, MessageResponse, VerifyEmailRequest,ResendOTPRequest, ForgotPasswordRequest,
@@ -57,6 +57,11 @@ from app.services.message_speech_service import (
 from app.services.voice_catalogue import public_catalogue
 from app.services.memory.auto_learning import schedule_conversation_learning
 from app.services.quota import ChatQuotaReservation, QuotaService, VoiceQuotaReservation
+from app.services import google_identity_service
+from app.services.google_identity_service import GoogleIdentityConfigurationError, GoogleIdentityError
+from app.services.google_auth_service import (
+    GoogleAccountConflictError, GoogleTermsRequiredError, resolve_google_account,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -377,6 +382,42 @@ async def login(user: UserLogin, response: Response, db: Session = Depends(get_d
         "access_token": access_token,
         "token_type": "bearer",
         "user": authenticated_user,
+    }
+
+
+@router.post("/auth/google", response_model=LoginResponse)
+async def google_login(
+    request: GoogleLoginRequest, response: Response,
+    db: Session = Depends(get_db),
+):
+    """Authenticate a verified GIS identity using WaffleBerry sessions."""
+    try:
+        identity = google_identity_service.verify_google_credential(request.credential)
+        user = resolve_google_account(db, identity, accepted_terms=request.accepted_terms)
+    except GoogleIdentityConfigurationError:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"code": "google_auth_unavailable", "message": "Google Sign-In is not configured."},
+        ) from None
+    except GoogleIdentityError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"code": "invalid_google_credential", "message": "Google authentication failed."},
+        ) from None
+    except GoogleTermsRequiredError:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"code": "terms_required", "message": "Terms acceptance is required."},
+        ) from None
+    except GoogleAccountConflictError:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"code": "google_identity_conflict", "message": "This Google identity conflicts with an existing account."},
+        ) from None
+    _set_refresh_cookie(response, user)
+    return {
+        "access_token": create_access_token(user.user_id),
+        "token_type": "bearer", "user": user,
     }
 
 
