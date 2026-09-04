@@ -1,5 +1,8 @@
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.api.dependencies import get_current_user
@@ -9,10 +12,11 @@ from app.models.collaboration import CollaboratorStatus, LegacyCollaborator
 from app.models.user import User
 from app.schemas.legacy import LegacyContextResponse, LegacyResponse, LegacySetupStartResponse
 from app.services.authorization import legacy_role, require_legacy
-from app.services.legacy_setup import create_collecting_legacy, missing_setup_fields
+from app.services.legacy_setup import create_collecting_legacy, missing_setup_fields, pending_or_new_legacy
 
 
 router = APIRouter(prefix="/legacies", tags=["Legacies"])
+logger = logging.getLogger(__name__)
 
 
 def _response(legacy: Legacy, role: str = "owner") -> dict:
@@ -58,6 +62,26 @@ def start_legacy_setup(user: User = Depends(get_current_user), db: Session = Dep
     db.commit()
     db.refresh(legacy)
     return {"legacy": _response(legacy)}
+
+
+@router.post("/setup/bootstrap", response_model=LegacySetupStartResponse)
+def bootstrap_legacy_setup(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    try:
+        locked_user = db.scalar(select(User).where(User.id == user.id).with_for_update()) or user
+        legacy = pending_or_new_legacy(db, locked_user)
+        db.commit()
+        db.refresh(legacy)
+        return {"legacy": _response(legacy)}
+    except SQLAlchemyError:
+        db.rollback()
+        logger.exception("legacy_setup_bootstrap_failed user_id=%s", user.id)
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "legacy_setup_bootstrap_failed",
+                "message": "Rya couldn't start the Legacy setup. Try again.",
+            },
+        ) from None
 
 
 @router.get("/{legacy_id}", response_model=LegacyResponse)

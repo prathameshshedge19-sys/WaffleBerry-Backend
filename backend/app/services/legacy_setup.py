@@ -150,10 +150,10 @@ def missing_setup_fields(legacy: Legacy) -> list[str]:
     missing = []
     if legacy.is_self is None:
         missing.append("target_type")
-    if legacy.subject_name is None:
-        missing.append("subject_name")
     if legacy.is_self is False and legacy.relationship_to_owner is None:
         missing.append("relationship")
+    if legacy.subject_name is None:
+        missing.append("subject_name")
     return missing
 
 
@@ -194,6 +194,25 @@ def create_collecting_legacy(db: Session, user: User) -> Legacy:
     return legacy
 
 
+def pending_or_new_legacy(db: Session, user: User) -> Legacy:
+    active = owned_legacy(db, user.id, user.active_legacy_id) if user.active_legacy_id else None
+    if active is not None and active.setup_status == LegacySetupStatus.COLLECTING_IDENTITY.value:
+        return active
+    pending = db.scalar(
+        select(Legacy)
+        .where(
+            Legacy.owner_user_id == user.id,
+            Legacy.setup_status == LegacySetupStatus.COLLECTING_IDENTITY.value,
+        )
+        .order_by(Legacy.updated_at.desc(), Legacy.id.desc())
+    )
+    if pending is None:
+        pending = create_collecting_legacy(db, user)
+    else:
+        user.active_legacy_id = pending.id
+    return pending
+
+
 def owned_legacy(db: Session, user_id: int, legacy_id: int) -> Legacy | None:
     return db.scalar(select(Legacy).where(Legacy.id == legacy_id, Legacy.owner_user_id == user_id))
 
@@ -201,7 +220,7 @@ def owned_legacy(db: Session, user_id: int, legacy_id: int) -> Legacy | None:
 def active_or_new_legacy(db: Session, user: User) -> Legacy:
     legacy = owned_legacy(db, user.id, user.active_legacy_id) if user.active_legacy_id else None
     if legacy is None or legacy.setup_status == LegacySetupStatus.ARCHIVED.value:
-        legacy = create_collecting_legacy(db, user)
+        legacy = pending_or_new_legacy(db, user)
     return legacy
 
 
@@ -220,6 +239,7 @@ def setup_system_context(legacy: Legacy, activated_now: bool = False) -> str:
 Follow these rules:
 - Treat this state as authoritative and do not ask again for fields already known.
 - If setup is incomplete, ask one warm, natural question for the next missing field.
+- Follow missing_fields in the listed order. For another person, learn their relationship to the owner before asking their name.
 - If setup just completed, briefly acknowledge whose Legacy you are building and invite the user to continue naturally.
 - If setup_status is active, never return to beginner onboarding or ask who the Legacy is for. Continue from the current thread and established memories.
 - Continue in the user's current language or mixed-language style.

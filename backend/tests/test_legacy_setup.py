@@ -3,6 +3,7 @@ from sqlalchemy import func, select
 
 from app.models.conversation import Conversation
 from app.models.legacy import Legacy
+from app.models.user import User
 from app.services.legacy_setup import extract_legacy_identity
 from app.services.rya import RYA_SYSTEM_PROMPT
 from tests.conftest import register_user
@@ -126,6 +127,78 @@ def test_interrupted_setup_survives_and_new_chat_reuses_legacy(test_context):
         legacy = db.get(Legacy, legacy_id)
         assert legacy.subject_name == "Anjali"
         assert legacy.setup_status == "active"
+
+
+def test_first_legacy_bootstrap_is_idempotent_and_keeps_one_id_through_completion(test_context):
+    client, sessions, codes, provider = test_context
+    auth = register_user(client, codes, email="bootstrap@example.com")
+
+    first = client.post("/api/v1/legacies/setup/bootstrap", headers=_headers(auth))
+    repeated = client.post("/api/v1/legacies/setup/bootstrap", headers=_headers(auth))
+    assert first.status_code == repeated.status_code == 200
+    legacy_id = first.json()["legacy"]["id"]
+    assert repeated.json()["legacy"]["id"] == legacy_id
+
+    conversation = _conversation(client, auth, legacy_id)
+    assert conversation["legacy_id"] == legacy_id
+    _stream(client, auth, conversation["id"], "Someone I love.")
+    context = client.get("/api/v1/legacies", headers=_headers(auth)).json()
+    assert context["legacies"][0]["missing_fields"] == ["relationship", "subject_name"]
+    assert "missing_fields: relationship, subject_name" in provider.calls[-1][0].content
+    assert "learn their relationship to the owner before asking their name" in provider.calls[-1][0].content
+    _stream(client, auth, conversation["id"], "My mother.")
+    _stream(client, auth, conversation["id"], "Pallavi.")
+
+    with sessions() as db:
+        assert db.scalar(select(func.count(Legacy.id))) == 1
+        legacy = db.get(Legacy, legacy_id)
+        stored_conversation = db.get(Conversation, conversation["id"])
+        assert stored_conversation.legacy_id == legacy_id
+        assert (legacy.subject_name, legacy.relationship_to_owner, legacy.is_self) == ("Pallavi", "mother", False)
+        assert legacy.setup_status == "active"
+
+
+def test_bootstrap_restores_pending_legacy_when_active_pointer_is_missing(test_context):
+    client, sessions, codes, _provider = test_context
+    auth = register_user(client, codes, email="bootstrap-restore@example.com")
+    created = client.post("/api/v1/legacies/setup/bootstrap", headers=_headers(auth)).json()["legacy"]
+    _stream(client, auth, _conversation(client, auth, created["id"])["id"], "For my mother.")
+
+    with sessions() as db:
+        user = db.scalar(select(User).where(User.email == "bootstrap-restore@example.com"))
+        user.active_legacy_id = None
+        db.commit()
+
+    restored = client.post("/api/v1/legacies/setup/bootstrap", headers=_headers(auth))
+    assert restored.status_code == 200
+    assert restored.json()["legacy"]["id"] == created["id"]
+    context = client.get("/api/v1/legacies", headers=_headers(auth)).json()
+    assert context["active_legacy_id"] == created["id"]
+    assert context["legacies"][0]["missing_fields"] == ["subject_name"]
+    with sessions() as db:
+        assert db.scalar(select(func.count(Legacy.id))) == 1
+
+
+def test_myself_answer_and_create_another_use_collecting_legacy_records(test_context):
+    client, sessions, codes, _provider = test_context
+    auth = register_user(client, codes, email="bootstrap-self@example.com", name="Prathamesh")
+    first = client.post("/api/v1/legacies/setup/bootstrap", headers=_headers(auth)).json()["legacy"]
+    first_conversation = _conversation(client, auth, first["id"])
+    _stream(client, auth, first_conversation["id"], "Myself.")
+
+    another = client.post("/api/v1/legacies/setup", headers=_headers(auth))
+    assert another.status_code == 201
+    second = another.json()["legacy"]
+    assert second["id"] != first["id"]
+    assert second["setup_status"] == "collecting_identity"
+    second_conversation = _conversation(client, auth, second["id"])
+    assert second_conversation["legacy_id"] == second["id"]
+
+    with sessions() as db:
+        first_legacy = db.get(Legacy, first["id"])
+        assert (first_legacy.subject_name, first_legacy.relationship_to_owner, first_legacy.is_self) == ("Prathamesh", "self", True)
+        assert first_legacy.setup_status == "active"
+        assert db.scalar(select(func.count(Legacy.id))) == 2
 
 
 def test_multiple_legacies_switch_without_identity_contamination(test_context):
