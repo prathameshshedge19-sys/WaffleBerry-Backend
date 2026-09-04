@@ -1,77 +1,13 @@
-"""Database models."""
-"""SQLAlchemy model registry.
-
-Importing this package registers every mapped class on the shared metadata.
-"""
-
-from app.models.project import Project
 from app.models.auth_challenge import AuthChallenge
-from app.models.user import (
-    Consent,
-    Conversation,
-    Message,
-    MessageRole,
-    PlanTier,
-    TrainingStatus,
-    User,
-    UserSettings,
-    VoiceProfile,
-    VoiceSample,
-)
-from app.models.quota import UserDailyUsage
-from app.models.memory import (
-    CompanionMemoryProvenance,
-    Legacy,
-    LegacyStatus,
-    Memory,
-    MemoryContradictionGroup,
-    MemoryExtractionRun,
-    MemoryExtractionRunStatus,
-    MemoryLink,
-    MemoryParticipant,
-    MemoryProvenance,
-    MemoryReviewStatus,
-    MemoryRevision,
-    MemoryTag,
-    MemoryType,
-    StoryMessage,
-    StoryMessageRole,
-    StorySession,
-    StorySessionStatus,
-    Tag,
-)
+from app.models.access import AccessRole, InviteStatus, LegacyAccessEvent, LegacyAccessInvite
+from app.models.collaboration import CollaboratorStatus, LegacyCollaborator
+from app.models.conversation import Conversation, Message, MessageRole
+from app.models.legacy import Legacy, LegacySetupStatus
+from app.models.memory import Memory, MemoryEntity, MemoryEntityLink, MemoryOperation, MemoryRevision, MemoryStatus
+from app.models.progress import BuilderActivity, DailyPrompt, PromptStatus
+from app.models.user import User
+from app.models.web_source import MessageWebSource
+from app.models.viewer import LegacyViewerAccess, ViewerAccessStatus
+from app.models.visitor import LegacyVisitorProfile, VisitorRelationshipStatus
 
-__all__ = [
-    "AuthChallenge",
-    "CompanionMemoryProvenance",
-    "Consent",
-    "Conversation",
-    "Legacy",
-    "LegacyStatus",
-    "Memory",
-    "MemoryContradictionGroup",
-    "MemoryExtractionRun",
-    "MemoryExtractionRunStatus",
-    "MemoryLink",
-    "MemoryParticipant",
-    "MemoryProvenance",
-    "MemoryReviewStatus",
-    "MemoryRevision",
-    "MemoryTag",
-    "MemoryType",
-    "Message",
-    "MessageRole",
-    "PlanTier",
-    "Project",
-    "StoryMessage",
-    "StoryMessageRole",
-    "StorySession",
-    "StorySessionStatus",
-    "Tag",
-    "TrainingStatus",
-    "User",
-    "UserDailyUsage",
-    "UserSettings",
-    "VoiceProfile",
-    "VoiceSample",
-]
+__all__ = ["AccessRole", "AuthChallenge", "BuilderActivity", "CollaboratorStatus", "Conversation", "DailyPrompt", "InviteStatus", "Legacy", "LegacyAccessEvent", "LegacyAccessInvite", "LegacyCollaborator", "LegacySetupStatus", "LegacyViewerAccess", "LegacyVisitorProfile", "Memory", "MemoryEntity", "MemoryEntityLink", "MemoryOperation", "MemoryRevision", "MemoryStatus", "Message", "MessageRole", "MessageWebSource", "PromptStatus", "User", "ViewerAccessStatus", "VisitorRelationshipStatus"]

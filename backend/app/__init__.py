@@ -1,1 +1,1 @@
-"""Waffle Berry Backend Application."""
+"""Legarya backend application package."""

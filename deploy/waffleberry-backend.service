@@ -1,5 +1,5 @@
 [Unit]
-Description=WaffleBerry FastAPI backend
+Description=LegaRya FastAPI backend
 After=network-online.target postgresql.service
 Wants=network-online.target
 

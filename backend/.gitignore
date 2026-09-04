@@ -1,0 +1,13 @@
+.venv/
+.python-package/
+python-runtime.*
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+.env
+legarya.db
+test.db
+server.pid
+server.stdout.log
+server.stderr.log

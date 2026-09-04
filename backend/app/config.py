@@ -1,147 +1,71 @@
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-BACKEND_DIRECTORY = Path(__file__).resolve().parents[1]
-ENV_FILE = BACKEND_DIRECTORY / ".env"
+BACKEND_DIR = Path(__file__).resolve().parents[1]
 
 
 class Settings(BaseSettings):
-    """Application settings and configuration."""
-
     model_config = SettingsConfigDict(
-        env_file=ENV_FILE,
+        env_file=BACKEND_DIR / ".env",
         env_file_encoding="utf-8",
         extra="ignore",
     )
-    
-    # App settings
-    app_name: str = "Waffle Berry Backend"
-    debug: bool = True
-    
-    # Database settings
-    database_url: str = "sqlite:///./waffle_berry.db"
-    
-    # API settings
-    api_v1_prefix: str = "/api/v1"
-    cors_origins: str = (
-        "http://127.0.0.1:4173,http://localhost:4173,"
-        "http://127.0.0.1:5500,http://localhost:5500"
-    )
+
+    app_name: str = "Legarya Backend"
+    legarya_debug: bool = True
+    database_url: str = "sqlite:///./legarya.db"
+    cors_origins: str = "http://127.0.0.1:5600,http://localhost:5600"
+
+    jwt_secret_key: str
+    jwt_algorithm: str = "HS256"
+    access_token_expire_minutes: int = Field(default=30, ge=5, le=1440)
+    refresh_token_expire_days: int = Field(default=7, ge=1, le=30)
+    remembered_refresh_token_expire_days: int = Field(default=30, ge=1, le=90)
+    auth_code_expire_minutes: int = Field(default=10, ge=1, le=60)
+    access_invite_expire_days: int = Field(default=7, ge=1, le=30)
+    frontend_base_url: str = "http://localhost:5600"
+
+    openai_api_key: str | None = None
+    ai_model: str = "gpt-5.6-luna"
+    ai_reasoning_effort: Literal["none", "low", "medium", "high", "xhigh", "max"] = "low"
+    ai_max_context_messages: int = Field(default=24, ge=2, le=100)
+    memory_extraction_model: str = "gpt-5.6-luna"
+    memory_extraction_reasoning_effort: Literal["none", "low", "medium", "high", "xhigh", "max"] = "low"
+    memory_embedding_model: str = "text-embedding-3-small"
+    memory_embedding_dimensions: int = Field(default=256, ge=128, le=3072)
+    memory_embedding_version: str = "v1"
+    memory_retrieval_top_k: int = Field(default=6, ge=1, le=20)
+    memory_retrieval_threshold: float = Field(default=0.28, ge=-1, le=1)
+    memory_duplicate_threshold: float = Field(default=0.94, ge=0.8, le=1)
+
+    google_web_client_id: str | None = None
+    mail_server: str | None = None
+    mail_port: int = 587
+    mail_username: str | None = None
+    mail_password: str | None = None
+    mail_from: str | None = None
+    mail_starttls: bool = True
+    mail_ssl_tls: bool = False
 
     @property
     def allowed_cors_origins(self) -> list[str]:
-        """Return explicit browser origins configured for CORS."""
-        origins = [
-            origin.strip().rstrip("/")
-            for origin in self.cors_origins.split(",")
-            if origin.strip()
-        ]
+        origins = [value.strip().rstrip("/") for value in self.cors_origins.split(",") if value.strip()]
         if "*" in origins:
-            raise ValueError("CORS_ORIGINS must contain explicit origins, not '*'.")
+            raise ValueError("CORS_ORIGINS must use explicit origins.")
         return origins
 
-    # JWT settings
-    jwt_secret_key: str
-    jwt_algorithm: str = "HS256"
-    access_token_expire_minutes: int = 30
-    refresh_token_expire_days: int = Field(default=7, ge=1, le=30)
-    google_web_client_id: str | None = None
-
-    # AI settings
-    ai_provider: str = "openai"
-    ai_model: str = ""
-    audio_transcription_model: str = "gpt-4o-mini-transcribe"
-    live_call_transcription_model: str = "gpt-live-transcribe"
-    openai_tts_model: str = "gpt-4o-mini-tts"
-    openai_tts_voice: str = "alloy"
-    openai_tts_male_voice: str = "cedar"
-    openai_tts_female_voice: str = "marin"
-    default_standard_voice_profile: str = "standard_female"
-    openai_tts_format: str = "mp3"
-    tts_max_text_characters: int = Field(default=4096, ge=1, le=4096)
-    tts_timeout_seconds: float = Field(default=60.0, gt=0)
-    message_speech_engine: str = "tts"
-    openai_realtime_model: str = "gpt-realtime-2.1"
-    openai_realtime_vad_threshold: float = Field(default=0.60, ge=0.0, le=1.0)
-    live_call_realtime_enabled: bool = False
-    live_call_external_voice_realtime_enabled: bool = False
-    live_call_realtime_strict: bool = False
-    openai_realtime_session_url: str = "https://api.openai.com/v1/realtime/client_secrets"
-    live_call_realtime_tool_timeout_seconds: float = Field(default=6.0, gt=0, le=15)
-    openai_realtime_timeout_seconds: float = Field(default=60.0, gt=0)
-    openai_realtime_max_audio_bytes: int = Field(
-        default=25 * 1024 * 1024,
-        ge=1,
-    )
-    openai_realtime_output_format: str = "audio/pcm"
-    realtime_fallback_to_tts: bool = True
-    sarvam_api_key: str | None = None
-    sarvam_model: str = "bulbul:v3"
-    sarvam_speaker_male: str = "shubh"
-    sarvam_speaker_female: str = "priya"
-    sarvam_output_format: str = "wav"
-    sarvam_timeout_seconds: float = Field(default=60.0, gt=0)
-    sarvam_max_text_characters: int = Field(default=2500, ge=1, le=2500)
-    sarvam_max_audio_bytes: int = Field(default=25 * 1024 * 1024, ge=1)
-    sarvam_pace: float = Field(default=0.92, ge=0.5, le=2.0)
-    sarvam_temperature: float = Field(default=0.6, ge=0.01, le=2.0)
-    sarvam_pronunciation_dictionary_id: str | None = None
-    sarvam_pronunciation_dictionary_required: bool = False
-    speech_emotion_enabled: bool = True
-    speech_nonverbal_cues_enabled: bool = False
-    speech_discourse_markers_enabled: bool = False
-    openai_api_key: str | None = None
-    ai_connect_timeout_seconds: float = Field(default=10.0, gt=0)
-    ai_read_timeout_seconds: float = Field(default=90.0, gt=0)
-    ai_retry_max_retries: int = Field(default=2, ge=0)
-    ai_retry_base_delay_seconds: float = Field(default=0.25, ge=0)
-    ai_retry_max_delay_seconds: float = Field(default=2.0, gt=0)
-    ai_retry_jitter_seconds: float = Field(default=0.15, ge=0)
-    ai_max_context_messages: int = Field(default=24, ge=2)
-
-    memory_semantic_retrieval_enabled: bool = True
-    auto_memory_learning_enabled: bool = False
-    memory_embedding_provider: str = "openai"
-    memory_embedding_model: str = "text-embedding-3-small"
-    memory_embedding_version: str = "v1"
-    memory_embedding_dimensions: int = Field(default=1536, ge=1)
-    memory_semantic_threshold: float = Field(default=0.35, ge=-1, le=1)
-
-    # Companion approved-memory grounding budget
-    memory_grounding_max_memories: int = Field(default=8, ge=1, le=100)
-    memory_grounding_max_estimated_tokens: int = Field(
-        default=1500,
-        ge=1,
-    )
-    memory_grounding_max_characters: int = Field(default=6000, ge=1)
-
     @model_validator(mode="after")
-    def reject_production_sqlite_fallback(self):
-        """Production must explicitly select PostgreSQL persistence."""
-        if not self.debug and self.database_url.lower().startswith("sqlite"):
-            raise ValueError(
-                "DATABASE_URL must use PostgreSQL when DEBUG is false."
-            )
-        if self.memory_semantic_retrieval_enabled and any(
-            not value.strip()
-            for value in (
-                self.memory_embedding_provider,
-                self.memory_embedding_model,
-                self.memory_embedding_version,
-            )
-        ):
-            raise ValueError(
-                "Semantic memory retrieval requires embedding provider, "
-                "model, and version configuration."
-            )
+    def validate_production_database(self):
+        if not self.legarya_debug and self.database_url.lower().startswith("sqlite"):
+            raise ValueError("Production requires an explicit PostgreSQL DATABASE_URL.")
         return self
 
 
-@lru_cache()
+@lru_cache
 def get_settings() -> Settings:
-    """Get cached settings instance."""
     return Settings()

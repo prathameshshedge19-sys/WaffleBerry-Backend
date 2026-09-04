@@ -1,1 +1,1 @@
-"""Backend tests."""
+"""Legarya backend tests."""

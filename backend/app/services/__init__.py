@@ -1,1 +1,1 @@
-"""Reusable application services."""
+"""Application services."""

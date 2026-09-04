@@ -1,109 +1,42 @@
-"""FastAPI application initialization and setup."""
-
 from fastapi import FastAPI
-from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.v1.project import router as project_router
-from app.api.v1.user import router as user_router
-from app.api.v1.memory import router as memory_router
-from app.api.v1.story_memory import router as story_memory_router
-from app.api.v1.audio import router as audio_router
-from app.api.v1.live_call import router as live_call_router
+from app.api.routes.auth import router as auth_router
+from app.api.routes.access_management import router as access_management_router
+from app.api.routes.collaborations import router as collaboration_router
+from app.api.routes.conversations import router as conversation_router
+from app.api.routes.legacies import router as legacy_router
+from app.api.routes.legacy_access import router as legacy_access_router
+from app.api.routes.legacy_conversations import router as legacy_conversation_router
+from app.api.routes.memories import router as memory_router
+from app.api.routes.progress import router as progress_router
 from app.config import get_settings
-from app.db import Base, engine, ensure_schema
-from app.services.ai.provider_registry import validate_ai_configuration
+
 
 settings = get_settings()
-validate_ai_configuration(settings)
-
-# Import models so SQLAlchemy registers them
-import app.models  # noqa: F401
-from app.models.verification import *
-
-print("Registered tables:")
-print(list(Base.metadata.tables.keys()))
-
-# Create database tables
-Base.metadata.create_all(bind=engine)
-ensure_schema()
-
-# Initialize FastAPI app
 app = FastAPI(
-    title="Waffle Berry - Voice Cloning AI",
-    description="AI platform for cloning voices and having conversations with loved ones",
-    version="1.0.0",
+    title="Legarya API",
+    description="Authentication, Rya chat, conversational Legacy identity, and connected editable memory intelligence.",
+    version="11.0.0-l11",
 )
-
-# Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.allowed_cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["Content-Disposition"],
 )
-
-# Include routers
-app.include_router(
-    user_router,
-    prefix=settings.api_v1_prefix,
-    tags=["users", "voice-profiles", "conversations"]
-)
-app.include_router(
-    story_memory_router,
-    prefix=settings.api_v1_prefix,
-    tags=["legacies", "guided-stories"],
-)
-app.include_router(
-    memory_router,
-    prefix=settings.api_v1_prefix,
-    tags=["memory-review"],
-)
-app.include_router(
-    audio_router,
-    prefix=settings.api_v1_prefix,
-    tags=["audio-transcription"],
-)
-app.include_router(
-    project_router,
-    prefix=settings.api_v1_prefix,
-    tags=["projects"]
-)
-app.include_router(
-    live_call_router,
-    prefix=settings.api_v1_prefix,
-    tags=["live-call"],
-)
-
-
-@app.get("/", response_class=HTMLResponse)
-async def read_root():
-    """Return a simple backend status page."""
-    return "<h1>🎤 Waffle Berry - Backend Running</h1>"
+app.include_router(auth_router, prefix="/api/v1")
+app.include_router(access_management_router, prefix="/api/v1")
+app.include_router(conversation_router, prefix="/api/v1")
+app.include_router(legacy_router, prefix="/api/v1")
+app.include_router(memory_router, prefix="/api/v1")
+app.include_router(collaboration_router, prefix="/api/v1")
+app.include_router(legacy_access_router, prefix="/api/v1")
+app.include_router(legacy_conversation_router, prefix="/api/v1")
+app.include_router(progress_router, prefix="/api/v1")
 
 
 @app.get("/health")
-async def health_check():
-    """Health check endpoint."""
-    return {"status": "ok"}
-
-
-@app.get(f"{settings.api_v1_prefix}/health")
-async def api_health_check():
-    """API health check endpoint."""
-    return {
-        "status": "ok",
-        "message": "API is operational",
-        "features": [
-            "User authentication",
-            "Voice profile creation",
-            "Voice sample upload",
-            "Conversation management",
-            "Message handling"
-        ]
-    }
-
-
-
+def health():
+    return {"status": "ok", "service": "legarya-backend"}
