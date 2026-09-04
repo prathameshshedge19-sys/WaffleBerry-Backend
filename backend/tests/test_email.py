@@ -18,7 +18,7 @@ def test_verification_email_has_premium_html_and_plain_text():
     assert "This code expires in 10 minutes." in rendered.html
     assert '<span style="color:#F5EEE4;">Lega</span>' in rendered.html
     assert '<span style="color:#FFE2A8;">Rya</span>' in rendered.html
-    assert "LegaRya\nRemember You, Always." in rendered.text
+    assert "LegaRya by WaffleBerry" in rendered.text
     assert "<script" not in rendered.html.casefold()
     assert "http://" not in rendered.html and "https://" not in rendered.html
 

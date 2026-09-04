@@ -161,7 +161,7 @@ This code expires in {expiry_label}.
 
 If you didn't request this code, you can safely ignore this email.
 
-LegaRya
+LegaRya by WaffleBerry
 Remember You, Always.
 """
 
@@ -206,7 +206,7 @@ Remember You, Always.
               <td style="padding:25px 42px 38px;text-align:center;font-family:Arial,Helvetica,sans-serif;font-size:12px;line-height:1.65;color:#8F8578;">If you didn't request this code, you can safely ignore this email.</td>
             </tr>
             <tr>
-              <td style="border-top:1px solid #2A2218;padding:22px 42px 26px;text-align:center;font-family:Arial,Helvetica,sans-serif;font-size:11px;line-height:1.6;color:#786F64;">LegaRya<br><span style="color:#9E9282;">Remember You, Always.</span></td>
+              <td style="border-top:1px solid #2A2218;padding:22px 42px 26px;text-align:center;font-family:Arial,Helvetica,sans-serif;font-size:11px;line-height:1.6;color:#786F64;">LegaRya by WaffleBerry<br><span style="color:#9E9282;">Remember You, Always.</span></td>
             </tr>
           </table>
         </td>
