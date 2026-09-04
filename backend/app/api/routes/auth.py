@@ -32,6 +32,10 @@ router = APIRouter(prefix="/auth", tags=["authentication"])
 REFRESH_COOKIE = "legarya_refresh"
 
 
+def _refresh_cookie_samesite() -> str:
+    return "lax" if get_settings().legarya_debug else "none"
+
+
 def _set_session(response: Response, user: User, *, remember_me: bool = False) -> LoginResponse:
     settings = get_settings()
     max_age = settings.remembered_refresh_token_expire_days * 86400 if remember_me else None
@@ -41,7 +45,7 @@ def _set_session(response: Response, user: User, *, remember_me: bool = False) -
         create_refresh_token(user.id, user.password_hash, remember_me=remember_me),
         httponly=True,
         secure=not settings.legarya_debug,
-        samesite="lax",
+        samesite=_refresh_cookie_samesite(),
         max_age=max_age,
         expires=expires,
         path="/api/v1/auth",
@@ -126,7 +130,7 @@ def logout(response: Response):
         path="/api/v1/auth",
         secure=not settings.legarya_debug,
         httponly=True,
-        samesite="lax",
+        samesite=_refresh_cookie_samesite(),
     )
 
 
