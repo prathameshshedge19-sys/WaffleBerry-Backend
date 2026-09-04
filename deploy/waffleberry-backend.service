@@ -7,9 +7,9 @@ Wants=network-online.target
 Type=simple
 User=waffleberry
 Group=waffleberry
-WorkingDirectory=/opt/waffleberry/WaffleBerry_backend/backend
-EnvironmentFile=/etc/waffleberry/backend.env
-ExecStart=/opt/waffleberry/WaffleBerry_backend/backend/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --proxy-headers --forwarded-allow-ips=127.0.0.1
+WorkingDirectory=/home/waffleberry/WaffleBerry-Backend/backend
+EnvironmentFile=/home/waffleberry/WaffleBerry-Backend/backend/.env
+ExecStart=/home/waffleberry/WaffleBerry-Backend/backend/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --proxy-headers --forwarded-allow-ips=127.0.0.1
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=true
