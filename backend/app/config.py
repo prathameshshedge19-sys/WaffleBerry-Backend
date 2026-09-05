@@ -42,6 +42,11 @@ class Settings(BaseSettings):
     memory_retrieval_top_k: int = Field(default=6, ge=1, le=20)
     memory_retrieval_threshold: float = Field(default=0.28, ge=-1, le=1)
     memory_duplicate_threshold: float = Field(default=0.94, ge=0.8, le=1)
+    voice_transcription_model: str = "gpt-4o-transcribe"
+    voice_tts_model: str = "gpt-4o-mini-tts"
+    voice_max_upload_bytes: int = Field(default=25 * 1024 * 1024, ge=1024, le=25 * 1024 * 1024)
+    voice_max_recording_seconds: int = Field(default=300, ge=10, le=600)
+    voice_max_tts_characters: int = Field(default=4096, ge=100, le=4096)
 
     google_web_client_id: str | None = None
     mail_server: str | None = None

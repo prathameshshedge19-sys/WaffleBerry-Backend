@@ -48,6 +48,7 @@ class ConversationResponse(BaseModel):
 
 class MessageCreate(BaseModel):
     content: str = Field(min_length=1, max_length=12000)
+    input_mode: Literal["text", "voice"] = "text"
 
 
 class MessageResponse(BaseModel):

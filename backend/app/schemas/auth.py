@@ -51,6 +51,7 @@ class UserResponse(BaseModel):
     full_name: str
     email: EmailStr
     is_verified: bool
+    voice_preference: str
     created_at: datetime
 
 

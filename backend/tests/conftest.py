@@ -17,6 +17,7 @@ from app.services.rya import ChatTurn, get_rya_provider
 from app.services.memory import CanonicalEdit, MemoryAnalysis, get_memory_provider
 from app.services.legacy_persona import get_legacy_persona_provider
 from app.services.web_search import WebSearchError, WebSearchResult, WebSource, get_web_search_provider
+from app.services.voice import get_voice_provider, speech_cache
 
 
 class FakeRyaProvider:
@@ -119,6 +120,21 @@ class FakeWebSearchProvider:
         ))
 
 
+class FakeVoiceProvider:
+    def __init__(self):
+        self.transcription = "My mother loved jasmine flowers."
+        self.transcription_calls = []
+        self.synthesis_calls = []
+
+    async def transcribe(self, audio, filename, content_type):
+        self.transcription_calls.append((audio, filename, content_type))
+        return self.transcription
+
+    async def synthesize(self, text, voice):
+        self.synthesis_calls.append((text, voice))
+        return b"ID3-fake-mp3"
+
+
 @pytest.fixture
 def test_context(monkeypatch):
     get_settings.cache_clear()
@@ -131,10 +147,13 @@ def test_context(monkeypatch):
     memory_provider = FakeMemoryProvider()
     persona_provider = FakeLegacyPersonaProvider()
     web_provider = FakeWebSearchProvider()
+    voice_provider = FakeVoiceProvider()
     provider.memory_provider = memory_provider
     provider.persona_provider = persona_provider
     provider.web_provider = web_provider
     provider.invite_links = invite_links
+    provider.voice_provider = voice_provider
+    speech_cache._audio.clear()
 
     def override_db():
         db = TestingSession()
@@ -153,6 +172,7 @@ def test_context(monkeypatch):
     app.dependency_overrides[get_memory_provider] = lambda: memory_provider
     app.dependency_overrides[get_legacy_persona_provider] = lambda: persona_provider
     app.dependency_overrides[get_web_search_provider] = lambda: web_provider
+    app.dependency_overrides[get_voice_provider] = lambda: voice_provider
     with TestClient(app) as client:
         yield client, TestingSession, codes, provider
     app.dependency_overrides.clear()

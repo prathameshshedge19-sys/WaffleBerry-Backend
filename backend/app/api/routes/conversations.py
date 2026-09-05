@@ -378,7 +378,7 @@ async def stream_message(payload: MessageCreate, conversation_id: int, legacy_id
 
     async def event_stream():
         chunks: list[str] = []
-        yield _sse("start", {"conversation_id": conversation.id, "user_message_id": user_message.id, "legacy_id": legacy.id})
+        yield _sse("start", {"conversation_id": conversation.id, "user_message_id": user_message.id, "legacy_id": legacy.id, "input_mode": payload.input_mode})
         try:
             async for delta in provider.stream(turns):
                 chunks.append(delta)
@@ -422,6 +422,7 @@ async def stream_message(payload: MessageCreate, conversation_id: int, legacy_id
         yield _sse("done", {
             "message_id": rya_message.id,
             "conversation_id": conversation.id,
+            "input_mode": payload.input_mode,
             "memories_saved": len(changed),
             "progress": legacy_progress(db, legacy.id),
             "streak": streak_summary(db, legacy.id, today),

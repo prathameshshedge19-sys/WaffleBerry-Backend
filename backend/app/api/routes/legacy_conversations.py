@@ -206,7 +206,7 @@ async def stream_legacy_message(payload: MessageCreate, conversation_id: int, le
 
     async def event_stream():
         chunks: list[str] = []
-        yield _sse("start", {"conversation_id": conversation.id, "user_message_id": user_message.id, "legacy_id": legacy.id, "mode": "legacy", "route": route.intent.value})
+        yield _sse("start", {"conversation_id": conversation.id, "user_message_id": user_message.id, "legacy_id": legacy.id, "mode": "legacy", "route": route.intent.value, "input_mode": payload.input_mode})
         if route.needs_fresh_data:
             yield _sse("activity", {"message": "Checking the latest information…"})
         current = await _current_context(web_provider, content, route)
@@ -226,6 +226,6 @@ async def stream_legacy_message(payload: MessageCreate, conversation_id: int, le
             db.add(persona_message); db.flush(); _persist_sources(db, persona_message, current); conversation.updated_at = datetime.now(timezone.utc); db.commit(); db.refresh(persona_message)
         except SQLAlchemyError:
             db.rollback(); yield _sse("error", {"code": "message_persistence_failed", "message": "The response could not be saved."}); return
-        yield _sse("done", {"message_id": persona_message.id, "conversation_id": conversation.id, "memories_saved": 0, "mode": "legacy", "current_information": bool(current), "sources": [source.as_dict() for source in current.sources] if current else []})
+        yield _sse("done", {"message_id": persona_message.id, "conversation_id": conversation.id, "memories_saved": 0, "mode": "legacy", "input_mode": payload.input_mode, "current_information": bool(current), "sources": [source.as_dict() for source in current.sources] if current else []})
 
     return StreamingResponse(event_stream(), media_type="text/event-stream", headers={"Cache-Control": "no-cache, no-transform", "Connection": "keep-alive", "X-Accel-Buffering": "no"})
