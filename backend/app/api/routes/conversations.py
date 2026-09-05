@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.api.dependencies import get_current_user
@@ -15,8 +15,9 @@ from app.config import get_settings
 from app.database import get_db
 from app.models.conversation import Conversation, Message, MessageRole
 from app.models.legacy import Legacy
+from app.models.progress import DailyPrompt, PromptStatus
 from app.models.user import User
-from app.schemas.chat import ConversationCreate, ConversationRename, ConversationResponse, MessageCreate, MessagePairResponse, MessageResponse
+from app.schemas.chat import ConversationCreate, ConversationRename, ConversationResponse, DailyPromptStart, DailyPromptStartResponse, MessageCreate, MessagePairResponse, MessageResponse
 from app.services.rya import ChatTurn, RyaProvider, RyaProviderError, get_rya_provider
 from app.services.authorization import accessible_legacy, legacy_role, require_legacy
 from app.services.legacy_intelligence import analyze_legacy_query
@@ -219,6 +220,74 @@ def list_conversations(
         .where(Conversation.user_id == user.id, Conversation.legacy_id == legacy_id, Conversation.mode == "rya")
         .order_by(Conversation.updated_at.desc(), Conversation.id.desc())
     ).all()
+
+
+def _daily_prompt_start_response(db: Session, conversation: Conversation) -> dict:
+    rya_message = db.scalar(
+        select(Message).where(
+            Message.conversation_id == conversation.id,
+            Message.role == MessageRole.ASSISTANT,
+        ).order_by(Message.id)
+    )
+    if rya_message is None:
+        raise HTTPException(status_code=409, detail="The daily question conversation is incomplete.")
+    return {"conversation": conversation, "rya_message": rya_message}
+
+
+@router.post("/from-daily-prompt", response_model=DailyPromptStartResponse, status_code=status.HTTP_201_CREATED)
+def start_from_daily_prompt(
+    payload: DailyPromptStart,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    legacy = require_legacy(db, user.id, payload.legacy_id)
+    prompt = db.scalar(select(DailyPrompt).where(
+        DailyPrompt.id == payload.prompt_id,
+        DailyPrompt.legacy_id == legacy.id,
+    ))
+    if prompt is None:
+        raise HTTPException(status_code=409, detail="This daily question is no longer available.")
+
+    existing = db.scalar(select(Conversation).where(
+        Conversation.user_id == user.id,
+        Conversation.source_daily_prompt_id == prompt.id,
+        Conversation.mode == "rya",
+    ))
+    if existing is not None:
+        return _daily_prompt_start_response(db, existing)
+    if prompt.status != PromptStatus.PENDING.value:
+        raise HTTPException(status_code=409, detail="This daily question is no longer available.")
+
+    conversation = Conversation(
+        user_id=user.id,
+        legacy_id=legacy.id,
+        title=derive_conversation_title(prompt.prompt_text),
+        mode="rya",
+        source_daily_prompt_id=prompt.id,
+    )
+    db.add(conversation)
+    db.flush()
+    rya_message = Message(
+        conversation_id=conversation.id,
+        role=MessageRole.ASSISTANT,
+        content=prompt.prompt_text,
+    )
+    db.add(rya_message)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        existing = db.scalar(select(Conversation).where(
+            Conversation.user_id == user.id,
+            Conversation.source_daily_prompt_id == payload.prompt_id,
+            Conversation.mode == "rya",
+        ))
+        if existing is None:
+            raise
+        return _daily_prompt_start_response(db, existing)
+    db.refresh(conversation)
+    db.refresh(rya_message)
+    return {"conversation": conversation, "rya_message": rya_message}
 
 
 @router.patch("/{conversation_id}", response_model=ConversationResponse)

@@ -13,6 +13,11 @@ class ConversationCreate(BaseModel):
     mode: Literal["rya"] = "rya"
 
 
+class DailyPromptStart(BaseModel):
+    legacy_id: int = Field(ge=1)
+    prompt_id: int = Field(ge=1)
+
+
 class LegacyConversationCreate(BaseModel):
     title: str = Field(default="New chat", min_length=1, max_length=255)
     legacy_id: int = Field(ge=1)
@@ -65,4 +70,9 @@ class WebSourceResponse(BaseModel):
 
 class MessagePairResponse(BaseModel):
     user_message: MessageResponse
+    rya_message: MessageResponse
+
+
+class DailyPromptStartResponse(BaseModel):
+    conversation: ConversationResponse
     rya_message: MessageResponse
