@@ -15,6 +15,7 @@ class MessageRole(str, Enum):
 class Conversation(Base):
     __tablename__ = "conversations"
     __table_args__ = (
+        CheckConstraint("mode IN ('rya', 'legacy')", name="ck_conversations_mode"),
         UniqueConstraint("user_id", "source_daily_prompt_id", name="uq_conversations_user_daily_prompt"),
     )
 
