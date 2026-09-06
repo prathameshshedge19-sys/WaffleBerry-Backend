@@ -10,28 +10,22 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from app.services import turn_observability as obs, usage_accounting as usage
 from app.api.dependencies import get_current_user
-from app.config import get_settings
 from app.database import get_db
 from app.models.conversation import Conversation, Message, MessageRole
 from app.models.legacy import Legacy
 from app.models.progress import DailyPrompt, PromptStatus
 from app.models.user import User
 from app.schemas.chat import ConversationCreate, ConversationRename, ConversationResponse, DailyPromptStart, DailyPromptStartResponse, MessageCreate, MessagePairResponse, MessageResponse
-from app.services.rya import ChatTurn, RyaProvider, RyaProviderError, get_rya_provider
+from app.services.rya import RyaProvider, RyaProviderError, get_rya_provider
 from app.services.authorization import accessible_legacy, legacy_role, require_legacy
-from app.services.legacy_intelligence import analyze_legacy_query
-from app.services.legacy_setup import active_or_new_legacy, apply_setup_message, setup_system_context
-from app.services.memory import (
-    LivingMemoryService,
-    MemoryAnalysis,
-    MemoryProvider,
-    MemoryProviderError,
-    get_memory_provider,
-    memory_grounding,
-    progressive_interviewing,
-)
-from app.services.progression import legacy_progress, local_date, record_builder_activity, streak_summary
+from app.services.legacy_setup import active_or_new_legacy, apply_setup_message
+from app.services.memory import MemoryProvider, get_memory_provider
+from app.services.conversation_turns import TurnActorContext, TurnCompletionContext, prepare_turn, complete_turn
+
+
+from app.services.turn_lifecycle import accept_turn, link_user, finish_turn, fail_turn, lifecycle_guard
 
 
 router = APIRouter(prefix="/conversations", tags=["Rya chat"])
@@ -106,93 +100,6 @@ def _legacy_for_conversation(db: Session, conversation: Conversation, user: User
     if legacy is None:
         raise HTTPException(status_code=404, detail="Legacy not found.")
     return legacy
-
-
-def _provider_turns(
-    db: Session,
-    conversation: Conversation,
-    legacy: Legacy,
-    activated_now: bool,
-    relevant_memories=(),
-    memory_analysis: MemoryAnalysis | None = None,
-    active_memories=(),
-    contributor_role: str = "owner",
-) -> list[ChatTurn]:
-    limit = get_settings().ai_max_context_messages
-    recent = db.scalars(
-        select(Message)
-        .where(Message.conversation_id == conversation.id)
-        .order_by(Message.id.desc())
-        .limit(limit)
-    ).all()
-    recent_questions = db.scalars(
-        select(Message)
-        .join(Conversation, Message.conversation_id == Conversation.id)
-        .where(
-            Conversation.legacy_id == legacy.id,
-            Conversation.user_id == conversation.user_id,
-            Message.role == MessageRole.ASSISTANT,
-            Message.content.contains("?"),
-        )
-        .order_by(Message.id.desc())
-        .limit(12)
-    ).all()
-    system_turns = [ChatTurn(role="system", content=setup_system_context(legacy, activated_now))]
-    if contributor_role == "collaborator":
-        system_turns.append(ChatTurn(role="system", content=f"COLLABORATOR BUILDER CONTEXT\nThis user is a trusted contributor to {legacy.subject_name or 'the selected subject'}'s Legacy, not necessarily the Legacy subject or owner. Treat Conversation.legacy_id as authoritative for whose Legacy is being built. Interpret relationship phrases such as 'my aunt' in that target context, preserve the contributor's language and perspective, and never imply they are the subject. You may say 'you mentioned' or ask what they remember. Do not repeatedly announce their collaborator role."))
-    else:
-        system_turns.append(ChatTurn(role="system", content=f"OWNER BUILDER CONTEXT\nThis user owns {legacy.subject_name or 'the selected subject'}'s Legacy. Preserve Rya's builder identity and use the active evidence graph to synthesize what has already been shared."))
-    grounding = memory_grounding(relevant_memories)
-    if grounding:
-        system_turns.append(ChatTurn(role="system", content=grounding))
-    interview_context = [*reversed(recent), *recent_questions]
-    interviewing = progressive_interviewing(memory_analysis, active_memories, interview_context, subject_name=legacy.subject_name, contributor_role=contributor_role)
-    if interviewing:
-        system_turns.append(ChatTurn(role="system", content=interviewing))
-    return system_turns + [
-        ChatTurn(role=message.role.value, content=message.content) for message in reversed(recent)
-    ]
-
-
-async def _prepare_memory(
-    db: Session,
-    legacy: Legacy,
-    content: str,
-    provider: MemoryProvider,
-):
-    service = LivingMemoryService(provider)
-    analysis: MemoryAnalysis | None = None
-    try:
-        analysis = await service.analyze(db, legacy, content)
-    except MemoryProviderError as exc:
-        logger.warning("Memory analysis skipped kind=%s legacy_id=%s", exc.kind, legacy.id)
-    query = analysis.normalized_query if analysis else content
-    active = service.active_memories(db, legacy.id)
-    route = analyze_legacy_query(query, legacy.subject_name, active)
-    relevant = ()
-    if route.needs_memory or bool(analysis and analysis.memories):
-        try:
-            relevant = await service.retrieve(db, legacy.id, query)
-        except MemoryProviderError as exc:
-            logger.warning("Memory retrieval skipped kind=%s legacy_id=%s", exc.kind, legacy.id)
-    return service, analysis, relevant, active
-
-
-async def _store_memory(
-    service: LivingMemoryService,
-    db: Session,
-    legacy: Legacy,
-    conversation: Conversation,
-    source_message: Message,
-    content: str,
-    analysis: MemoryAnalysis | None,
-    changed_by_user_id: int,
-) -> list:
-    try:
-        return await service.store(db, legacy, conversation, source_message, content, analysis, changed_by_user_id)
-    except MemoryProviderError as exc:
-        logger.warning("Memory persistence skipped kind=%s legacy_id=%s", exc.kind, legacy.id)
-        return []
 
 
 @router.post("", response_model=ConversationResponse, status_code=status.HTTP_201_CREATED)
@@ -314,58 +221,75 @@ def list_messages(conversation_id: int, legacy_id: int | None = Query(default=No
 
 
 @router.post("/{conversation_id}/messages", response_model=MessagePairResponse, status_code=status.HTTP_201_CREATED)
+@lifecycle_guard
 async def send_message(payload: MessageCreate, conversation_id: int, legacy_id: int | None = Query(default=None, ge=1), timezone_name: str = Query(default="UTC", alias="timezone", max_length=64), user: User = Depends(get_current_user), db: Session = Depends(get_db), provider: RyaProvider = Depends(get_rya_provider), memory_provider: MemoryProvider = Depends(get_memory_provider)):
     conversation = _owned_conversation(db, conversation_id, user.id, legacy_id)
-    legacy = _legacy_for_conversation(db, conversation, user)
+    legacy = _legacy_for_conversation(db, conversation, user) if conversation.legacy_id is not None else None
     content = payload.content.strip()
     if not content:
         raise HTTPException(status_code=422, detail="Message content must not be blank.")
+    replay = accept_turn(db, conversation, payload, streaming=False, timezone_name=timezone_name)
+    if replay is not None:
+        return replay
+    if legacy is None:
+        legacy = _legacy_for_conversation(db, conversation, user)
     user_message = Message(conversation_id=conversation.id, role=MessageRole.USER, content=content)
     db.add(user_message)
+    link_user(db, user_message)
     db.flush()
     setup_update = apply_setup_message(legacy, content, user.full_name)
-    memory_service, memory_analysis, relevant_memories, active_memories = await _prepare_memory(db, legacy, content, memory_provider)
-    turns = _provider_turns(db, conversation, legacy, setup_update.activated, relevant_memories, memory_analysis, active_memories, legacy_role(db, user.id, legacy) or "owner")
+    actor = TurnActorContext.from_authorized(conversation, legacy, user_message, actor_id=user.id,
+        role=legacy_role(db, user.id, legacy) or "owner", input_mode=payload.input_mode, timezone_name=timezone_name)
+    prepared = await prepare_turn(db, actor, conversation, legacy, user_message, memory_provider, activated_now=setup_update.activated)
+    turns = prepared.turns
     try:
-        answer = await provider.respond(turns)
-        rya_message = Message(conversation_id=conversation.id, role=MessageRole.ASSISTANT, content=answer)
-        db.add(rya_message)
-        conversation.updated_at = datetime.now(timezone.utc)
-        if conversation.title in {"New conversation", "New chat"}:
-            conversation.title = derive_conversation_title(content)
-        db.commit()
-        db.refresh(user_message)
-        db.refresh(rya_message)
+        answer = await usage.respond(provider, turns)
+        with obs.stage("assistant_persistence"):
+            rya_message = Message(conversation_id=conversation.id, role=MessageRole.ASSISTANT, content=answer)
+            db.add(rya_message)
+            finish_turn(db, rya_message)
+            conversation.updated_at = datetime.now(timezone.utc)
+            if conversation.title in {"New conversation", "New chat"}:
+                conversation.title = derive_conversation_title(content)
+            db.commit()
+            db.refresh(user_message)
+            db.refresh(rya_message)
+        obs.durable()
     except RyaProviderError as exc:
         db.rollback()
-        logger.warning("Rya provider failure kind=%s conversation_id=%s", exc.kind, conversation.id)
+        obs.degraded("provider_failed")
         raise HTTPException(
             status_code=503,
             detail={"code": exc.kind, "message": "Rya is temporarily unavailable."},
         ) from None
     except RuntimeError:
         db.rollback()
-        logger.warning("Rya provider failure kind=rya_provider_error conversation_id=%s", conversation.id)
+        obs.degraded("provider_failed")
         raise HTTPException(
             status_code=503,
             detail={"code": "rya_provider_error", "message": "Rya is temporarily unavailable."},
         ) from None
-    changed = await _store_memory(memory_service, db, legacy, conversation, user_message, content, memory_analysis, user.id)
-    if changed:
-        record_builder_activity(db, user_id=user.id, legacy_id=legacy.id, activity_type=changed[-1].operation_type, memory_id=changed[-1].id, activity_date=local_date(timezone_name))
+    await complete_turn(db, prepared, TurnCompletionContext(conversation, legacy, user_message, rya_message))
     return {"user_message": user_message, "rya_message": rya_message}
 
 
 @router.post("/{conversation_id}/messages/stream")
+@lifecycle_guard
 async def stream_message(payload: MessageCreate, conversation_id: int, legacy_id: int | None = Query(default=None, ge=1), timezone_name: str = Query(default="UTC", alias="timezone", max_length=64), user: User = Depends(get_current_user), db: Session = Depends(get_db), provider: RyaProvider = Depends(get_rya_provider), memory_provider: MemoryProvider = Depends(get_memory_provider)):
     conversation = _owned_conversation(db, conversation_id, user.id, legacy_id)
-    legacy = _legacy_for_conversation(db, conversation, user)
+    legacy = _legacy_for_conversation(db, conversation, user) if conversation.legacy_id is not None else None
     content = payload.content.strip()
     if not content:
         raise HTTPException(status_code=422, detail="Message content must not be blank.")
 
+    replay = accept_turn(db, conversation, payload, streaming=True, timezone_name=timezone_name)
+    if replay is not None:
+        return replay
+    if legacy is None:
+        legacy = _legacy_for_conversation(db, conversation, user)
     user_message = Message(conversation_id=conversation.id, role=MessageRole.USER, content=content)
     db.add(user_message)
+    link_user(db, user_message)
     setup_update = apply_setup_message(legacy, content, user.full_name)
     conversation.updated_at = datetime.now(timezone.utc)
     if conversation.title in {"New conversation", "New chat"}:
@@ -373,25 +297,27 @@ async def stream_message(payload: MessageCreate, conversation_id: int, legacy_id
     db.commit()
     db.refresh(user_message)
 
-    memory_service, memory_analysis, relevant_memories, active_memories = await _prepare_memory(db, legacy, content, memory_provider)
-    turns = _provider_turns(db, conversation, legacy, setup_update.activated, relevant_memories, memory_analysis, active_memories, legacy_role(db, user.id, legacy) or "owner")
+    actor = TurnActorContext.from_authorized(conversation, legacy, user_message, actor_id=user.id,
+        role=legacy_role(db, user.id, legacy) or "owner", input_mode=payload.input_mode, timezone_name=timezone_name)
+    prepared = await prepare_turn(db, actor, conversation, legacy, user_message, memory_provider, activated_now=setup_update.activated)
+    turns = prepared.turns
 
     async def event_stream():
         chunks: list[str] = []
         yield _sse("start", {"conversation_id": conversation.id, "user_message_id": user_message.id, "legacy_id": legacy.id, "input_mode": payload.input_mode})
         try:
-            async for delta in provider.stream(turns):
+            async for delta in usage.stream(provider, turns):
                 chunks.append(delta)
                 yield _sse("delta", {"delta": delta})
         except asyncio.CancelledError:
-            logger.info("Rya stream cancelled conversation_id=%s", conversation.id)
+            obs.failed("cancelled")
             raise
         except RyaProviderError as exc:
-            logger.warning("Rya stream failure kind=%s conversation_id=%s", exc.kind, conversation.id)
+            obs.degraded("provider_failed")
             yield _sse("error", {"code": exc.kind, "message": "Rya couldn't finish that response. Try again."})
             return
         except RuntimeError:
-            logger.warning("Rya stream failure kind=rya_provider_error conversation_id=%s", conversation.id)
+            obs.degraded("provider_failed")
             yield _sse("error", {"code": "rya_provider_error", "message": "Rya couldn't finish that response. Try again."})
             return
 
@@ -401,32 +327,30 @@ async def stream_message(payload: MessageCreate, conversation_id: int, legacy_id
             return
 
         try:
-            rya_message = Message(conversation_id=conversation.id, role=MessageRole.ASSISTANT, content=answer)
-            db.add(rya_message)
-            conversation.updated_at = datetime.now(timezone.utc)
-            db.commit()
-            db.refresh(rya_message)
+            with obs.stage("assistant_persistence"):
+                rya_message = Message(conversation_id=conversation.id, role=MessageRole.ASSISTANT, content=answer)
+                db.add(rya_message)
+                finish_turn(db, rya_message)
+                conversation.updated_at = datetime.now(timezone.utc)
+                db.commit()
+                db.refresh(rya_message)
+            obs.durable()
         except SQLAlchemyError:
             db.rollback()
-            logger.exception("Rya stream persistence failed conversation_id=%s", conversation.id)
+            obs.degraded("persistence_failed")
+            fail_turn(db, error_code="persistence_failed")
             yield _sse("error", {"code": "message_persistence_failed", "message": "Rya responded, but the conversation could not be saved."})
             return
 
-        changed = await _store_memory(
-            memory_service, db, legacy, conversation, user_message, content, memory_analysis, user.id
-        )
-        today = local_date(timezone_name)
-        activity = None
-        if changed:
-            activity = record_builder_activity(db, user_id=user.id, legacy_id=legacy.id, activity_type=changed[-1].operation_type, memory_id=changed[-1].id, activity_date=today)
+        completion = await complete_turn(db, prepared, TurnCompletionContext(conversation, legacy, user_message, rya_message), include_progress=True)
         yield _sse("done", {
             "message_id": rya_message.id,
             "conversation_id": conversation.id,
             "input_mode": payload.input_mode,
-            "memories_saved": len(changed),
-            "progress": legacy_progress(db, legacy.id),
-            "streak": streak_summary(db, legacy.id, today),
-            "today_just_completed": bool(activity and activity.was_first_today),
+            "memories_saved": completion.memories_saved,
+            "progress": completion.progress,
+            "streak": completion.streak,
+            "today_just_completed": completion.today_just_completed,
         })
 
     return StreamingResponse(

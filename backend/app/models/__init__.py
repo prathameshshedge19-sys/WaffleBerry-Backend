@@ -15,3 +15,5 @@ __all__ = ["AccessRole", "AuthChallenge", "BuilderActivity", "CollaboratorStatus
 # L13 isolated derived projection and transactional canonical-memory invalidation.
 from app.models.personality import LegacyPersonalityProfile  # noqa: F401
 from app.services import personality_invalidation  # noqa: F401
+
+from app.models.turn import ConversationTurn, TurnEffect  # noqa: F401

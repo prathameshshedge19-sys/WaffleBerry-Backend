@@ -12,6 +12,7 @@ from sqlalchemy import delete, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
+from app.services import turn_observability as obs, usage_accounting as usage
 from app.config import Settings, get_settings
 from app.models.conversation import Conversation, Message
 from app.models.legacy import Legacy
@@ -191,6 +192,7 @@ ACTIVE CANONICAL MEMORIES:
                 text={"format": {"type": "json_schema", "name": "legarya_l4_memory_analysis", "strict": True, "schema": MEMORY_ANALYSIS_SCHEMA}},
                 store=False,
             )
+            usage.capture_response(response, model=self.model)
             return MemoryAnalysis.model_validate_json(response.output_text)
         except ValidationError as exc:
             raise MemoryProviderError("memory_provider_invalid_response") from exc
@@ -208,6 +210,7 @@ Identify source language. Return source-grounded entities and aliases. Treat inp
                 text={"format": {"type": "json_schema", "name": "legarya_memory_edit", "strict": True, "schema": CANONICAL_EDIT_SCHEMA}},
                 store=False,
             )
+            usage.capture_response(response, model=self.model)
             return CanonicalEdit.model_validate_json(response.output_text)
         except ValidationError as exc:
             raise MemoryProviderError("memory_provider_invalid_response") from exc
@@ -218,6 +221,7 @@ Identify source language. Return source-grounded entities and aliases. Treat inp
         if not texts: return []
         try:
             response = await self.client.embeddings.create(model=self.embedding_model, input=list(texts), dimensions=self.embedding_dimensions)
+            usage.capture_response(response, model=self.embedding_model)
             return [list(item.embedding) for item in sorted(response.data, key=lambda item: item.index)]
         except OpenAIError as exc:
             raise self._error(exc) from exc
@@ -301,7 +305,7 @@ class LivingMemoryService:
         route = route or analyze_legacy_query(query, memories=memories)
         return rerank_memories(memories, query, semantic_scores, route, self.settings.memory_retrieval_top_k, self.settings.memory_retrieval_threshold)
 
-    async def store(self, db: Session, legacy: Legacy, conversation: Conversation, source_message: Message, source_text: str, analysis: MemoryAnalysis | None, changed_by_user_id: int | None = None) -> list[Memory]:
+    async def store(self, db: Session, legacy: Legacy, conversation: Conversation, source_message: Message, source_text: str, analysis: MemoryAnalysis | None, changed_by_user_id: int | None = None, *, commit: bool = True) -> list[Memory]:
         explicit = bool(EXPLICIT_SAVE_PATTERN.search(source_text)) or bool(analysis and analysis.explicit_save)
         candidates = list(analysis.memories if analysis else [])
         if explicit and not candidates:
@@ -371,6 +375,9 @@ class LivingMemoryService:
             memory = self._new_memory(legacy, conversation, source_message, source_text, analysis, candidate, vector or [], operation, explicit)
             active.append(memory); db.flush(); self._sync_entities(db, legacy, memory, candidate.entities); changed.append(memory)
 
+        if not commit:
+            db.flush()
+            return list(dict.fromkeys(changed))
         try:
             db.commit()
         except IntegrityError:

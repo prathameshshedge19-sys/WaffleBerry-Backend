@@ -2,7 +2,7 @@
 
 import pytest
 
-from app.api.routes import legacy_conversations
+from app.services import persona_turns
 from app.models.legacy import Legacy
 from app.services.personality_style import normalize_personality_history, select_personality_style
 from app.services.rya import ChatTurn
@@ -60,7 +60,7 @@ def test_routed_newest_first_history_checks_newest_and_previous(test_context, mo
         response = persona_stream(client, visitor, chat, question)
         assert "event: error" not in response.text
 
-    original_selector = legacy_conversations.select_personality_style
+    original_selector = persona_turns.select_personality_style
     captures = []
 
     def capture(db, legacy, question, memories, identity, recent, **kwargs):
@@ -77,7 +77,7 @@ def test_routed_newest_first_history_checks_newest_and_previous(test_context, mo
         captures.append(selected)
         return selected
 
-    monkeypatch.setattr(legacy_conversations, "select_personality_style", capture)
+    monkeypatch.setattr(persona_turns, "select_personality_style", capture)
     response = persona_stream(client, visitor, chat, "What an unexpected surprise!")
     assert "event: error" not in response.text
     assert len(captures) == 1 and captures[0] is not None

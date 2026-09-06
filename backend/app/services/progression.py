@@ -130,7 +130,7 @@ def streak_summary(db: Session, legacy_id: int, today: date) -> dict:
     }
 
 
-def record_builder_activity(db: Session, *, user_id: int, legacy_id: int, activity_type: str, memory_id: int | None, activity_date: date) -> BuilderActivity:
+def record_builder_activity(db: Session, *, user_id: int, legacy_id: int, activity_type: str, memory_id: int | None, activity_date: date, commit: bool = True) -> BuilderActivity:
     activity = db.scalar(select(BuilderActivity).where(BuilderActivity.legacy_id == legacy_id, BuilderActivity.activity_date == activity_date))
     first_today = activity is None
     if activity is None:
@@ -150,6 +150,10 @@ def record_builder_activity(db: Session, *, user_id: int, legacy_id: int, activi
     if prompt:
         prompt.status = PromptStatus.ANSWERED.value
         prompt.answered_by_user_id = user_id
+    if not commit:
+        db.flush()
+        activity.was_first_today = first_today
+        return activity
     try:
         db.commit()
     except IntegrityError:

@@ -74,7 +74,10 @@ def bootstrap_legacy_setup(user: User = Depends(get_current_user), db: Session =
         return {"legacy": _response(legacy)}
     except SQLAlchemyError:
         db.rollback()
-        logger.exception("legacy_setup_bootstrap_failed user_id=%s", user.id)
+        # SQL exceptions may contain bound private values. Keep the public error
+        # unchanged and emit only the fixed category through the passive sink.
+        from app.services import turn_observability as obs
+        obs.emit("component_degraded", level=logging.ERROR, category="persistence_failed")
         raise HTTPException(
             status_code=503,
             detail={

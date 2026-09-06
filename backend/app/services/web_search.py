@@ -6,6 +6,7 @@ from urllib.parse import urlparse
 
 from openai import APIConnectionError, APIStatusError, AsyncOpenAI, AuthenticationError, OpenAIError, RateLimitError
 
+from app.services import turn_observability as obs, usage_accounting as usage
 from app.config import Settings, get_settings
 
 
@@ -89,6 +90,7 @@ class OpenAIWebSearchProvider:
             )
         except OpenAIError as exc:
             raise self._error(exc) from exc
+        usage.capture_response(response, model=self.settings.ai_model)
         digest = response.output_text.strip() if isinstance(response.output_text, str) else ""
         source_map: dict[str, WebSource] = {}
         for item in response.output:

@@ -1,9 +1,8 @@
-from app.services.personality_style import select_personality_style
 import asyncio
 import json
-import logging
 import re
 from datetime import datetime, timezone
+from typing import cast
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from fastapi.responses import StreamingResponse
@@ -11,8 +10,8 @@ from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from app.services import turn_observability as obs, usage_accounting as usage
 from app.api.dependencies import get_current_user
-from app.config import get_settings
 from app.database import get_db
 from app.models.conversation import Conversation, Message, MessageRole
 from app.models.web_source import MessageWebSource
@@ -21,16 +20,18 @@ from app.models.visitor import LegacyVisitorProfile
 from app.schemas.chat import ConversationRename, ConversationResponse, LegacyConversationCreate, MessageCreate, MessagePairResponse, MessageResponse
 from app.schemas.visitor import VisitorProfileResponse, VisitorProfileState, VisitorProfileUpdate
 from app.services.authorization import require_persona_legacy
-from app.services.legacy_intelligence import analyze_legacy_query
-from app.services.legacy_persona import LegacyPersonaProvider, LegacyPersonaProviderError, get_legacy_persona_provider, nickname_cadence_guard, persona_system_context
-from app.services.memory import LivingMemoryService, MemoryProvider, MemoryProviderError, get_memory_provider
-from app.services.rya import ChatTurn
-from app.services.web_search import WebSearchError, WebSearchProvider, WebSearchResult, get_web_search_provider, web_grounding
-from app.services.visitor_identity import capture_from_message, current_language, greeting, upsert_profile, visitor_evidence
+from app.services.legacy_persona import LegacyPersonaProvider, LegacyPersonaProviderError, get_legacy_persona_provider
+from app.services.memory import MemoryProvider, get_memory_provider
+from app.services.web_search import WebSearchProvider, WebSearchResult, get_web_search_provider
+from app.services.visitor_identity import capture_from_message, greeting, upsert_profile
+from app.services.conversation_turns import TurnActorContext, prepare_turn, prepare_current_information
+from app.services.persona_turns import PersonaPreparedTurn
+
+
+from app.services.turn_lifecycle import accept_turn, link_user, finish_turn, fail_turn, lifecycle_guard
 
 
 router = APIRouter(prefix="/legacy-conversations", tags=["Read-only Legacy persona chat"])
-logger = logging.getLogger(__name__)
 
 
 def _sse(event: str, payload: dict) -> str:
@@ -61,48 +62,6 @@ def _visitor_conversation(db: Session, conversation_id: int, user_id: int, legac
 
 def _profile(db: Session, legacy_id: int, user_id: int) -> LegacyVisitorProfile | None:
     return db.scalar(select(LegacyVisitorProfile).where(LegacyVisitorProfile.legacy_id == legacy_id, LegacyVisitorProfile.viewer_user_id == user_id))
-
-
-async def _turns(db: Session, conversation: Conversation, content: str, memory_provider: MemoryProvider) -> tuple[list[ChatTurn], object, object]:
-    legacy = require_persona_legacy(db, conversation.user_id, conversation.legacy_id)
-    memory_service = LivingMemoryService(memory_provider)
-    active_memories = memory_service.active_memories(db, legacy.id)
-    route = analyze_legacy_query(content, legacy.subject_name, active_memories)
-    memories = ()
-    if route.needs_memory:
-        try:
-            memories = await memory_service.retrieve_read_only(db, legacy.id, content, route)
-        except MemoryProviderError as exc:
-            logger.warning("Read-only persona retrieval skipped kind=%s legacy_id=%s", exc.kind, legacy.id)
-    recent = db.scalars(select(Message).where(Message.conversation_id == conversation.id).order_by(Message.id.desc()).limit(get_settings().ai_max_context_messages)).all()
-    visitor = visitor_evidence(active_memories, _profile(db, legacy.id, conversation.user_id))
-    visitor["current_turn_language"] = current_language(content)
-    turns = [ChatTurn(role="system", content=persona_system_context(legacy, memories, route, active_memories, visitor, personality_style=select_personality_style(db, legacy, content, memories, visitor, recent, history_order="newest_first")))]
-    turns.extend(ChatTurn(role=message.role.value, content=message.content) for message in reversed(recent))
-    guard = nickname_cadence_guard(visitor, turns)
-    if guard:
-        turns.append(ChatTurn(role="system", content=guard))
-    return turns, legacy, route
-
-
-async def _current_context(provider: WebSearchProvider, content: str, route) -> WebSearchResult | None:
-    if not route.needs_fresh_data:
-        logger.info("route=%s web_search_used=false", route.intent.value)
-        return None
-    try:
-        result = await provider.search(content)
-        logger.info("route=fresh web_search_used=true")
-        return result
-    except WebSearchError as exc:
-        logger.warning("route=fresh web_search_used=false failure=%s", exc.kind)
-        return None
-
-
-def _add_current_context(turns: list[ChatTurn], result: WebSearchResult | None, needs_fresh_data: bool) -> None:
-    if result:
-        turns.insert(1, ChatTurn(role="system", content=web_grounding(result)))
-    elif needs_fresh_data:
-        turns.insert(1, ChatTurn(role="system", content="CURRENT INFORMATION UNAVAILABLE: Give an in-role limitation for the current part. Never fabricate it. Stable general context is allowed when useful."))
 
 
 def _persist_sources(db: Session, message: Message, result: WebSearchResult | None) -> None:
@@ -174,48 +133,62 @@ def list_legacy_messages(conversation_id: int, legacy_id: int = Query(..., ge=1)
 
 
 @router.post("/{conversation_id}/messages", response_model=MessagePairResponse, status_code=status.HTTP_201_CREATED)
+@lifecycle_guard
 async def send_legacy_message(payload: MessageCreate, conversation_id: int, legacy_id: int = Query(..., ge=1), user: User = Depends(get_current_user), db: Session = Depends(get_db), provider: LegacyPersonaProvider = Depends(get_legacy_persona_provider), memory_provider: MemoryProvider = Depends(get_memory_provider), web_provider: WebSearchProvider = Depends(get_web_search_provider)):
     conversation = _visitor_conversation(db, conversation_id, user.id, legacy_id)
     content = payload.content.strip()
     if not content: raise HTTPException(status_code=422, detail="Message content must not be blank.")
+    replay = accept_turn(db, conversation, payload, streaming=False)
+    if replay is not None:
+        return replay
     user_message = Message(conversation_id=conversation.id, role=MessageRole.USER, content=content)
-    db.add(user_message); capture_from_message(db, _profile(db, legacy_id, user.id), legacy_id, user.id, content); db.flush()
-    turns, _legacy, route = await _turns(db, conversation, content, memory_provider)
-    current = await _current_context(web_provider, content, route)
-    _add_current_context(turns, current, route.needs_fresh_data)
+    db.add(user_message); link_user(db, user_message); capture_from_message(db, _profile(db, legacy_id, user.id), legacy_id, user.id, content); db.flush()
+    legacy = require_persona_legacy(db, conversation.user_id, conversation.legacy_id)
+    actor = TurnActorContext.from_authorized(conversation, legacy, user_message, actor_id=user.id, role="viewer", input_mode=payload.input_mode)
+    prepared = await prepare_turn(db, actor, conversation, legacy, user_message, memory_provider)
+    turns, route = prepared.turns, cast(PersonaPreparedTurn, prepared).route
+    current = await prepare_current_information(prepared, web_provider)
     try:
-        answer = await provider.respond(turns)
+        answer = await usage.respond(provider, turns)
     except LegacyPersonaProviderError as exc:
         db.rollback(); raise HTTPException(status_code=503, detail={"code": exc.kind, "message": "This Legacy is temporarily unavailable."}) from None
-    persona_message = Message(conversation_id=conversation.id, role=MessageRole.ASSISTANT, content=answer)
-    db.add(persona_message); db.flush(); _persist_sources(db, persona_message, current); conversation.updated_at = datetime.now(timezone.utc)
-    if conversation.title in {"New chat", "New conversation"}: conversation.title = _title(content)
-    db.commit(); db.refresh(user_message); db.refresh(persona_message)
+    with obs.stage("assistant_persistence"):
+        persona_message = Message(conversation_id=conversation.id, role=MessageRole.ASSISTANT, content=answer)
+        db.add(persona_message); finish_turn(db, persona_message); db.flush(); _persist_sources(db, persona_message, current); conversation.updated_at = datetime.now(timezone.utc)
+        if conversation.title in {"New chat", "New conversation"}: conversation.title = _title(content)
+        db.commit(); db.refresh(user_message); db.refresh(persona_message)
+    obs.durable()
     return {"user_message": user_message, "rya_message": persona_message}
 
 
 @router.post("/{conversation_id}/messages/stream")
+@lifecycle_guard
 async def stream_legacy_message(payload: MessageCreate, conversation_id: int, legacy_id: int = Query(..., ge=1), user: User = Depends(get_current_user), db: Session = Depends(get_db), provider: LegacyPersonaProvider = Depends(get_legacy_persona_provider), memory_provider: MemoryProvider = Depends(get_memory_provider), web_provider: WebSearchProvider = Depends(get_web_search_provider)):
     conversation = _visitor_conversation(db, conversation_id, user.id, legacy_id)
     content = payload.content.strip()
     if not content: raise HTTPException(status_code=422, detail="Message content must not be blank.")
+    replay = accept_turn(db, conversation, payload, streaming=True)
+    if replay is not None:
+        return replay
     user_message = Message(conversation_id=conversation.id, role=MessageRole.USER, content=content)
-    db.add(user_message); capture_from_message(db, _profile(db, legacy_id, user.id), legacy_id, user.id, content); conversation.updated_at = datetime.now(timezone.utc)
+    db.add(user_message); link_user(db, user_message); capture_from_message(db, _profile(db, legacy_id, user.id), legacy_id, user.id, content); conversation.updated_at = datetime.now(timezone.utc)
     if conversation.title in {"New chat", "New conversation"}: conversation.title = _title(content)
     db.commit(); db.refresh(user_message)
-    turns, legacy, route = await _turns(db, conversation, content, memory_provider)
+    legacy = require_persona_legacy(db, conversation.user_id, conversation.legacy_id)
+    actor = TurnActorContext.from_authorized(conversation, legacy, user_message, actor_id=user.id, role="viewer", input_mode=payload.input_mode)
+    prepared = await prepare_turn(db, actor, conversation, legacy, user_message, memory_provider)
+    turns, route = prepared.turns, cast(PersonaPreparedTurn, prepared).route
 
     async def event_stream():
         chunks: list[str] = []
         yield _sse("start", {"conversation_id": conversation.id, "user_message_id": user_message.id, "legacy_id": legacy.id, "mode": "legacy", "route": route.intent.value, "input_mode": payload.input_mode})
         if route.needs_fresh_data:
             yield _sse("activity", {"message": "Checking the latest information…"})
-        current = await _current_context(web_provider, content, route)
-        _add_current_context(turns, current, route.needs_fresh_data)
+        current = await prepare_current_information(prepared, web_provider)
         if current and current.sources:
             yield _sse("sources", {"current_information": True, "sources": [source.as_dict() for source in current.sources]})
         try:
-            async for delta in provider.stream(turns): chunks.append(delta); yield _sse("delta", {"delta": delta})
+            async for delta in usage.stream(provider, turns): chunks.append(delta); yield _sse("delta", {"delta": delta})
         except asyncio.CancelledError: raise
         except LegacyPersonaProviderError as exc:
             yield _sse("error", {"code": exc.kind, "message": "This Legacy couldn't finish that response. Try again."}); return
@@ -223,10 +196,12 @@ async def stream_legacy_message(payload: MessageCreate, conversation_id: int, le
         if not answer:
             yield _sse("error", {"code": "legacy_persona_empty_response", "message": "This Legacy couldn't finish that response. Try again."}); return
         try:
-            persona_message = Message(conversation_id=conversation.id, role=MessageRole.ASSISTANT, content=answer)
-            db.add(persona_message); db.flush(); _persist_sources(db, persona_message, current); conversation.updated_at = datetime.now(timezone.utc); db.commit(); db.refresh(persona_message)
+            with obs.stage("assistant_persistence"):
+                persona_message = Message(conversation_id=conversation.id, role=MessageRole.ASSISTANT, content=answer)
+                db.add(persona_message); finish_turn(db, persona_message); db.flush(); _persist_sources(db, persona_message, current); conversation.updated_at = datetime.now(timezone.utc); db.commit(); db.refresh(persona_message)
+            obs.durable()
         except SQLAlchemyError:
-            db.rollback(); yield _sse("error", {"code": "message_persistence_failed", "message": "The response could not be saved."}); return
+            db.rollback(); fail_turn(db, error_code="persistence_failed"); yield _sse("error", {"code": "message_persistence_failed", "message": "The response could not be saved."}); return
         yield _sse("done", {"message_id": persona_message.id, "conversation_id": conversation.id, "memories_saved": 0, "mode": "legacy", "input_mode": payload.input_mode, "current_information": bool(current), "sources": [source.as_dict() for source in current.sources] if current else []})
 
     return StreamingResponse(event_stream(), media_type="text/event-stream", headers={"Cache-Control": "no-cache, no-transform", "Connection": "keep-alive", "X-Accel-Buffering": "no"})

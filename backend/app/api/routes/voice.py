@@ -6,6 +6,7 @@ from fastapi.responses import Response
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.services import turn_observability as obs, usage_accounting as usage
 from app.api.dependencies import get_current_user
 from app.config import get_settings
 from app.database import get_db
@@ -33,7 +34,7 @@ ALLOWED_AUDIO_TYPES = {
 
 
 def _provider_failure(exc: VoiceProviderError, message: str) -> HTTPException:
-    logger.warning("Voice provider failure kind=%s", exc.kind)
+    obs.degraded("provider_failed")
     return HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail={"code": exc.kind, "message": message})
 
 
@@ -59,10 +60,10 @@ async def transcribe_audio(
     suffix = Path(audio.filename or "").suffix.lower()
     filename = f"recording{suffix if suffix in set(ALLOWED_AUDIO_TYPES.values()) else ALLOWED_AUDIO_TYPES[media_type]}"
     try:
-        text = await provider.transcribe(content, filename, media_type)
+        with obs.stage("voice_provider"):
+            text = await usage.invoke("stt", provider.transcribe, content, filename, media_type)
     except VoiceProviderError as exc:
         raise _provider_failure(exc, "I couldn't transcribe that recording. Try again.") from None
-    logger.info("voice_stt user_id=%s bytes=%s model=%s", user.id, len(content), settings.voice_transcription_model)
     return {"text": text}
 
 
@@ -90,11 +91,12 @@ def _owned_assistant_message(db: Session, message_id: int, user_id: int) -> Mess
     return message
 
 
+@obs.timed("voice_provider")
 async def _synthesize(text: str, voice: str, provider: VoiceProvider) -> bytes:
     if len(text) > get_settings().voice_max_tts_characters:
         raise HTTPException(status_code=413, detail={"code": "speech_too_long", "message": "That response is too long for voice playback."})
     try:
-        return await provider.synthesize(speech_text(text), voice)
+        return await usage.invoke("tts", provider.synthesize, speech_text(text), voice)
     except VoiceProviderError as exc:
         raise _provider_failure(exc, "Voice playback unavailable.") from None
 
@@ -110,9 +112,8 @@ async def synthesize_message(payload: SpeechRequest, user: User = Depends(get_cu
         audio = await _synthesize(message.content, voice, provider)
         speech_cache.put(key, audio)
         cache_status = "miss"
-        logger.info("voice_tts user_id=%s message_id=%s voice=%s model=%s", user.id, message.id, voice, get_settings().voice_tts_model)
     else:
-        logger.info("voice_tts_cache user_id=%s message_id=%s voice=%s", user.id, message.id, voice)
+        usage.cache_hit()
     return Response(audio, media_type="audio/mpeg", headers={"Cache-Control": "private, max-age=3600", "X-Voice-Cache": cache_status})
 
 
@@ -125,5 +126,6 @@ async def preview_voice(payload: VoicePreviewRequest, user: User = Depends(get_c
         audio = await _synthesize(VOICE_PREVIEW_TEXT, payload.voice, provider)
         speech_cache.put(key, audio)
         cache_status = "miss"
-        logger.info("voice_preview user_id=%s voice=%s", user.id, payload.voice)
+    else:
+        usage.cache_hit()
     return Response(audio, media_type="audio/mpeg", headers={"Cache-Control": "private, max-age=86400", "X-Voice-Cache": cache_status})

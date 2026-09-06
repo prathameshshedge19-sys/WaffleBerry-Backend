@@ -3,6 +3,7 @@ from typing import AsyncIterator, Protocol, Sequence
 
 from openai import APIConnectionError, APIStatusError, AsyncOpenAI, AuthenticationError, OpenAIError, RateLimitError
 
+from app.services import turn_observability as obs, usage_accounting as usage
 from app.config import Settings, get_settings
 
 
@@ -69,6 +70,7 @@ class OpenAIRyaProvider:
                 input=self._request(messages),
                 reasoning={"effort": self.settings.ai_reasoning_effort},
             )
+            usage.capture_response(response, model=self.settings.ai_model)
             text = response.output_text
         except OpenAIError as exc:
             raise self._provider_error(exc) from exc
@@ -85,6 +87,8 @@ class OpenAIRyaProvider:
                 reasoning={"effort": self.settings.ai_reasoning_effort},
             ) as stream:
                 async for event in stream:
+                    if event.type in {"response.completed", "response.failed", "response.incomplete"}:
+                        usage.capture_response(getattr(event, "response", None), model=self.settings.ai_model)
                     if event.type == "response.output_text.delta" and event.delta:
                         yield event.delta
                     elif event.type == "response.completed":

@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from sqlalchemy import event, inspect, select
 from sqlalchemy.orm import Session
 
+from app.services import turn_observability as obs, usage_accounting as usage
 from app.models.legacy import Legacy
 from app.models.memory import Memory, MemoryEntity, MemoryEntityLink
 from app.models.personality import LegacyPersonalityProfile
@@ -21,6 +22,7 @@ _FIELDS = (
 )
 
 
+@obs.timed("personality_invalidation")
 def invalidate_in_transaction(connection, legacy_ids):
     """Atomic upsert on the same connection/transaction as the factual mutation."""
     dialect = connection.dialect.name

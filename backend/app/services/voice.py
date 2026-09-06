@@ -5,6 +5,7 @@ from typing import Protocol
 
 from openai import APIConnectionError, APIStatusError, AsyncOpenAI, AuthenticationError, OpenAIError, RateLimitError
 
+from app.services import turn_observability as obs, usage_accounting as usage
 from app.config import Settings, get_settings
 from app.services.speech_pronunciation import normalize_for_companion_speech
 
@@ -53,6 +54,7 @@ class OpenAIVoiceProvider:
             )
         except OpenAIError as exc:
             raise self._error(exc) from exc
+        usage.capture_response(result, model=self.settings.voice_transcription_model)
         text = getattr(result, "text", None)
         if not isinstance(text, str) or not text.strip():
             raise VoiceProviderError("voice_transcription_empty")

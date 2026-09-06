@@ -47,6 +47,7 @@ class ConversationResponse(BaseModel):
 
 
 class MessageCreate(BaseModel):
+    client_turn_id: str | None = Field(default=None, min_length=1, max_length=128, pattern=r"^[A-Za-z0-9._:-]+$")
     content: str = Field(min_length=1, max_length=12000)
     input_mode: Literal["text", "voice"] = "text"
 
