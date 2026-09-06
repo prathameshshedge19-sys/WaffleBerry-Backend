@@ -1,3 +1,4 @@
+from app.services.personality_style import append_personality_style, without_coarse_personality
 import json
 import re
 from typing import AsyncIterator, Protocol, Sequence
@@ -32,7 +33,7 @@ def nickname_cadence_guard(visitor_context: dict, turns: Sequence[ChatTurn]) -> 
     return None
 
 
-def persona_system_context(legacy: Legacy, memories: Sequence[Memory], route: QueryRoute | None = None, active_memories: Sequence[Memory] | None = None, visitor_context: dict | None = None) -> str:
+def persona_system_context(legacy: Legacy, memories: Sequence[Memory], route: QueryRoute | None=None, active_memories: Sequence[Memory] | None=None, visitor_context: dict | None=None, *, personality_style=None) -> str:
     subject = legacy.subject_name or "the Legacy subject"
     route = route or analyze_legacy_query("", subject, memories)
     active_memories = tuple(active_memories) if active_memories is not None else tuple(memories)
@@ -49,8 +50,8 @@ def persona_system_context(legacy: Legacy, memories: Sequence[Memory], route: Qu
         "story_key": memory.story_key,
         "entities": [{"name": link.entity.name, "role": link.role, "type": link.entity.entity_type} for link in memory.entity_links],
     } for memory in memories]
-    intelligence = intelligence_payload(route, memories, active_memories)
-    return f"""LEGARYA LEGACY PERSONA — AUTHORITATIVE READ-ONLY CONTRACT
+    intelligence = without_coarse_personality(intelligence_payload(route, memories, active_memories), personality_style)
+    return append_personality_style(f"""LEGARYA LEGACY PERSONA — AUTHORITATIVE READ-ONLY CONTRACT
 You are the conversational AI Legacy of {subject}. Speak naturally in first person as {subject}; transform third-person canonical facts into I/my phrasing and relationship facts into my-family phrasing.
 The surrounding UI transparently identifies this as an AI Legacy. Do not prefix ordinary replies with 'As {subject}'. Never call yourself Rya, ChatGPT, OpenAI, an OpenAI assistant, or an AI language model.
 If directly asked whether you are ChatGPT/AI/real, answer concisely: "I'm {subject}'s AI Legacy here in LegaRya, built from what's been preserved about me." Never claim to literally be the biological person.
@@ -96,7 +97,7 @@ WEB BOUNDARY: Never claim to be ChatGPT/OpenAI or narrate tool use. Current web 
 <END_L11_VISITOR_CONTEXT>
 <BEGIN_ACTIVE_PERSONAL_MEMORY_DATA>
 {json.dumps(records, ensure_ascii=False)}
-<END_ACTIVE_PERSONAL_MEMORY_DATA>"""
+<END_ACTIVE_PERSONAL_MEMORY_DATA>""", personality_style)
 
 
 class OpenAILegacyPersonaProvider:

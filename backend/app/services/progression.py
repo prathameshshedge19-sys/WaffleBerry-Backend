@@ -7,6 +7,7 @@ from sqlalchemy import distinct, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
+from app.models.legacy import Legacy
 from app.models.memory import Memory, MemoryEntityLink, MemoryStatus
 from app.models.progress import BuilderActivity, DailyPrompt, PromptStatus
 
@@ -35,7 +36,7 @@ PROMPT_TEMPLATES = {
     "preferences": ("What meal did {name} make or enjoy that everyone remembers?", "What music, place, or pastime reliably lifted {name}'s mood?"),
     "values": ("What principle did {name} try to live by?", "What did {name} believe mattered most in a good life?"),
     "stories": ("What is a story about {name} that your family still tells?", "Can you remember a journey or celebration that reveals who {name} was?"),
-    "personality": ("What phrase did {name} say often?", "How did {name}'s sense of humor show itself?"),
+    "personality": ('What phrase did {name} say often?', "How did {name}'s sense of humor show itself?", 'What could make {name} laugh?', 'How, if at all, did {name} show anger?', 'What do you remember {name} doing to comfort someone?', 'How did {name} show affection?', 'How did {name} handle disagreements?', 'What do you remember about {name} and discipline?', 'What mattered most to {name} in everyday life?', 'What familiar phrase do you remember {name} using?', 'How would {name} greet someone?', 'What nicknames, if any, do you remember {name} using?', 'What do you remember about the languages or words {name} used?', 'What was {name} like during celebrations?', 'How did {name} respond when something worried them?', 'What do you remember about the way {name} made difficult decisions?', 'Which everyday routine felt characteristic of {name}?', 'How, if at all, did {name} act differently around family and strangers?', 'How did {name} express feelings without words?'),
     "reflections": ("What life lesson did {name} pass on without making it feel like a lecture?", "What would {name} want the next generation to remember?"),
 }
 
@@ -201,7 +202,7 @@ def daily_prompt(db: Session, legacy_id: int, subject_name: str | None, shown_da
     if not chosen_text:
         template = PROMPT_TEMPLATES[chosen_category][len(history) % len(PROMPT_TEMPLATES[chosen_category])]
         chosen_text = template.format(name=name)
-    prompt = DailyPrompt(legacy_id=legacy_id, prompt_text=chosen_text, category=chosen_category, shown_date=shown_date)
+    prompt = DailyPrompt(legacy_id=legacy_id, prompt_text=_l13_daily_personality_text(db, legacy_id, chosen_category, chosen_text), category=chosen_category, shown_date=shown_date)
     db.add(prompt)
     db.commit()
     db.refresh(prompt)
@@ -212,3 +213,25 @@ def skip_daily_prompt(db: Session, prompt: DailyPrompt) -> None:
     if prompt.status == PromptStatus.PENDING.value:
         prompt.status = PromptStatus.SKIPPED.value
         db.commit()
+
+
+# New suggestions only; existing persisted daily prompts and IDs stay unchanged.
+L13_PERSONALITY_QUESTION_TEMPLATES = ('What could make {name} laugh?', 'How, if at all, did {name} show anger?', 'What do you remember {name} doing to comfort someone?', 'How did {name} show affection?', 'How did {name} handle disagreements?', 'What do you remember about {name} and discipline?', 'What mattered most to {name} in everyday life?', 'What familiar phrase do you remember {name} using?', 'How would {name} greet someone?', 'What nicknames, if any, do you remember {name} using?', 'What do you remember about the languages or words {name} used?', 'What was {name} like during celebrations?', 'How did {name} respond when something worried them?', 'What do you remember about the way {name} made difficult decisions?', 'Which everyday routine felt characteristic of {name}?', 'How, if at all, did {name} act differently around family and strangers?', 'How did {name} express feelings without words?')
+
+
+def _l13_daily_personality_text(db, legacy_id, category, proposed):
+    if category != "personality":
+        return proposed
+    from app.services.builder_interview import _l13_personality_themes
+    recent = db.scalars(select(DailyPrompt).where(DailyPrompt.legacy_id == legacy_id, DailyPrompt.category == "personality").order_by(DailyPrompt.id.desc()).limit(30)).all()
+    themes = set().union(*(_l13_personality_themes(item.prompt_text) for item in recent[:3])) if recent else set()
+    if not _l13_personality_themes(proposed).intersection(themes):
+        return proposed
+    legacy = db.get(Legacy, legacy_id)
+    name = legacy.subject_name if legacy and legacy.subject_name else "this person"
+    used = {item.prompt_text.casefold() for item in recent}
+    for template in L13_PERSONALITY_QUESTION_TEMPLATES:
+        question = template.format(name=name)
+        if question.casefold() not in used and not _l13_personality_themes(question).intersection(themes):
+            return question
+    return proposed

@@ -42,3 +42,7 @@ app.include_router(voice_router, prefix="/api/v1")
 @app.get("/health")
 def health():
     return {"status": "ok", "service": "legarya-backend"}
+
+# L13 read-only Memory Dashboard representation.
+from app.api.routes.personality import router as personality_dashboard_router
+app.include_router(personality_dashboard_router)

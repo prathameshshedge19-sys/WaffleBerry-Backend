@@ -1,3 +1,4 @@
+from app.services.personality_style import select_personality_style
 import asyncio
 import json
 import logging
@@ -76,7 +77,7 @@ async def _turns(db: Session, conversation: Conversation, content: str, memory_p
     recent = db.scalars(select(Message).where(Message.conversation_id == conversation.id).order_by(Message.id.desc()).limit(get_settings().ai_max_context_messages)).all()
     visitor = visitor_evidence(active_memories, _profile(db, legacy.id, conversation.user_id))
     visitor["current_turn_language"] = current_language(content)
-    turns = [ChatTurn(role="system", content=persona_system_context(legacy, memories, route, active_memories, visitor))]
+    turns = [ChatTurn(role="system", content=persona_system_context(legacy, memories, route, active_memories, visitor, personality_style=select_personality_style(db, legacy, content, memories, visitor, recent, history_order="newest_first")))]
     turns.extend(ChatTurn(role=message.role.value, content=message.content) for message in reversed(recent))
     guard = nickname_cadence_guard(visitor, turns)
     if guard:

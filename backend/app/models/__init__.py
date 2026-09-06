@@ -11,3 +11,7 @@ from app.models.viewer import LegacyViewerAccess, ViewerAccessStatus
 from app.models.visitor import LegacyVisitorProfile, VisitorRelationshipStatus
 
 __all__ = ["AccessRole", "AuthChallenge", "BuilderActivity", "CollaboratorStatus", "Conversation", "DailyPrompt", "InviteStatus", "Legacy", "LegacyAccessEvent", "LegacyAccessInvite", "LegacyCollaborator", "LegacySetupStatus", "LegacyViewerAccess", "LegacyVisitorProfile", "Memory", "MemoryEntity", "MemoryEntityLink", "MemoryOperation", "MemoryRevision", "MemoryStatus", "Message", "MessageRole", "MessageWebSource", "PromptStatus", "User", "ViewerAccessStatus", "VisitorRelationshipStatus"]
+
+# L13 isolated derived projection and transactional canonical-memory invalidation.
+from app.models.personality import LegacyPersonalityProfile  # noqa: F401
+from app.services import personality_invalidation  # noqa: F401
