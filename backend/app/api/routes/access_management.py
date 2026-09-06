@@ -134,6 +134,9 @@ def change_member(legacy_id: int, role: str, record_id: int, action: str, user: 
     member = db.scalar(select(model).where(model.id == record_id, model.legacy_id == legacy.id))
     if not member: raise HTTPException(404, "Access record not found.")
     member.status = revoked if action == "revoke" else active
+    if action == "revoke" and get_settings().realtime_enabled:
+        from app.services.realtime_sessions import revoke
+        revoke(db, member.user_id, legacy_id=legacy.id)
     if role == "collaborator" and action == "revoke" and member.user.active_legacy_id == legacy.id: member.user.active_legacy_id = None
     record_access_event(db, legacy.id, f"{role}_{action}d", actor_user_id=user.id, target_user_id=member.user_id)
     db.commit(); return _panel(db, legacy)

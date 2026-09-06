@@ -313,6 +313,16 @@ class LivingMemoryService:
             if len(payload) >= 3:
                 candidates = [MemoryCandidate(canonical_text=payload, category="other", confidence=1, operation=MemoryOperation.EXPLICIT_SAVE)]
         candidates = [candidate for candidate in candidates if candidate.confidence >= .6 or explicit]
+        # Conversational deletion shares the dashboard's owner-only boundary.
+        # Scope comes from authorized server rows, never model analysis fields.
+        # Keep legitimate collaborator enrich/correct/new operations unchanged.
+        actor_id = changed_by_user_id if changed_by_user_id is not None else conversation.user_id
+        if any(candidate.operation == MemoryOperation.DELETE for candidate in candidates):
+            owner_id = db.scalar(select(Legacy.owner_user_id).where(Legacy.id == legacy.id))
+            may_delete = (actor_id == owner_id and actor_id == conversation.user_id
+                          and conversation.legacy_id == legacy.id and conversation.mode == "rya")
+            if not may_delete:
+                candidates = [candidate for candidate in candidates if candidate.operation != MemoryOperation.DELETE]
         if not candidates: return []
         embeddable = [candidate for candidate in candidates if candidate.operation != MemoryOperation.DELETE]
         vectors = await self.provider.embed([candidate.canonical_text for candidate in embeddable])

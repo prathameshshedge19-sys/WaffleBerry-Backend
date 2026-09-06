@@ -1,0 +1,47 @@
+{
+  "status": "automated_passed_manual_acceptance_deferred_to_phase_f",
+  "backend_current_cases": 724,
+  "backend_broad_regression": {
+    "passed": 710,
+    "log": "backups/l15-phase-d/backend-regression.log"
+  },
+  "backend_final_affected_suite": {
+    "passed": 110,
+    "log": "backups/l15-phase-d/backend-targeted-final.log"
+  },
+  "postgresql_phase_d": {
+    "passed_groups": 4,
+    "races": 60,
+    "final_acknowledgement_recheck_races": 15,
+    "isolated_cluster_removed": true
+  },
+  "postgresql_l14": {
+    "passed": 1,
+    "races": 75
+  },
+  "frontend_passed": 113,
+  "python_compile_files": 169,
+  "javascript_syntax_files": 59,
+  "migration_current": "0016_realtime_sessions",
+  "migration_head": "0016_realtime_sessions",
+  "provider_cases_passed": 6,
+  "provider_physical_playback": false,
+  "human_confirmation_received": true,
+  "human_saved_conversation_matched": false,
+  "observed_manual_turn_ids": [
+    1
+  ],
+  "observed_manual_conversation_ids": [
+    1
+  ],
+  "warnings": [
+    "Existing Starlette/httpx compatibility deprecation",
+    "Existing AnyIO BlockingPortal alias deprecation"
+  ],
+  "no_commit": true,
+  "no_push": true,
+  "no_tag": true,
+  "no_deployment": true,
+  "no_production_migration": true,
+  "manual_acceptance_disposition": "Explicitly deferred by subsequent Phase E user instruction; earlier human-record mismatch retained as historical evidence."
+}

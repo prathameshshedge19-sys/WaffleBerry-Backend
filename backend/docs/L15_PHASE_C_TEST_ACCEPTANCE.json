@@ -1,0 +1,80 @@
+{
+  "backend_unique_cases_passed": 692,
+  "backend_failed": 0,
+  "backend_unverified_cases": 0,
+  "coverage_runs": [
+    {
+      "scope": "full regression excluding two dedicated stress modules; before three added edge cases",
+      "passed": 687,
+      "skipped": 0,
+      "seconds": 263.67
+    },
+    {
+      "scope": "final L15 B/C and L14 lifecycle targeted run including the three added edge cases, PostgreSQL enabled",
+      "passed": 109,
+      "skipped": 0,
+      "seconds": 87.02
+    },
+    {
+      "scope": "L15 first-final PostgreSQL acceptance",
+      "passed": 1,
+      "iterations": 25,
+      "races": 75,
+      "seconds": 181.61
+    },
+    {
+      "scope": "unchanged L14 PostgreSQL acceptance stress",
+      "passed": 1,
+      "iterations": 25,
+      "races": 75,
+      "seconds": 715.72
+    },
+    {
+      "scope": "final bounded receipt reconciliation follow-up",
+      "passed": 1,
+      "seconds": 1.11
+    }
+  ],
+  "frontend": {
+    "passed": 95,
+    "failed": 0,
+    "skipped": 0
+  },
+  "compile": {
+    "python_files": 165,
+    "js_mjs_files": 54,
+    "passed": true
+  },
+  "migration": {
+    "database_path": "C:\\Users\\Saee\\Desktop\\Waffleberry-new\\WaffleBerry-Backend\\backend\\waffle_berry.db",
+    "backup_path": "C:\\Users\\Saee\\Desktop\\Waffleberry-new\\backups\\l15-phase-c\\local-before-0016-20260906T125445Z.sqlite3",
+    "revision_before": "0015_conversation_turns",
+    "revision_after": "0016_realtime_sessions",
+    "existing_data_preserved": true,
+    "historical_table_count": 20
+  },
+  "postgresql": {
+    "temporary_directory": "/tmp/legarya-l15-c.YsbbjU",
+    "port": 55526,
+    "tunnel_port": 55527,
+    "cluster_removed": true,
+    "tunnel_stopped": true,
+    "production_database_accessed": false
+  },
+  "manual_microphone": {
+    "status": "pending_user_acceptance",
+    "browser_runtime": "no available browser connections",
+    "developer_url": "http://127.0.0.1:5500/realtime-dev.html",
+    "local_tcp_ws_real_provider_handshake": "passed",
+    "disposable_database": "C:\\Users\\Saee\\Desktop\\Waffleberry-new\\backups\\l15-phase-c\\manual-microphone.sqlite3",
+    "services_left_running_for_user": true
+  },
+  "commits_created": 0,
+  "pushes": 0,
+  "deployments": 0,
+  "production_migrations": 0,
+  "backend_head": "5905e75ca0d9baf9ae52063dce29eb2f9d1a8a94",
+  "frontend_head": "f075f6a569db20bbfe5173d175fe0fa6f149029b",
+  "working_trees": "intentionally dirty; local Phase B+C",
+  "warnings": "Two existing Starlette/httpx and AnyIO dependency deprecation warnings."
+}

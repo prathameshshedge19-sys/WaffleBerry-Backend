@@ -31,10 +31,14 @@ def lock_turn(db, turn_id, actor, completion):
         raise ValueError("Effects require a completed, authorized builder turn")
 
 
-async def apply_effects(db, turn_id, prepared, completion, *, include_progress):
+async def apply_effects(db, turn_id, prepared, completion, *, include_progress, authorization_guard=None):
     actor = prepared.actor
     completion.validate(actor)
+    def authorize():
+        if authorization_guard is not None:
+            authorization_guard()
     with obs.stage("memory_effect"):
+        authorize()
         lock_turn(db, turn_id, actor, completion)
         memory_receipt = db.get(TurnEffect, (turn_id, "memory"))
         if memory_receipt is None:
@@ -46,6 +50,7 @@ async def apply_effects(db, turn_id, prepared, completion, *, include_progress):
                 # Preserve the existing optional-memory failure fallback. A completed
                 # skipped receipt prevents a replay from changing that decision.
                 db.rollback()
+                authorize()
                 lock_turn(db, turn_id, actor, completion)
                 memory_receipt = db.get(TurnEffect, (turn_id, "memory"))
                 changed = []
@@ -56,10 +61,12 @@ async def apply_effects(db, turn_id, prepared, completion, *, include_progress):
                     "date": local_date(actor.timezone_name).isoformat() if changed or include_progress else None,
                 })
                 db.add(memory_receipt)
+                authorize()
                 db.commit()
     memory = memory_receipt.result
 
     with obs.stage("activity_effect"):
+        authorize()
         lock_turn(db, turn_id, actor, completion)
         activity_receipt = db.get(TurnEffect, (turn_id, "activity"))
         if activity_receipt is None:
@@ -74,6 +81,7 @@ async def apply_effects(db, turn_id, prepared, completion, *, include_progress):
                 first = activity.was_first_today
             activity_receipt = TurnEffect(turn_id=turn_id, kind="activity", result={"first_today": first})
             db.add(activity_receipt)
+            authorize()
             db.commit()
         else:
             db.rollback()  # release the no-op lock without a redundant commit

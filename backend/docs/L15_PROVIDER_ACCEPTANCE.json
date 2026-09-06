@@ -1,0 +1,264 @@
+[
+  {
+    "voice": "marin",
+    "vad": "semantic_vad",
+    "model": "gpt-realtime-2.1",
+    "transcription_model": "gpt-live-transcribe",
+    "connected": true,
+    "events": {
+      "speech_started": 1,
+      "input_transcript_delta": 14
+    },
+    "stages": {},
+    "usage": [],
+    "configuration": {
+      "model": "gpt-realtime-2.1",
+      "audio": {
+        "input": {
+          "format": {
+            "type": "audio/pcm",
+            "rate": 24000
+          },
+          "transcription": {
+            "model": "gpt-live-transcribe",
+            "language": null,
+            "languages": null,
+            "prompt": null
+          },
+          "noise_reduction": null,
+          "turn_detection": {
+            "type": "semantic_vad",
+            "eagerness": "medium",
+            "create_response": false,
+            "interrupt_response": false
+          }
+        },
+        "output": {
+          "format": {
+            "type": "audio/pcm",
+            "rate": 24000
+          },
+          "voice": "marin",
+          "speed": 1.0
+        }
+      },
+      "reasoning": {
+        "effort": "low"
+      },
+      "output_modalities": [
+        "audio"
+      ]
+    },
+    "passed": false,
+    "error": "probe_timeout"
+  },
+  {
+    "voice": "cedar",
+    "vad": "server_vad",
+    "model": "gpt-realtime-2.1",
+    "transcription_model": "gpt-live-transcribe",
+    "connected": true,
+    "events": {
+      "speech_started": 1,
+      "input_transcript_delta": 14,
+      "speech_stopped": 1,
+      "input_committed": 1,
+      "input_transcript_done": 1,
+      "response_created": 3,
+      "output_transcript_delta": 14,
+      "audio": 14,
+      "audio_done": 2,
+      "output_transcript_done": 2,
+      "response_done": 3,
+      "function_delta": 1,
+      "function_done": 1
+    },
+    "stages": {
+      "transcription": [
+        "speech_started",
+        "input_transcript_delta",
+        "input_transcript_delta",
+        "input_transcript_delta",
+        "input_transcript_delta",
+        "input_transcript_delta",
+        "input_transcript_delta",
+        "input_transcript_delta",
+        "input_transcript_delta",
+        "input_transcript_delta",
+        "input_transcript_delta",
+        "input_transcript_delta",
+        "speech_stopped",
+        "input_committed",
+        "input_transcript_delta",
+        "input_transcript_delta",
+        "input_transcript_delta",
+        "input_transcript_done"
+      ],
+      "response": [
+        "response_created",
+        "output_transcript_delta",
+        "output_transcript_delta",
+        "output_transcript_delta",
+        "output_transcript_delta",
+        "output_transcript_delta",
+        "audio",
+        "audio",
+        "output_transcript_delta",
+        "audio",
+        "output_transcript_delta",
+        "audio",
+        "audio",
+        "audio",
+        "audio",
+        "audio_done",
+        "output_transcript_done",
+        "response_done"
+      ],
+      "cancel": [
+        "response_created",
+        "response_done"
+      ],
+      "function": [
+        "response_created",
+        "output_transcript_delta",
+        "output_transcript_delta",
+        "output_transcript_delta",
+        "output_transcript_delta",
+        "output_transcript_delta",
+        "audio",
+        "audio",
+        "output_transcript_delta",
+        "audio",
+        "output_transcript_delta",
+        "audio",
+        "audio",
+        "audio",
+        "audio",
+        "function_delta",
+        "audio_done",
+        "output_transcript_done",
+        "function_done",
+        "response_done"
+      ]
+    },
+    "usage": [
+      {
+        "stage": "response",
+        "status": "completed",
+        "usage": {
+          "total_tokens": 139,
+          "input_tokens": 33,
+          "output_tokens": 106,
+          "input_token_details": {
+            "text_tokens": 33,
+            "audio_tokens": 0,
+            "image_tokens": 0,
+            "cached_tokens": 0,
+            "cached_tokens_details": {
+              "text_tokens": 0,
+              "audio_tokens": 0,
+              "image_tokens": 0
+            }
+          },
+          "output_token_details": {
+            "text_tokens": 53,
+            "audio_tokens": 53,
+            "reasoning_tokens": 34
+          }
+        }
+      },
+      {
+        "stage": "cancel",
+        "status": "cancelled",
+        "usage": {
+          "total_tokens": 36,
+          "input_tokens": 33,
+          "output_tokens": 3,
+          "input_token_details": {
+            "text_tokens": 33,
+            "audio_tokens": 0,
+            "image_tokens": 0,
+            "cached_tokens": 0,
+            "cached_tokens_details": {
+              "text_tokens": 0,
+              "audio_tokens": 0,
+              "image_tokens": 0
+            }
+          },
+          "output_token_details": {
+            "text_tokens": 3,
+            "audio_tokens": 0
+          }
+        }
+      },
+      {
+        "stage": "function",
+        "status": "completed",
+        "usage": {
+          "total_tokens": 448,
+          "input_tokens": 341,
+          "output_tokens": 107,
+          "input_token_details": {
+            "text_tokens": 341,
+            "audio_tokens": 0,
+            "image_tokens": 0,
+            "cached_tokens": 0,
+            "cached_tokens_details": {
+              "text_tokens": 0,
+              "audio_tokens": 0,
+              "image_tokens": 0
+            }
+          },
+          "output_token_details": {
+            "text_tokens": 57,
+            "audio_tokens": 50,
+            "reasoning_tokens": 21
+          }
+        }
+      }
+    ],
+    "configuration": {
+      "model": "gpt-realtime-2.1",
+      "audio": {
+        "input": {
+          "format": {
+            "type": "audio/pcm",
+            "rate": 24000
+          },
+          "transcription": {
+            "model": "gpt-live-transcribe",
+            "language": null,
+            "languages": null,
+            "prompt": null
+          },
+          "noise_reduction": null,
+          "turn_detection": {
+            "type": "server_vad",
+            "threshold": 0.5,
+            "prefix_padding_ms": 300,
+            "silence_duration_ms": 600,
+            "idle_timeout_ms": null,
+            "create_response": false,
+            "interrupt_response": false
+          }
+        },
+        "output": {
+          "format": {
+            "type": "audio/pcm",
+            "rate": 24000
+          },
+          "voice": "cedar",
+          "speed": 1.0
+        }
+      },
+      "reasoning": {
+        "effort": "low"
+      },
+      "output_modalities": [
+        "audio"
+      ]
+    },
+    "autonomous_response": false,
+    "passed": true
+  }
+]

@@ -48,6 +48,24 @@ class Settings(BaseSettings):
     voice_max_recording_seconds: int = Field(default=300, ge=10, le=600)
     voice_max_tts_characters: int = Field(default=4096, ge=100, le=4096)
 
+    # L15 Phase B is opt-in infrastructure, with no product audio endpoint.
+    realtime_enabled: bool = False
+    realtime_model: str = "gpt-realtime-2.1"
+    realtime_transcription_model: str = "gpt-live-transcribe"
+    realtime_ticket_seconds: int = Field(default=30, ge=5, le=60)
+    realtime_session_seconds: int = Field(default=1800, ge=60, le=2700)
+    realtime_lease_seconds: int = Field(default=15, ge=5, le=60)
+    realtime_reconnect_seconds: int = Field(default=10, ge=1, le=30)
+    realtime_auth_timeout_seconds: int = Field(default=5, ge=1, le=15)
+    realtime_io_timeout_seconds: int = Field(default=10, ge=1, le=30)
+    realtime_idle_seconds: int = Field(default=30, ge=5, le=90)
+    realtime_frame_bytes: int = Field(default=4800, ge=960, le=24000)
+    realtime_message_bytes: int = Field(default=8192, ge=512, le=65536)
+    realtime_messages_per_second: int = Field(default=60, ge=10, le=120)
+    realtime_creations_per_minute: int = Field(default=6, ge=1, le=30)
+    realtime_queue_depth: int = Field(default=16, ge=1, le=64)
+    realtime_max_sessions_per_user: Literal[1] = 1
+
     google_web_client_id: str | None = None
     mail_server: str | None = None
     mail_port: int = 587

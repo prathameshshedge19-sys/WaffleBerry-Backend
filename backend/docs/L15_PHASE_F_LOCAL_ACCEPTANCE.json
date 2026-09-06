@@ -1,0 +1,118 @@
+{
+  "backend": {
+    "passed": 777,
+    "failed": 0,
+    "skipped": 0,
+    "full_suite_exit_code": 0,
+    "log": "backups/l15-phase-f/backend-regression.log",
+    "note": "pytest.ini -q plus invocation -q suppresses numeric summary; counted all 777 passing progress markers."
+  },
+  "frontend": {
+    "passed": 123,
+    "failed": 0,
+    "skipped": 0,
+    "log": "backups/l15-phase-f/frontend-regression.log"
+  },
+  "postgresql": {
+    "live_brain_output_races": 80,
+    "l14_stress_races": 75,
+    "foundation_admission_and_same_key_concurrency": "passed",
+    "isolation": "Dedicated temporary cluster, separate l14_test_phase_f / l15_test_phase_f databases, per-test schemas"
+  },
+  "static": {
+    "python_syntax_files": 174,
+    "javascript_syntax_files": 61,
+    "production_chat_asset_references": 36,
+    "static_frontend_build": "No bundler; checked scripts, styles and Vercel config",
+    "vercel_config_valid": true
+  },
+  "browser_overlay": {
+    "results": [
+      {
+        "layout": "desktop_1280",
+        "passed": true,
+        "checks": [
+          "native modal",
+          "viewport bounds",
+          "actual AudioContext playback state",
+          "mute/unmute",
+          "silent end creates nothing",
+          "stop speaking",
+          "reconnect requires fresh mic gesture",
+          "background ends call",
+          "saved-chat refresh",
+          "permission denial",
+          "focus returns to entry",
+          "no page errors"
+        ],
+        "physical_microphone": false,
+        "real_provider": false
+      },
+      {
+        "layout": "mobile_390",
+        "passed": true,
+        "checks": [
+          "native modal",
+          "viewport bounds",
+          "actual AudioContext playback state",
+          "mute/unmute",
+          "silent end creates nothing",
+          "stop speaking",
+          "reconnect requires fresh mic gesture",
+          "background ends call",
+          "saved-chat refresh",
+          "permission denial",
+          "focus returns to entry",
+          "no page errors"
+        ],
+        "physical_microphone": false,
+        "real_provider": false
+      }
+    ],
+    "limitation": "Chromium with synthetic stream and fake server; no physical mobile or human barge-in claim."
+  },
+  "chat_integration": {
+    "results": [
+      {
+        "mode": "rya",
+        "passed": true,
+        "checks": [
+          "actual production chat scripts",
+          "shared auth client",
+          "silent call remains unsaved",
+          "first accepted speech binds chat",
+          "saved user rendered once",
+          "no interrupted assistant",
+          "draft preserved",
+          "next call uses same conversation",
+          "no client conversation creation"
+        ],
+        "real_backend": false
+      },
+      {
+        "mode": "legacy",
+        "passed": true,
+        "checks": [
+          "actual production chat scripts",
+          "shared auth client",
+          "silent call remains unsaved",
+          "first accepted speech binds chat",
+          "saved user rendered once",
+          "no interrupted assistant",
+          "draft preserved",
+          "next call uses same conversation",
+          "no client conversation creation"
+        ],
+        "real_backend": false
+      }
+    ],
+    "limitation": "Actual chat UI with mocked API and synthetic audio; not physical or production acceptance."
+  },
+  "local_migration_current": "0016_realtime_sessions",
+  "local_migration_head": "0016_realtime_sessions",
+  "production_human_acceptance": "pending deployment and user test",
+  "warnings": [
+    "Existing Starlette/httpx TestClient deprecation",
+    "Existing AnyIO BlockingPortal alias deprecation"
+  ]
+}

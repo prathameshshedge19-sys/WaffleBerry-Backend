@@ -1,0 +1,7 @@
+{
+  "database": "l15_test_phase_b",
+  "historical_tables_preserved": 20,
+  "upgrade": true,
+  "downgrade": true,
+  "reupgrade": true
+}

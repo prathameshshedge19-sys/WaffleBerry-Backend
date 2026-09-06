@@ -146,7 +146,13 @@ def correlation():
 def emit(event, *, level=logging.DEBUG, duration_ms=None, category=None, dimensions=None, values=None):
     if not enabled: return
     if event not in {'stage_finished', 'turn_completed', 'turn_failed', 'turn_interrupted', 'turn_replayed',
-                     'component_degraded', 'provider_usage', 'telemetry_failure', 'tool_finished'}: return
+                     'component_degraded', 'provider_usage', 'telemetry_failure', 'tool_finished',
+                     'realtime_session_authorized', 'realtime_websocket_connect', 'realtime_session_ready',
+                     'realtime_reconnect', 'realtime_session_ended', 'realtime_ticket_replay',
+                     'realtime_access_revocation', 'realtime_queue_overrun', 'realtime_provider_disconnect',
+                     'realtime_first_audio', 'realtime_first_playback', 'realtime_playback_progress',
+                     'realtime_playback_ack', 'realtime_response_completed', 'realtime_response_interrupted',
+                     'realtime_cancel', 'realtime_cancel_dispatched', 'realtime_stale_discard'}: return
     observation = _current.get()
     merged = dict(observation.dimensions) if observation else {}
     merged.update(dimensions or {})
@@ -159,7 +165,7 @@ def emit(event, *, level=logging.DEBUG, duration_ms=None, category=None, dimensi
     for key, value in (values or {}).items():
         if key in STAGES | {'accepted_to_preparation_ms', 'provider_start_ms', 'time_to_first_text_delta',
                             'provider_first_result_ms', 'provider_time_to_first_delta', 'time_to_assistant_durable',
-                            'time_to_durable_completion', 'delta_count', 'tool_calls'}:
+                            'time_to_durable_completion', 'delta_count', 'tool_calls', 'playback_queue_samples'}:
             if type(value) in {int, float} and 0 <= value < 1e12: record[key] = round(value, 4)
     sink.emit(record, level)
 

@@ -25,7 +25,7 @@ if TYPE_CHECKING:
 
 TurnMode = Literal["rya", "legacy"]
 TurnRole = Literal["owner", "collaborator", "viewer"]
-InputMode = Literal["text", "voice"]
+InputMode = Literal["text", "voice", "realtime_voice"]
 
 
 @dataclass(frozen=True)
@@ -132,7 +132,7 @@ async def prepare_current_information(prepared: PreparedTurn, provider: WebSearc
 
 @obs.timed("post_turn_effects")
 async def complete_turn(db: Session, prepared: PreparedTurn, completion: TurnCompletionContext,
-                        *, include_progress: bool = False) -> TurnCompletionResult:
+                        *, include_progress: bool = False, authorization_guard=None) -> TurnCompletionResult:
     completion.validate(prepared.actor)
     if prepared.actor.mode == "legacy":
         from app.services.persona_turns import PersonaPreparedTurn
@@ -140,4 +140,5 @@ async def complete_turn(db: Session, prepared: PreparedTurn, completion: TurnCom
             raise ValueError("Invalid persona preparation")
         return TurnCompletionResult()  # No visitor domain writes, even if asked for progress.
     from app.services.builder_turns import complete_builder_turn
-    return await complete_builder_turn(db, prepared, completion, include_progress=include_progress)
+    return await complete_builder_turn(db, prepared, completion, include_progress=include_progress,
+                                       authorization_guard=authorization_guard)

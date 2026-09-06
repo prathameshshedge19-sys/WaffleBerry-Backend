@@ -2,7 +2,8 @@
 
 Provider-input digests are captured from dd246d6 before extraction. They include
 the full ordered prompts/history, not just substrings of the new implementation.
-The collaborator DELETE test documents an existing risk, not a desired new grant.
+L15 adds the owner-only DELETE correction and clarifies the existing prohibition
+on inventing personal details. The exact additions are asserted separately.
 """
 
 import asyncio
@@ -144,7 +145,14 @@ def test_l13_provider_input_and_effect_contract(test_context, scenario, streamin
     calls = provider.persona_provider.calls if role == "viewer" else provider.calls
     assert len(calls) == 1
     assert all(isinstance(turn.content, str) and isinstance(turn.role, str) for turn in calls[0])
-    serialized = json.dumps([(turn.role, turn.content) for turn in calls[0]], ensure_ascii=False)
+    policy_additions = [turn for turn in calls[0] if turn.content.startswith("MEMORY PERMISSIONS\n")]
+    assert len(policy_additions) == int(role == "collaborator")
+    grounding_clarification = "- A preserved preference does not establish its reason, sensory associations, or emotional effects. For example, liking a flower alone does not establish enjoying its scent or finding it calming.\n"
+    assert sum(turn.content.count(grounding_clarification) for turn in calls[0]) == int(role == "viewer")
+    # Keep every original L13 context byte pinned; assert the two precise shared
+    # policy additions above rather than recapturing a new golden digest.
+    serialized = json.dumps([(turn.role, turn.content.replace(grounding_clarification, ""))
+                             for turn in calls[0] if turn not in policy_additions], ensure_ascii=False)
     digest = hashlib.sha256(serialized.encode()).hexdigest()
     assert digest == L13_PROVIDER_DIGESTS[scenario], serialized
     assert "secret orchids" not in serialized and "hated jasmine" not in serialized
@@ -190,8 +198,8 @@ def test_l13_provider_input_and_effect_contract(test_context, scenario, streamin
 
 
 @pytest.mark.parametrize("streaming", [False, True], ids=["json", "sse"])
-def test_existing_collaborator_analyzed_delete_risk_is_not_silently_changed(test_context, streaming):
-    """SECURITY FOLLOW-UP before L15: chat DELETE lacks dashboard's owner gate."""
+def test_collaborator_analyzed_delete_is_owner_only(test_context, streaming):
+    """Approved L15 correction applies to the shared text/L12 mutation boundary."""
     client, sessions, provider, cid, actor_id, headers, ids = seed(test_context, "collaborator")
     content = "That flower memory is wrong; delete it."
     provider.memory_provider.analyses[content] = MemoryAnalysis(
@@ -203,9 +211,10 @@ def test_existing_collaborator_analyzed_delete_risk_is_not_silently_changed(test
     response = send(client, cid, headers, "collaborator", content, streaming)
     assert response.status_code == (200 if streaming else 201)
     with sessions() as db:
-        assert db.get(Memory, ids[0]).status == "deleted"
+        assert db.get(Memory, ids[0]).status == "active"
         revision = db.scalar(select(MemoryRevision).where(MemoryRevision.memory_id == ids[0]))
-        assert revision.changed_by_user_id == actor_id and revision.source_conversation_id == cid
+        assert revision is None
+        assert db.scalar(select(BuilderActivity)) is None
 
 
 @pytest.mark.parametrize("streaming", [False, True], ids=["json", "sse"])

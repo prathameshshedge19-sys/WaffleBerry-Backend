@@ -124,6 +124,10 @@ def revoke_collaborator(legacy_id: int, membership_id: int, user: User = Depends
     if membership is None:
         raise HTTPException(status_code=404, detail="Collaborator not found.")
     membership.status = CollaboratorStatus.REVOKED.value
+    from app.config import get_settings
+    if get_settings().realtime_enabled:
+        from app.services.realtime_sessions import revoke
+        revoke(db, membership.user_id, legacy_id=legacy.id)
     if membership.user.active_legacy_id == legacy.id:
         membership.user.active_legacy_id = None
     record_access_event(db, legacy.id, "collaborator_revoked", actor_user_id=user.id, target_user_id=membership.user_id)

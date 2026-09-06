@@ -69,7 +69,8 @@ def clean_usage(usage):
             values[descriptor.name] = value
     settings = get_settings()
     configured = {settings.ai_model, settings.memory_extraction_model, settings.memory_embedding_model,
-                  settings.voice_transcription_model, settings.voice_tts_model}
+                  settings.voice_transcription_model, settings.voice_tts_model,
+                  settings.realtime_model, settings.realtime_transcription_model}
     model = usage.model
     if isinstance(model, str) and model in configured and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}', model) and not model.startswith('sk-'):
         values['model'] = model
@@ -77,7 +78,8 @@ def clean_usage(usage):
 
 
 class RequestUsage:
-    def __init__(self, kind, *, cache_hit=False):
+    def __init__(self, kind, *, cache_hit=False, outcome=None):
+        self.outcome_override = outcome if outcome in {'completed', 'failed', 'interrupted'} else None
         self.kind, self.cache_hit = kind, cache_hit
         self.usage = ProviderUsage()
         self.request_hash = None
@@ -99,6 +101,8 @@ class RequestUsage:
             self.recorded = True
             category = obs.error_category(error)
             outcome = 'interrupted' if category == 'cancelled' else 'failed' if error else 'completed'
+            if self.outcome_override is not None and error is None:
+                outcome = self.outcome_override
             event_id = hashlib.sha256((self.kind + ':' + self.request_hash).encode()).hexdigest() if self.request_hash else self.attempt_id
             event = UsageEvent(event_id, self.attempt_id, self.kind, outcome,
                                clean_usage(self.usage), obs.correlation() or {}, self.request_hash,

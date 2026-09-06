@@ -11,11 +11,14 @@ from app.api.routes.legacy_conversations import router as legacy_conversation_ro
 from app.api.routes.memories import router as memory_router
 from app.api.routes.progress import router as progress_router
 from app.api.routes.voice import router as voice_router
+from app.api.routes.realtime import router as realtime_router
 from app.config import get_settings
+from app.services.realtime_runtime import lifespan
 
 
 settings = get_settings()
 app = FastAPI(
+    lifespan=lifespan,
     title="Legarya API",
     description="Authentication, Rya chat, conversational Legacy identity, and connected editable memory intelligence.",
     version="12.0.0-l12",
@@ -37,6 +40,7 @@ app.include_router(legacy_access_router, prefix="/api/v1")
 app.include_router(legacy_conversation_router, prefix="/api/v1")
 app.include_router(progress_router, prefix="/api/v1")
 app.include_router(voice_router, prefix="/api/v1")
+app.include_router(realtime_router, prefix="/api/v1")
 
 
 @app.get("/health")

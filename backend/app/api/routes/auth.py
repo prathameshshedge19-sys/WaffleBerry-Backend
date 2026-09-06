@@ -123,8 +123,28 @@ def refresh(request: Request, response: Response, db: Session = Depends(get_db))
 
 
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
-def logout(response: Response):
+def logout(response: Response, request: Request, db: Session = Depends(get_db)):
     settings = get_settings()
+    if settings.realtime_enabled:
+        from app.services.realtime_sessions import revoke
+        # Preserve anonymous logout and all preexisting JWT behavior. Identify
+        # the actor from a validated access token or existing refresh cookie.
+        actor_id = None
+        authorization = request.headers.get("authorization", "")
+        candidates = [(authorization[7:], "access")] if authorization.lower().startswith("bearer ") else []
+        candidates.append((request.cookies.get(REFRESH_COOKIE, ""), "refresh"))
+        for token, purpose in candidates:
+            try:
+                claims = decode_token(token, purpose)
+                actor = db.get(User, claims["user_id"])
+                if actor and (purpose == "access" or refresh_token_matches(actor.id, actor.password_hash, claims.get("fingerprint", ""))):
+                    actor_id = actor.id
+                    break
+            except TokenValidationError:
+                continue
+        if actor_id is not None:
+            revoke(db, actor_id, reason="logout")
+            db.commit()
     response.delete_cookie(
         REFRESH_COOKIE,
         path="/api/v1/auth",

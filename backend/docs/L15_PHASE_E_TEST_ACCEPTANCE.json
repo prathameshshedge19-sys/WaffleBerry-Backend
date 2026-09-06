@@ -1,0 +1,107 @@
+{
+  "status": "passed_with_browser_microphone_acceptance_deferred_to_phase_f",
+  "evidence_root": "backups/l15-phase-e (relative to workspace)",
+  "backend": {
+    "current_collected_cases": 775,
+    "covered_by_passing_runs": 775,
+    "final_standard_suite": {
+      "passed": 762,
+      "skipped": 0,
+      "log": "backend-final.log"
+    },
+    "dedicated_postgresql": {
+      "passed": 13,
+      "cases": [
+        "tests/test_realtime_admission_postgresql_l15.py::test_repeated_first_final_races_exactly_once",
+        "tests/test_realtime_brain_postgresql_l15.py::test_shared_live_effect_races[duplicate_effects]",
+        "tests/test_realtime_brain_postgresql_l15.py::test_shared_live_effect_races[revocation_effects]",
+        "tests/test_realtime_output_postgresql_l15.py::test_output_terminal_races[completion_interrupt]",
+        "tests/test_realtime_output_postgresql_l15.py::test_output_terminal_races[ack_interrupt]",
+        "tests/test_realtime_output_postgresql_l15.py::test_output_terminal_races[terminal_disconnect]",
+        "tests/test_realtime_output_postgresql_l15.py::test_output_terminal_races[duplicate]",
+        "tests/test_realtime_postgresql_l15.py::test_concurrent_authorization_ticket_and_lease",
+        "tests/test_realtime_postgresql_l15.py::test_concurrent_future_binding",
+        "tests/test_realtime_postgresql_l15.py::test_reconnect_generation_fences_old_owner",
+        "tests/test_realtime_postgresql_l15.py::test_revocation_and_expiry_race[revoke]",
+        "tests/test_realtime_postgresql_l15.py::test_revocation_and_expiry_race[expire]",
+        "tests/test_turn_postgresql_acceptance_l14.py::test_live_postgresql_acceptance_stress"
+      ],
+      "final_brain_output_run": {
+        "passed": 6,
+        "races": 80,
+        "log": "postgresql-final-brain-output.log"
+      },
+      "remaining_foundation_admission_and_l14_stress_cases": {
+        "passed": 7,
+        "log": "backend-regression.log"
+      },
+      "l14_stress_races": 75
+    },
+    "initial_broad_run": {
+      "passed": 761,
+      "failed": 1,
+      "log": "backend-regression.log",
+      "failed_case": "tests/test_realtime_brain_postgresql_l15.py::test_shared_live_effect_races[duplicate_effects]",
+      "resolution": "A near-duplicate fixture reused one Legacy and hit existing memory deduplication. Each iteration now uses a distinct disposable Legacy; the final brain/output PostgreSQL run passes."
+    },
+    "new_phase_e_cases": 51,
+    "warnings": [
+      "Existing Starlette/httpx TestClient deprecation",
+      "Existing AnyIO BlockingPortal alias deprecation"
+    ]
+  },
+  "frontend": {
+    "passed": 113,
+    "failed": 0,
+    "skipped": 0,
+    "log": "frontend-regression.log",
+    "phase_e_code_changes": false
+  },
+  "syntax": {
+    "python_compiled_without_bytecode": 173,
+    "javascript_syntax_checked": 59
+  },
+  "regression_scope": [
+    "Phase B/C/D",
+    "L14 lifecycle, idempotency and tools",
+    "text chat",
+    "New Chat",
+    "onboarding",
+    "daily question",
+    "collaborators",
+    "visitors",
+    "L12 STT/TTS",
+    "L13 Personality & Presence",
+    "auth"
+  ],
+  "local_migration_current": "0016_realtime_sessions",
+  "local_migration_head": "0016_realtime_sessions",
+  "postgresql_cleanup": {
+    "complete": true,
+    "log": "postgresql-cleanup.txt",
+    "scope": "Isolated temporary cluster and its verified SSH tunnel only"
+  },
+  "manual_browser_microphone_acceptance": "Deferred to Phase F by user instruction",
+  "repository_baseline": {
+    "WaffleBerry-Backend": {
+      "head": "5905e75ca0d9baf9ae52063dce29eb2f9d1a8a94",
+      "main": "5905e75ca0d9baf9ae52063dce29eb2f9d1a8a94",
+      "origin_main": "5905e75ca0d9baf9ae52063dce29eb2f9d1a8a94",
+      "branch": "main",
+      "diff_check": ""
+    },
+    "WaffleBerry-Frontend": {
+      "head": "f075f6a569db20bbfe5173d175fe0fa6f149029b",
+      "main": "f075f6a569db20bbfe5173d175fe0fa6f149029b",
+      "origin_main": "f075f6a569db20bbfe5173d175fe0fa6f149029b",
+      "branch": "main",
+      "diff_check": ""
+    }
+  },
+  "working_trees": "Intentionally dirty with local L15 B-E changes",
+  "committed": false,
+  "pushed": false,
+  "deployed": false,
+  "production_migrated": false,
+  "phase_e_blockers": []
+}

@@ -37,8 +37,9 @@ def test_fresh_and_0014_preserve_all_existing_rows(tmp_path, existing):
                         Message(conversation_id=1, role=MessageRole.ASSISTANT, content="Historical assistant message")])
         with engine.connect() as connection:
             before = snapshot(connection)
-    alembic(path, "upgrade", "head")
-    assert "0015_conversation_turns (head)" in alembic(path, "current")
+    # Pin this historical migration test; L15 separately tests the current head.
+    alembic(path, "upgrade", "0015_conversation_turns")
+    assert "0015_conversation_turns" in alembic(path, "current")
     with engine.connect() as connection:
         inspector = sa.inspect(connection)
         assert {"conversation_turns", "turn_effects"} <= set(inspector.get_table_names())

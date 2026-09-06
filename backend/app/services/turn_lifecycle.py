@@ -17,7 +17,7 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from app.services import turn_observability as obs, usage_accounting as usage
-from app.models.conversation import Message, MessageRole
+from app.models.conversation import Conversation, Message, MessageRole
 from app.models.turn import ConversationTurn
 
 
@@ -50,12 +50,20 @@ def conflict(code):
     raise HTTPException(409, detail={"code": code, "message": "This turn key cannot start another response."})
 
 
-def accept_turn(db, conversation, payload, *, streaming=False, timezone_name="UTC"):
+def accept_turn(db, conversation, payload, *, streaming=False, timezone_name="UTC", atomic_admission=False):
     """Call only after route scope authorization, before staging any message.
 
     Returns the old JSON message pair on a completed duplicate; SSE duplicates
     receive an explicit conflict (no historical delta replay in Phase C).
     """
+    # Internal realtime admission joins binding/message persistence in one
+    # transaction. Ordinary HTTP boundaries and replay responses stay intact.
+    if atomic_admission and payload.input_mode != "realtime_voice":
+        raise ValueError("Atomic admission is internal to realtime voice")
+    from app.config import get_settings
+    if atomic_admission or get_settings().realtime_enabled:
+        db.execute(update(Conversation).where(Conversation.id == conversation.id)
+                   .values(id=Conversation.id, updated_at=Conversation.updated_at))
     digest = digest_request(conversation, payload, timezone_name)
     scope = (ConversationTurn.actor_user_id == conversation.user_id,
              ConversationTurn.conversation_id == conversation.id,
@@ -66,6 +74,8 @@ def accept_turn(db, conversation, payload, *, streaming=False, timezone_name="UT
     def existing_result(turn):
         if turn.request_digest != digest:
             conflict("turn_key_conflict")
+        if atomic_admission and turn.user_message_id is not None:
+            return {"turn_id": turn.id, "user_message": db.get(Message, turn.user_message_id)}
         if turn.state == "completed":
             if streaming:
                 conflict("turn_already_completed")
@@ -78,13 +88,19 @@ def accept_turn(db, conversation, payload, *, streaming=False, timezone_name="UT
         existing = db.scalar(select(ConversationTurn).where(*scope))
         if existing is not None:
             return existing_result(existing)
+    active = select(ConversationTurn.id).where(ConversationTurn.conversation_id == conversation.id,
+                                               ConversationTurn.state.in_(["pending", "streaming"]))
+    if not atomic_admission:
+        active = active.where(ConversationTurn.input_mode == "realtime_voice")
+    if db.scalar(active.limit(1)) is not None:
+        conflict("turn_in_progress")
     turn = ConversationTurn(conversation_id=conversation.id, legacy_id=conversation.legacy_id,
                             actor_user_id=conversation.user_id, mode=conversation.mode,
                             client_turn_id=payload.client_turn_id, request_digest=digest,
                             input_mode=payload.input_mode, state="pending")
     db.add(turn)
     try:
-        control_commit(db)
+        db.flush() if atomic_admission else control_commit(db)
     except IntegrityError:
         db.rollback()
         existing = db.scalar(select(ConversationTurn).where(*scope)) if payload.client_turn_id else None
@@ -95,17 +111,19 @@ def accept_turn(db, conversation, payload, *, streaming=False, timezone_name="UT
     db.info["active_turn_id"] = turn.id
     token = str(uuid4())
     db.info["turn_claim_token"] = token
-    if not claim_turn(db, turn.id, token):
+    claimed = claim_turn(db, turn.id, token, commit=False) if atomic_admission else claim_turn(db, turn.id, token)
+    if not claimed:
         conflict("turn_in_progress")
     return None
 
 
-def claim_turn(db, turn_id, token):
+def claim_turn(db, turn_id, token, *, commit=True):
     changed = db.execute(update(ConversationTurn).where(
         ConversationTurn.id == turn_id, ConversationTurn.state == "pending",
         ConversationTurn.claim_token.is_(None),
     ).values(state="streaming", claim_token=token, started_at=_now(), updated_at=_now())).rowcount
-    control_commit(db)
+    if commit:
+        control_commit(db)
     return changed == 1
 
 

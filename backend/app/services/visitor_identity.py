@@ -28,6 +28,12 @@ RELATIONSHIPS = {
     "cousin": ("cousin", "chulat", "cousine", "चचेरा", "चुलत"),
 }
 
+# Pronouns/determiners in relationship introductions are not visitor names.
+# They must never match incidental words such as "her son" as identity evidence.
+NON_NAME_WORDS = frozenset({"i", "me", "my", "mine", "your", "yours", "her", "hers", "his", "him",
+                          "their", "theirs", "our", "ours", "the", "a", "an", "dein", "deine",
+                          "sein", "seine", "ihr", "ihre", "tuza", "tujha", "aapka", "aapki"})
+
 
 def normalize(value: str) -> str:
     return re.sub(r"\s+", " ", unicodedata.normalize("NFKC", value).casefold()).strip()
@@ -68,12 +74,12 @@ def extract_name(text: str, allow_name_only: bool = False) -> str | None:
         if match:
             words = match.group(1).strip(" ,.-").split()
             relationship_words = {alias for aliases in RELATIONSHIPS.values() for alias in aliases}
-            words = [word for word in words if normalize(word) not in relationship_words and normalize(word) not in {"your", "dein", "deine", "tuza", "tujha", "aapka", "aapki"}]
+            words = [word for word in words if normalize(word) not in relationship_words and normalize(word) not in NON_NAME_WORDS]
             return " ".join(word[:1].upper() + word[1:] for word in words) or None
     name_only = compact.strip(" .")
     if allow_name_only and re.fullmatch(r"[^\W\d_][^\d,!?;:.]{0,79}", name_only, re.UNICODE):
         words = name_only.split()
-        if 1 <= len(words) <= 3 and not extract_relationship(compact):
+        if 1 <= len(words) <= 3 and not extract_relationship(compact) and not any(normalize(word) in NON_NAME_WORDS for word in words):
             return " ".join(word[:1].upper() + word[1:] for word in words)
     return None
 
@@ -91,6 +97,8 @@ def _entity_for_name(db: Session, legacy_id: int, name: str) -> MemoryEntity | N
 
 def _supported_relationship(memories: Sequence[Memory], name: str, relationship: str) -> bool:
     name_key = normalize(name)
+    if not name_key or name_key in NON_NAME_WORDS:
+        return False
     aliases = RELATIONSHIPS.get(relationship, (relationship,))
     for memory in memories:
         text = normalize(memory.canonical_text)
@@ -161,16 +169,19 @@ def visitor_evidence(memories: Sequence[Memory], profile: LegacyVisitorProfile |
             nicknames.append(match.group(1).strip("\"'“”"))
     supported = known_relationships(memories, profile.preferred_name)
     conflict = bool(profile.claimed_relationship and supported and profile.claimed_relationship not in supported)
-    safe_relevant = relevant if profile.relationship_status == VisitorRelationshipStatus.VERIFIED_FROM_MEMORY.value else [memory for memory in relevant if not re.search(r"\b(calls?|called|nickname|pet name)\b", normalize(memory.canonical_text))]
+    status = profile.relationship_status
+    if status == VisitorRelationshipStatus.VERIFIED_FROM_MEMORY.value and (conflict or profile.claimed_relationship not in supported):
+        status = VisitorRelationshipStatus.UNVERIFIED.value
+    safe_relevant = relevant if status == VisitorRelationshipStatus.VERIFIED_FROM_MEMORY.value else [memory for memory in relevant if not re.search(r"\b(calls?|called|nickname|pet name)\b", normalize(memory.canonical_text))]
     return {
         "identified": True,
         "preferred_name": profile.preferred_name,
         "claimed_relationship": profile.claimed_relationship,
-        "relationship_status": profile.relationship_status,
+        "relationship_status": status,
         "matched_entity_id": profile.matched_entity_id,
         "supported_relationships": supported,
         "claim_conflicts_with_memory": conflict,
-        "visitor_specific_nicknames": list(dict.fromkeys(nicknames)) if profile.relationship_status == VisitorRelationshipStatus.VERIFIED_FROM_MEMORY.value else [],
+        "visitor_specific_nicknames": list(dict.fromkeys(nicknames)) if status == VisitorRelationshipStatus.VERIFIED_FROM_MEMORY.value else [],
         "visitor_specific_evidence": [{"id": memory.id, "text": memory.canonical_text} for memory in safe_relevant[:12]],
     }
 

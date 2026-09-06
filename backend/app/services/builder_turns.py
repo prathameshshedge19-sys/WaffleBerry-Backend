@@ -1,9 +1,4 @@
-"""Existing Rya builder preparation and synchronous post-success policy.
-
-Known L13 risk retained: analyzed DELETE operations in LivingMemoryService.store
-are not owner-gated like dashboard DELETE. Fix that policy separately before L15
-write-tool exposure; structural extraction must not silently change permissions.
-"""
+"""Shared Rya builder preparation and post-success policy for text and voice."""
 
 from dataclasses import dataclass, field
 import logging
@@ -70,6 +65,7 @@ def _provider_turns(
     system_turns = [ChatTurn(role="system", content=setup_system_context(legacy, activated_now))]
     if contributor_role == "collaborator":
         system_turns.append(ChatTurn(role="system", content=f"COLLABORATOR BUILDER CONTEXT\nThis user is a trusted contributor to {legacy.subject_name or 'the selected subject'}'s Legacy, not necessarily the Legacy subject or owner. Treat Conversation.legacy_id as authoritative for whose Legacy is being built. Interpret relationship phrases such as 'my aunt' in that target context, preserve the contributor's language and perspective, and never imply they are the subject. You may say 'you mentioned' or ask what they remember. Do not repeatedly announce their collaborator role."))
+        system_turns.append(ChatTurn(role="system", content="MEMORY PERMISSIONS\nOnly the Legacy owner may delete canonical memories. You cannot carry out a contributor's forget/delete request or claim it was done. The contributor may still add, enrich, and correct facts under the existing contribution rules."))
     else:
         system_turns.append(ChatTurn(role="system", content=f"OWNER BUILDER CONTEXT\nThis user owns {legacy.subject_name or 'the selected subject'}'s Legacy. Preserve Rya's builder identity and use the active evidence graph to synthesize what has already been shared."))
     grounding = memory_grounding(relevant_memories)
@@ -141,7 +137,7 @@ async def prepare_builder_turn(db: Session, actor: TurnActorContext, conversatio
 
 
 async def complete_builder_turn(db: Session, prepared: PreparedTurn, completion: TurnCompletionContext,
-                                *, include_progress: bool = False) -> TurnCompletionResult:
+                                *, include_progress: bool = False, authorization_guard=None) -> TurnCompletionResult:
     if not isinstance(prepared, BuilderPreparedTurn) or not prepared.actor.capabilities.apply_builder_memory:
         raise ValueError("Builder finalization requires a builder preparation")
     actor = prepared.actor
@@ -150,7 +146,10 @@ async def complete_builder_turn(db: Session, prepared: PreparedTurn, completion:
     from app.services.turn_effects import apply_effects
     durable = db.scalar(select(ConversationTurn).where(ConversationTurn.user_message_id == completion.user_message.id))
     if durable is not None:
-        return await apply_effects(db, durable.id, prepared, completion, include_progress=include_progress)
+        return await apply_effects(db, durable.id, prepared, completion, include_progress=include_progress,
+                                   authorization_guard=authorization_guard)
+    if authorization_guard is not None:
+        raise ValueError("Guarded finalization requires a durable turn")
     changed = await _store_memory(prepared.memory_service, db, completion.legacy, completion.conversation,
                                   completion.user_message, actor.content, prepared.memory_analysis, actor.actor_id)
     # JSON only resolved a local date when memories changed; SSE always did so.

@@ -10,6 +10,10 @@ ERRORS = frozenset({
     'post_processing_failed', 'cancelled', 'unknown_internal',
 })
 DIMENSIONS = {
+    'realtime_end_reason': frozenset({'client_end', 'browser_disconnect', 'provider_disconnect',
+        'access_changed', 'logout', 'session_expired', 'ticket_expired', 'lease_expired',
+        'reconnect_expired', 'protocol_error', 'queue_overrun', 'rate_limit', 'provider_failed',
+        'idle_timeout', 'backend_error'}),
     'mode': frozenset({'rya', 'legacy', 'unknown'}),
     'role': frozenset({'owner', 'collaborator', 'viewer', 'unknown'}),
     'route': frozenset({'personal', 'general', 'mixed', 'fresh', 'unknown'}),
@@ -21,6 +25,7 @@ DIMENSIONS = {
     'provider_kind': frozenset({'text', 'embedding', 'stt', 'tts', 'web', 'realtime'}),
 }
 STAGES = frozenset({
+    'realtime_provider_connect',
     'preparation', 'history_loading', 'classification', 'memory_analysis', 'memory_retrieval',
     'personality_selection', 'relationship_context', 'current_information', 'provider_generation',
     'assistant_persistence', 'post_turn_effects', 'memory_effect', 'activity_effect',
@@ -43,6 +48,11 @@ class ProviderUsage:
     characters: UsageValue = field(default_factory=UsageValue)
     audio_input_tokens: UsageValue = field(default_factory=UsageValue)
     audio_output_tokens: UsageValue = field(default_factory=UsageValue)
+    reasoning_tokens: UsageValue = field(default_factory=UsageValue)
+    text_input_tokens: UsageValue = field(default_factory=UsageValue)
+    text_output_tokens: UsageValue = field(default_factory=UsageValue)
+    cached_audio_input_tokens: UsageValue = field(default_factory=UsageValue)
+    cached_text_input_tokens: UsageValue = field(default_factory=UsageValue)
     tool_calls: UsageValue = field(default_factory=UsageValue)
     model: str | None = None
 
