@@ -1,10 +1,28 @@
 # L16 Phase D — Product integration and release readiness
 
-Status: **STORAGE ACCEPTED; remaining production release gates pending.** Local implementation and automated acceptance are recorded below. No Phase D application deployment or milestone tag has occurred.
+Status: **DEPLOYMENT IN PROGRESS; production acceptance not yet complete.** Storage and migration gates passed. Media is temporarily disabled while a worker lifecycle correction is tested. No L16 milestone tag has been created.
 
-Latest production release work: authoritative host/database verification and live private SSE-C storage acceptance passed. The protected production environment now contains the authorized storage settings; media remains disabled pending deployment. Manual browser UX acceptance is expressly waived as a release blocker.
+Latest production release work: backend and frontend were deployed after storage/migration gates. Production processing revealed a persistent-client event-loop lifetime defect; acceptance stopped and media was disabled pending a tested correction. Existing chat remains available. Manual browser UX acceptance is expressly waived as a release blocker.
 
 Validation date: 2026-09-07.
+
+## Deployment and worker lifecycle follow-up — 2026-09-07
+
+Backend `445a7ec1e9ba79196bde59d4df3f31a21069a38b` was deployed through the existing Git/venv workflow after a fresh backup of **legarya**:
+
+- `/var/backups/legarya/legarya-before-l16-0017-0018-20260907T202009Z.dump`
+- UTC timestamp `20260907T202009Z`; **140,829 bytes**; successful `pg_dump`; successful `pg_restore --list`.
+- SHA256 `d1bd957d4ccfd0822f873649296fca14653395fc271b0668a5c4e4c454c8e741`.
+
+Alembic upgraded `0016_realtime_sessions` through `0017_media_sources` to **0018_media_intelligence**. Exactly seven expected tables were added. Their foreign keys, indexes and uniqueness constraints were inspected; all PostgreSQL constraints are validated. No manual schema changes or downgrade occurred.
+
+The deployment helper's restrictive root umask initially left updated code/new dependencies unreadable by the service account, causing a brief HTTP 502 and startup failures. Release paused. Ownership of only the changed tracked files and newly installed media packages/dependencies was restored to `waffleberry`; the protected environment remained 0600. The helper now gives public Git/package subprocesses a 022 mask while retaining 077 for backups/secrets. Backend, personality worker and media worker then passed active/running checks with zero restarts, HTTP health 200 and successful idle cycles. This was a deployment-file ownership repair, not an application/schema rollback.
+
+Frontend **66a4162c03b6c86b88b06162b3c2b038dfa26658** was pushed through the established Vercel production Git workflow. All **28** checked production assets (chat dependencies plus chat/home/Legacy HTML) returned 200 and matched that exact commit after newline normalization. Evidence: `backups/l16-phase-d/production-frontend-result.json`. No DNS/SEO/domain changes occurred.
+
+Synthetic production accounts owner **11**, collaborator **12**, visitor **13**, Legacy **7** and foreign-scope Legacy **8** were created; credentials remain in a root-only server file. The PDF passed with one page evidence and three pending candidates. The image initially failed; a bounded diagnostic passed and one explicit owner retry produced one evidence and one pending candidate. The next injection job failed with the same generic provider error. All observed canonical counts remained **zero**. Acceptance stopped again before owner review, and media was disabled/the media worker stopped while the defect was corrected locally.
+
+The worker retained one async provider client but used a fresh `asyncio.run()` for every processing job, closing the event loop backing pooled connections between jobs. A new regression reproduced the closed-loop failure on the second job. The correction gives each worker one `asyncio.Runner` for its lifetime and closes the provider client on that loop before closing the runner during CLI shutdown. The regression exercises three jobs on the same worker, zero canonical writes and client/loop cleanup. No locking, claim, generation, authorization, schema or promotion semantics changed. Focused validation: **59 passed, 2 warnings**. Full post-fix regression: **822 passed, 37 skipped, 2 warnings** in 216.10 seconds. Evidence: `worker-loop-before-fix.log`, `worker-loop-focused.log`, `worker-loop-backend-full.log` and `worker-loop-backend-final.xml` under `backups/l16-phase-d/`. Resumed production acceptance remains pending at this checkpoint.
 
 ## Protected storage configuration and live acceptance — 2026-09-07
 

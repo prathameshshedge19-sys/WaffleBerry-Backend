@@ -122,6 +122,9 @@ class MediaIntelligenceWorker(MediaWorker):
             provider = get_source_analysis_provider()
         from app.services.media_intelligence import MediaIntelligenceService
         self.intelligence = MediaIntelligenceService(provider, storage=self.storage, transcriber=transcriber)
+        # The provider owns pooled async connections. Keep their event loop
+        # alive across jobs instead of closing it after every claim.
+        self._runner = asyncio.Runner()
 
     def run_once(self):
         claim = self.claim()
@@ -135,7 +138,15 @@ class MediaIntelligenceWorker(MediaWorker):
             kind = job.kind
         if kind == ProcessingJobKind.PURGE.value:
             return self._purge(job_id, token)
-        return asyncio.run(self.intelligence.process_claim(self.sessions, job_id, token))
+        return self._runner.run(self.intelligence.process_claim(self.sessions, job_id, token))
+
+    def close(self):
+        try:
+            client = getattr(self.intelligence.provider, "client", None)
+            if client is not None:
+                self._runner.run(client.close())
+        finally:
+            self._runner.close()
 
 
 def main():
@@ -153,18 +164,24 @@ def main():
     if not get_settings().media_enabled:
         parser.error("Media processing is disabled")
     worker = MediaIntelligenceWorker()
-    while True:
-        started = time.monotonic()
+    try:
+        while True:
+            started = time.monotonic()
+            try:
+                outcome = worker.run_once()
+            except Exception:
+                # Never emit parser/provider/storage exception bodies or contents.
+                outcome = "worker_unavailable"
+            print(json.dumps({"event": "media_worker_cycle", "outcome": outcome, "duration_ms": round((time.monotonic() - started) * 1000)}), flush=True)
+            if args.once:
+                return
+            if outcome in {"idle", "worker_unavailable", "failed", "retry_wait"}:
+                time.sleep(args.poll_seconds)
+    finally:
         try:
-            outcome = worker.run_once()
+            worker.close()
         except Exception:
-            # Never emit parser/provider/storage exception bodies or contents.
-            outcome = "worker_unavailable"
-        print(json.dumps({"event": "media_worker_cycle", "outcome": outcome, "duration_ms": round((time.monotonic() - started) * 1000)}), flush=True)
-        if args.once:
-            return
-        if outcome in {"idle", "worker_unavailable", "failed", "retry_wait"}:
-            time.sleep(args.poll_seconds)
+            print(json.dumps({"event": "media_worker_shutdown", "outcome": "close_failed"}), flush=True)
 
 
 if __name__ == "__main__":
