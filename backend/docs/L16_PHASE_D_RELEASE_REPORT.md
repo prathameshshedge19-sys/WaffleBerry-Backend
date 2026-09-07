@@ -1,10 +1,42 @@
 # L16 Phase D — Product integration and release readiness
 
-Status: **DEPLOYMENT IN PROGRESS; production acceptance not yet complete.** Storage and migration gates passed. Media is temporarily disabled while a worker lifecycle correction is tested. No L16 milestone tag has been created.
+Status: **PRODUCTION ACCEPTED — all required automatable gates passed.** Media is enabled. Manual browser/microphone UX was intentionally waived and was not performed. The accepted release is identified by `legarya-l16-media-sources`; its target includes the application revision and this final report.
 
-Latest production release work: backend and frontend were deployed after storage/migration gates. Production processing revealed a persistent-client event-loop lifetime defect; acceptance stopped and media was disabled pending a tested correction. Existing chat remains available. Manual browser UX acceptance is expressly waived as a release blocker.
+Latest production release work: private storage, migrations, backend/frontend deployment, real provider processing, authorization, canonical-memory safety, regression, log privacy and cleanup all passed after the tested worker lifecycle correction. Historical failed attempts and their resolutions remain documented below.
 
 Validation date: 2026-09-07.
+
+## Final production acceptance
+
+| Gate | Evidence/result |
+| --- | --- |
+| Backend application source | **b89c7c75cd473a11fe86a677f9bc48f2f9e25805**, containing the accepted Phase B/C/D work, provider-schema fix, SSE-C decoding fix and worker-loop fix. The final release report commit contains no further application changes; `legarya-l16-media-sources` identifies the accepted backend release commit. |
+| Frontend | **66a4162c03b6c86b88b06162b3c2b038dfa26658**; normal Vercel Git production workflow; all 28 checked assets HTTP 200 and exact content matches. |
+| Production host/project | `WaffleBerry-server`, **89.167.14.211**, existing Hetzner **WaffleBerry** project. |
+| Storage | `waffleberry-legarya-media-prod`, **hel1**; private ACL and authenticated SSE-C upload/read/delete acceptance **9/9 passed**. Anonymous listing/reads and missing/wrong-key reads denied; deleted object 404. |
+| Secret mechanism | Backend, personality and media units use `/home/waffleberry/WaffleBerry-Backend/backend/.env`, `waffleberry:waffleberry`, **0600**. User entered S3 credentials through hidden server terminal prompts. Server-generated SSE-C material was never printed and remains retained in that protected file. |
+| Backup/migration | Fresh verified 140,829-byte `legarya` backup detailed below; normal Alembic upgrade through 0017 to **0018_media_intelligence**. Seven new tables and all expected constraints/indexes validated. |
+| Services | Backend, personality worker and separate media worker **active/running**, zero restart counters; health **200**. Media unit uses `Restart=always`; 55 observed idle cycles after the fix, two consecutive successful processing cycles and **zero new worker failures**. |
+| PDF | Ready; **1** page evidence, **3** pending candidates; correct page provenance and authenticated original download. |
+| Image | Ready; **1** visual evidence and **1** pending candidate; no trusted canonical identity or automatic canonical write. Initial failure/retry and subsequent worker correction are recorded below. |
+| Injection TXT | Ready after tested worker correction; **1** text evidence, **1** supported candidate. Instruction text was not promoted; no privileged tool/action was exposed; canonical count remained zero. |
+| Worker continuity | The retried injection and new collaborator TXT processed consecutively in the same corrected worker without restart/provider-loop failure. |
+| Canonical safety/review | Count remained **0** through all uploads/processing and before approval. Preserve created exactly **1** memory; edit preview created none; Edit + Preserve stored its intended normalized hibiscus wording and raised count to **2**; Skip created none. |
+| Deletion/provenance | PDF deletion removed original access and evidence availability; both approved memories remained with unavailable-source tombstones. |
+| Authorization/isolation | Owner workflows passed. Collaborator uploaded/read their own source and saw only that contribution; all Preserve/Edit + Preserve/Skip/draft/delete/retry mutations denied. Visitor source library/upload/content/candidate-detail and canonical mutation access denied. Guessed source/candidate/evidence/download/delete/retry in foreign Legacy 8 disclosed no data. Filtered candidate lists return an empty list where intended; direct item access is denied. |
+| Production media API acceptance | **77 checks passed**, using only synthetic Legacy 7/8 and users 11/12/13. |
+| Existing API/voice regression | **15 checks passed**: Vercel auth/me, New Chat, text Rya and idempotent replay, text Legacy, Memory/Personality dashboards, synthetic L12 STT/TTS, L15 capabilities, TLS WSS authentication/provider-ready/end, zero conversation from a silent call, no additional canonical writes. |
+| Frontend privacy | **26** chat/JS/CSS assets compared against actual server-held secrets entirely on the server: no secret values, object-storage URLs or signed private URLs exposed. |
+| Logs/observability | No actual secret values, synthetic source/chat content or signed private URLs found in the inspected release journal. Upload/review/retry/deletion HTTP events and worker processing/failure events were present. Two historical failed processing cycles belong to the diagnosed pre-fix worker; none occurred after its correction. |
+| Cleanup | **19 checks passed**. All **4** synthetic originals were purged, exact S3 object/version HEAD returned **404**, and all four source tombstones remain deleted with no live jobs. Approved test memories **12/13** were then soft-deleted through the normal owner-only API: zero active fixture memories; two canonical audit rows retained. Synthetic users 11/12/13, Legacies 7/8 and conversations 29/30 remain isolated audit fixtures. No real customer data was used or deleted. |
+| Final automated regression | Backend **822 passed, 37 skipped, 2 warnings**; frontend **195 passed**. Prior live isolated L16 PostgreSQL acceptance **23 passed** remains applicable: follow-up fixes changed storage encoding/provider loop lifetime, not SQL/locking/generation semantics. |
+| Known exclusions | Pre-existing backend realtime-provider/test edits, frontend worklet/playback-test edits and untracked Phase A architecture document remain excluded from all release commits. |
+
+Two acceptance-harness assumptions were corrected without changing application behavior: filtered candidate lists intentionally return `[]`, and message creation returns HTTP 201. The existing synthetic streaming WAV has an indefinite frame header, so the harness bounds its read to 30 seconds. Existing synthetic conversations and idempotent request keys were reused; no duplicate fixture writes were needed.
+
+Sanitized evidence is outside Git under `backups/l16-phase-d/`: `production-storage-result.json`, `production-deployment-result.json`, `production-media-result.json`, `production-frontend-result.json`, `frontend-privacy.json`, `regression-result.json`, `cleanup-audit-result.json`, `final-health.json` and regression logs/XML. No protected environment, S3/SSE-C credentials, fixture passwords or signed private URLs are included.
+
+**Not manually browser-verified in Phase D:** desktop/mobile visual layout, file picker, keyboard/focus behavior, microphone permission/capture, physically spoken L12/L15 interaction and subjective polish. Synthetic STT/TTS and silent WSS/provider handshake do not establish those experiences. These are post-release observation items under the user's explicit waiver, not unreported passes or release blockers.
 
 ## Deployment and worker lifecycle follow-up — 2026-09-07
 
