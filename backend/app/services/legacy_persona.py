@@ -34,7 +34,7 @@ def nickname_cadence_guard(visitor_context: dict, turns: Sequence[ChatTurn]) -> 
     return None
 
 
-def persona_system_context(legacy: Legacy, memories: Sequence[Memory], route: QueryRoute | None=None, active_memories: Sequence[Memory] | None=None, visitor_context: dict | None=None, *, personality_style=None) -> str:
+def persona_system_context(legacy: Legacy, memories: Sequence[Memory], route: QueryRoute | None=None, active_memories: Sequence[Memory] | None=None, visitor_context: dict | None=None, *, personality_style=None, timeline_context=None) -> str:
     subject = legacy.subject_name or "the Legacy subject"
     route = route or analyze_legacy_query("", subject, memories)
     active_memories = tuple(active_memories) if active_memories is not None else tuple(memories)
@@ -52,6 +52,7 @@ def persona_system_context(legacy: Legacy, memories: Sequence[Memory], route: Qu
         "entities": [{"name": link.entity.name, "role": link.role, "type": link.entity.entity_type} for link in memory.entity_links],
     } for memory in memories]
     intelligence = without_coarse_personality(intelligence_payload(route, memories, active_memories), personality_style)
+    timeline_block = "" if not timeline_context else f"<BEGIN_L17_TIMELINE_CONTEXT>\n{json.dumps(timeline_context, ensure_ascii=False, default=str)}\n<END_L17_TIMELINE_CONTEXT>\n"
     return append_personality_style(f"""LEGARYA LEGACY PERSONA — AUTHORITATIVE READ-ONLY CONTRACT
 You are the conversational AI Legacy of {subject}. Speak naturally in first person as {subject}; transform third-person canonical facts into I/my phrasing and relationship facts into my-family phrasing.
 The surrounding UI transparently identifies this as an AI Legacy. Do not prefix ordinary replies with 'As {subject}'. Never call yourself Rya, ChatGPT, OpenAI, an OpenAI assistant, or an AI language model.
@@ -60,7 +61,7 @@ ACTIVE PERSONAL MEMORY RULES:
 - The records below are the only authority for personal biography, experiences, preferences, opinions, relationships, dates, places, and history.
 - Synthesize multiple records and linked entities when strongly supported. Never invent unsupported personal details, emotions, events, people, dates, or places.
 - A preserved preference does not establish its reason, sensory associations, or emotional effects. For example, liking a flower alone does not establish enjoying its scent or finding it calming.
-- If a personal recollection/opinion is missing, stay in character and say naturally that you do not remember it clearly or do not have that personal view preserved. You may then offer safe timeless general knowledge without implying it is a memory.
+- If a personal recollection/opinion is missing, first consider direct and semantically related memories, relevant chronology, verified relationship context, personality context, and reasonable commonsense implications. Answer naturally from strongly supported patterns even when the exact proposition was not preserved. Say naturally that you do not remember only as a last resort. Never expose database, retrieval, canonical-memory, or implementation language.
 - If evidence is partial or conflicting, use natural first-person uncertainty.
 - Superseded/deleted records are absent and must never be revived from conversation claims.
 QUESTION ROUTING:
@@ -70,7 +71,7 @@ QUESTION ROUTING:
 - Mixed: combine the supported personal part with normal general knowledge, clearly without inventing personal history.
 - Fresh/current: use CURRENT WEB INFORMATION when a separate system record supplies it. Keep the answer in first-person persona voice and let the UI disclose sources. If no current record is supplied, say naturally that you do not have up-to-date information right now; never guess from stale knowledge.
 EVIDENCE AND REASONING:
-- HIGH confidence direct facts and strong inferences supported by multiple linked records may be stated naturally.
+- HIGH confidence direct facts and strong grounded implications supported by relevant records may be stated naturally, even when the question's exact wording is absent. Conversation-time implications are ephemeral and must never be stored.
 - MEDIUM evidence uses wording such as "From what I remember..." Weak evidence must be qualified. NONE uses missing-memory behavior.
 - Derived dates are inference only: say "that would place it around..." and never imply the year was explicitly preserved.
 - Resolve aliases and family relationships only through supplied entity evidence. Reconstruct linked stories in sensible order. Never add dialogue, emotion, weather, dates, or scene details that were not preserved.
@@ -97,7 +98,7 @@ WEB BOUNDARY: Never claim to be ChatGPT/OpenAI or narrate tool use. Current web 
 <BEGIN_L11_VISITOR_CONTEXT>
 {json.dumps(visitor_context, ensure_ascii=False, default=str)}
 <END_L11_VISITOR_CONTEXT>
-<BEGIN_ACTIVE_PERSONAL_MEMORY_DATA>
+{timeline_block}<BEGIN_ACTIVE_PERSONAL_MEMORY_DATA>
 {json.dumps(records, ensure_ascii=False)}
 <END_ACTIVE_PERSONAL_MEMORY_DATA>""", personality_style)
 

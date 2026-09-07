@@ -133,7 +133,7 @@ def test_tool_registry_scope_and_read_only_results(live, actor, mode):
     names = {item["name"] for item in definitions}
     assert names == (set(brain.REGISTRY) if mode == "legacy" else {"retrieve_legacy_memories"})
     assert all(not {"legacy_id", "actor", "role", "mode"} & set(item["parameters"]["properties"]) for item in definitions)
-    calls(out, [(name, {"query": "What flowers did Pallavi like?"} if name == "retrieve_legacy_memories" else {})
+    calls(out, [(name, {"query": "What flowers did Pallavi like?"} if name in {"retrieve_legacy_memories", "retrieve_legacy_timeline"} else {})
                 for name in names if name != "get_current_information"])
     asyncio.run(brain.execute_tools(live[1].kw["bind"], out, "worker", live[3], memory, FakeWebSearchProvider()))
     results = [json.loads(item["output"]) for item in out.brain.continuation if item["type"] == "function_call_output"]

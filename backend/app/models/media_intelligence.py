@@ -38,6 +38,7 @@ class SupportState(str, enum.Enum):
 class SourceEvidence(Base):
     __tablename__ = "source_evidence"
     __table_args__ = (
+        UniqueConstraint("legacy_id", "id", name="uq_source_evidence_legacy_id_id"),
         UniqueConstraint("legacy_id", "source_id", "id", name="uq_source_evidence_id_scope"),
         UniqueConstraint("legacy_id", "source_id", "generation", "stable_key", name="uq_source_evidence_stable"),
         ForeignKeyConstraint(("legacy_id", "source_id"), ("media_sources.legacy_id", "media_sources.id"), ondelete="RESTRICT", name="fk_source_evidence_source_scope"),

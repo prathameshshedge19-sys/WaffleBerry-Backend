@@ -22,7 +22,7 @@ from app.models.memory import MemoryEntity
 from app.models.turn import ConversationTurn
 from app.models.visitor import LegacyVisitorProfile
 from app.schemas.conversation_tools import (
-    EmptyArguments, QueryArguments, MemoryArguments, ToolErrorCode,
+    EmptyArguments, QueryArguments, MemoryArguments, TimelineArguments, ToolErrorCode,
     MAX_ARGUMENT_BYTES, MAX_RESULT_BYTES, MAX_CUES, MAX_SOURCES,
 )
 from app.services.authorization import legacy_role, require_persona_legacy
@@ -37,6 +37,7 @@ from app.services.web_search import WebSearchError, minimize_search_query
 
 REGISTRY = MappingProxyType({
     "retrieve_legacy_memories": MemoryArguments,
+    "retrieve_legacy_timeline": TimelineArguments,
     "get_legacy_personality": EmptyArguments,
     "get_visitor_relationship_context": EmptyArguments,
     "get_current_information": QueryArguments,
@@ -211,6 +212,12 @@ class ConversationTools:
                         ranked = await self.memory.retrieve_read_only(db, legacy.id, args.query, route)
                     selected_ids = [memory.id for memory in ranked]
                     data = None
+                elif name == "retrieve_legacy_timeline":
+                    from app.services.timeline import TimelineService, serialize_event
+                    with obs.stage("timeline_retrieval"):
+                        events = TimelineService(db).retrieve(legacy.id, args.query, args.max_results)
+                    selected_ids = [event.id for event in events]
+                    data = {"kind": "timeline_context", "events": [serialize_event(db, event) for event in events]}
                 elif name == "get_legacy_personality":
                     visitor = _visitor(db, context, active)
                     retrieved = ()
@@ -239,6 +246,10 @@ class ConversationTools:
                         current_by_id = {m.id: m for m in _visible_memories(context, active, visitor)}
                         ranked = [current_by_id[i] for i in selected_ids if i in current_by_id][:args.max_results]
                         data = {"kind": "personal_evidence", "memories": [self._memory_record(m, legacy.id) for m in ranked]}
+                    elif name == "retrieve_legacy_timeline":
+                        from app.services.timeline import TimelineService, serialize_event
+                        current_events = {event.id: event for event in TimelineService(db).retrieve(legacy.id, args.query, args.max_results)}
+                        data = {"kind": "timeline_context", "events": [serialize_event(db, current_events[event_id]) for event_id in selected_ids if event_id in current_events][:args.max_results]}
                     elif name == "get_legacy_personality":
                         current_by_id = {m.id: m for m in _visible_memories(context, active, visitor)}
                         retrieved = [current_by_id[i] for i in selected_ids if i in current_by_id]

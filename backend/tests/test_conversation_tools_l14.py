@@ -408,7 +408,7 @@ def test_safe_error_serialization(test_context, monkeypatch, error, code):
 
 def test_registry_has_no_write_or_arbitrary_execution_tools(test_context):
     _, _, context, tools, _ = setup(test_context)
-    assert set(REGISTRY) == {MEMORY, STYLE, RELATIONSHIP, WEB}
+    assert set(REGISTRY) == {MEMORY, "retrieve_legacy_timeline", STYLE, RELATIONSHIP, WEB}
     assert context.tool_names == frozenset(REGISTRY)
     with pytest.raises(TypeError):
         REGISTRY['save_memory'] = dict

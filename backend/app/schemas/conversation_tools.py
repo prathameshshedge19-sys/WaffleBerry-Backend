@@ -6,6 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 MAX_ARGUMENT_BYTES = 4096
 MAX_QUERY_CHARS = 512
 MAX_MEMORIES = 5
+MAX_TIMELINE_EVENTS = 8
 MAX_CUES = 5
 MAX_SOURCES = 3
 MAX_RESULT_BYTES = 8192
@@ -36,3 +37,7 @@ class QueryArguments(EmptyArguments):
 
 class MemoryArguments(QueryArguments):
     max_results: int = Field(default=MAX_MEMORIES, ge=1, le=MAX_MEMORIES)
+
+
+class TimelineArguments(QueryArguments):
+    max_results: int = Field(default=MAX_TIMELINE_EVENTS, ge=1, le=MAX_TIMELINE_EVENTS)

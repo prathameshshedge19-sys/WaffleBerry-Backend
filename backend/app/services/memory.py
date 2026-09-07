@@ -388,6 +388,10 @@ class LivingMemoryService:
 
         if not commit:
             db.flush()
+            from app.services.timeline import TimelineService
+            for memory in dict.fromkeys(changed):
+                if memory.status == MemoryStatus.ACTIVE.value:
+                    TimelineService(db).reconcile_memory(legacy.id, memory.id, actor_id=changed_by_user_id)
             return list(dict.fromkeys(changed))
         try:
             db.commit()
@@ -395,6 +399,10 @@ class LivingMemoryService:
             db.rollback()
             return []
         for memory in dict.fromkeys(changed): db.refresh(memory)
+        from app.services.timeline import TimelineService
+        for memory in dict.fromkeys(changed):
+            TimelineService(db).reconcile_memory(legacy.id, memory.id, actor_id=changed_by_user_id)
+        db.commit()
         return list(dict.fromkeys(changed))
 
     async def edit(self, db: Session, legacy: Legacy, memory: Memory, source_text: str, category: str | None, user_id: int) -> Memory:
@@ -417,6 +425,8 @@ class LivingMemoryService:
         memory.operation_type = MemoryOperation.EDIT.value; memory.status = MemoryStatus.ACTIVE.value
         memory.last_contributor_user_id = user_id
         self._set_embedding(memory, vectors[0]); self._sync_entities(db, legacy, memory, normalized.entities)
+        from app.services.timeline import TimelineService
+        TimelineService(db).reconcile_memory(legacy.id, memory.id, actor_id=user_id)
         db.commit(); db.refresh(memory); memory.was_changed = True; return memory
 
     @staticmethod
@@ -426,7 +436,10 @@ class LivingMemoryService:
         LivingMemoryService._record_revision(db, memory, memory.canonical_text, None, MemoryOperation.DELETE.value, "dashboard", user_id)
         memory.status = MemoryStatus.DELETED.value; memory.operation_type = MemoryOperation.DELETE.value
         memory.last_contributor_user_id = user_id
-        LivingMemoryService._clear_embedding(memory); db.commit()
+        LivingMemoryService._clear_embedding(memory)
+        from app.services.timeline import TimelineService
+        TimelineService(db).reconcile_memory(memory.legacy_id, memory.id, actor_id=user_id)
+        db.commit()
 
     @staticmethod
     def lock_canonical_legacy(db: Session, legacy_id: int) -> None:

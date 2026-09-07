@@ -43,7 +43,7 @@ class FakeRealtimeProvider:
         calls = [dict(type="function_call", call_id=name + "_" + generation_id, name=name,
                       arguments=json.dumps({"query": minimize_search_query(brain.prepared.actor.content)}
                                            if name == "get_current_information" else {"query": brain.prepared.actor.content}
-                                           if name == "retrieve_legacy_memories" else {})) for name in sorted(brain.required_tools)]
+                                           if name in {"retrieve_legacy_memories", "retrieve_legacy_timeline"} else {})) for name in sorted(brain.required_tools)]
         self.emit("response_done", {"response": {"id": identity, "metadata": metadata, "status": "completed", "output": calls}})
 
     async def create_response(self, prepared, generation_id, *, turn_id=None, session_id=None, continuation=()):

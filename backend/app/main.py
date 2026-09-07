@@ -14,6 +14,7 @@ from app.api.routes.voice import router as voice_router
 from app.api.routes.realtime import router as realtime_router
 from app.api.routes.media_sources import router as media_sources_router
 from app.api.routes.media_review import router as media_review_router
+from app.api.routes.timeline import router as timeline_router
 from app.config import get_settings
 from app.services.realtime_runtime import lifespan
 
@@ -45,6 +46,7 @@ app.include_router(voice_router, prefix="/api/v1")
 app.include_router(realtime_router, prefix="/api/v1")
 app.include_router(media_sources_router, prefix="/api/v1")
 app.include_router(media_review_router, prefix="/api/v1")
+app.include_router(timeline_router, prefix="/api/v1")
 
 
 @app.get("/health")

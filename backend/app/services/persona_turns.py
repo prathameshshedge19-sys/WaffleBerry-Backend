@@ -18,6 +18,7 @@ from app.services.memory import LivingMemoryService, MemoryProvider, MemoryProvi
 from app.services.personality_style import select_personality_style
 from app.services.rya import ChatTurn
 from app.services.visitor_identity import current_language, visitor_evidence
+from app.services.timeline import TimelineService, serialize_event
 from app.services.web_search import WebSearchError, WebSearchProvider, WebSearchResult, web_grounding
 
 logger = logging.getLogger("app.api.routes.legacy_conversations")
@@ -53,9 +54,13 @@ async def prepare_persona_turn(db: Session, actor: TurnActorContext, conversatio
     visitor["current_turn_language"] = current_language(content)
     with obs.stage("personality_selection"):
         style = select_personality_style(db, legacy, content, memories, visitor, recent, history_order="newest_first")
+    timeline_context = []
+    if route.needs_memory:
+        with obs.stage("timeline_retrieval"):
+            timeline_context = [serialize_event(db, event) for event in TimelineService(db).retrieve(legacy.id, content, 8)]
     obs.metadata(personality_status="available" if style is not None else "fallback")
     if style is None: obs.degraded("personality_unavailable")
-    turns = [ChatTurn(role="system", content=persona_system_context(legacy, memories, route, active_memories, visitor, personality_style=style))]
+    turns = [ChatTurn(role="system", content=persona_system_context(legacy, memories, route, active_memories, visitor, personality_style=style, timeline_context=timeline_context))]
     turns.extend(ChatTurn(role=message.role.value, content=message.content) for message in reversed(recent))
     guard = nickname_cadence_guard(visitor, turns)
     if guard:

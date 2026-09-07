@@ -89,6 +89,7 @@ class MemoryRevision(Base):
 class MemoryEntity(Base):
     __tablename__ = "memory_entities"
     __table_args__ = (
+        UniqueConstraint("legacy_id", "id", name="uq_memory_entities_legacy_id_id"),
         UniqueConstraint("legacy_id", "normalized_name", name="uq_memory_entities_legacy_name"),
         Index("ix_memory_entities_legacy_type", "legacy_id", "entity_type"),
     )
