@@ -216,14 +216,25 @@ class MediaSourceService:
         source = _load_source(db, source_id, legacy_id); _authorize(db, source, user.id); return source
 
     def delete(self, db: Session, user: User, legacy_id: int, source_id: str) -> MediaSource:
+        from app.models.media_intelligence import CandidateReviewState, MemorySourceLink, SourceEvidence, SourceMemoryCandidate, SupportState
+        db.scalar(select(Legacy).where(Legacy.id == legacy_id).with_for_update())
         source = _load_source(db, source_id, legacy_id, lock=True); _authorize(db, source, user.id, owner_only=True)
         if source.state in {SourceState.DELETING.value, SourceState.DELETED.value}: return source
         now = utcnow(); source.generation += 1; source.state = SourceState.DELETING.value; source.deleted_at = now; source.deleted_by_user_id = user.id
         db.execute(update(MediaProcessingJob).where(MediaProcessingJob.source_id == source.id, MediaProcessingJob.state.in_(("queued", "running", "retry_wait"))).values(state="cancelled", lease_token=None, lease_expires_at=None, finished_at=now, last_error_code="source_deleted"))
+        db.execute(update(SourceMemoryCandidate).where(SourceMemoryCandidate.legacy_id == source.legacy_id, SourceMemoryCandidate.source_id == source.id, SourceMemoryCandidate.review_state == CandidateReviewState.PENDING.value).values(review_state=CandidateReviewState.CANCELLED.value, removed_at=now, proposal_json={}, review_draft_json=None))
+        # Preserve terminal receipts, but erase private proposal/draft content
+        # for skipped and approved candidates as well as pending candidates.
+        db.execute(update(SourceMemoryCandidate).where(SourceMemoryCandidate.legacy_id == source.legacy_id, SourceMemoryCandidate.source_id == source.id).values(removed_at=now, proposal_json={}, review_draft_json=None))
+        db.execute(update(SourceEvidence).where(SourceEvidence.legacy_id == source.legacy_id, SourceEvidence.source_id == source.id, SourceEvidence.removed_at.is_(None)).values(text=None, locator_json={"kind": "removed"}, origin_json={}, removed_at=now))
+        db.execute(update(MemorySourceLink).where(MemorySourceLink.legacy_id == source.legacy_id, MemorySourceLink.source_id == source.id, MemorySourceLink.support_state == SupportState.APPROVED.value).values(support_state=SupportState.UNAVAILABLE.value, removed_at=now))
+        from app.services.personality_invalidation import invalidate_in_transaction
+        invalidate_in_transaction(db.connection(), [source.legacy_id])
         db.add(MediaProcessingJob(id=str(uuid4()), legacy_id=legacy_id, source_id=source.id, generation=source.generation, kind=ProcessingJobKind.PURGE.value, pipeline_version=PIPELINE_VERSION, state=ProcessingJobState.QUEUED.value, stage="awaiting_purge", checkpoint_json={}))
         db.commit(); db.refresh(source); return source
 
     def retry(self, db: Session, user: User, legacy_id: int, source_id: str) -> MediaSource:
+        db.scalar(select(Legacy).where(Legacy.id == legacy_id).with_for_update())
         source = _load_source(db, source_id, legacy_id, lock=True); _authorize(db, source, user.id, owner_only=True)
         if source.state not in {SourceState.FAILED.value, SourceState.PARTIALLY_READY.value}: raise HTTPException(409, detail={"code": "source_not_retryable", "message": "This source is not ready for retry."})
         job = db.scalar(select(MediaProcessingJob).where(MediaProcessingJob.source_id == source.id, MediaProcessingJob.generation == source.generation, MediaProcessingJob.kind == ProcessingJobKind.EXTRACT.value).with_for_update())

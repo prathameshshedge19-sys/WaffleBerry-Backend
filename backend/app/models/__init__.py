@@ -23,3 +23,7 @@ from app.models.media_source import (
     ProcessingJobKind, ProcessingJobState, SourceKind, SourceSafetyState,
     SourceState,
 )  # noqa: F401
+from app.models.media_intelligence import (  # noqa: F401
+    CandidateReviewAction, CandidateReviewState, MemorySourceLink, SourceCandidateEvidence,
+    SourceEvidence, SourceMemoryCandidate, SupportState, EvidenceKind,
+)

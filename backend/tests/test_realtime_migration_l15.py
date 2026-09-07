@@ -23,7 +23,7 @@ def test_0016_fresh_upgrade_downgrade_reupgrade_preserves_history(tmp_path, exis
         with engine.connect() as c:
             before = snapshot(c)
     alembic(path, "upgrade", "head")
-    assert "0017_media_sources (head)" in alembic(path, "current")
+    assert "0018_media_intelligence (head)" in alembic(path, "current")
     with engine.connect() as c:
         assert c.exec_driver_sql("PRAGMA foreign_key_check").fetchall() == []
         assert c.exec_driver_sql("SELECT count(*) FROM realtime_sessions").scalar() == 0
@@ -39,7 +39,7 @@ def test_0016_fresh_upgrade_downgrade_reupgrade_preserves_history(tmp_path, exis
 
 def snapshot(connection):
     return {name: connection.exec_driver_sql('SELECT * FROM "'+name+'"').fetchall()
-            for name in sa.inspect(connection).get_table_names() if name not in {"alembic_version", "realtime_sessions", "media_sources", "media_artifacts", "media_processing_jobs"}}
+            for name in sa.inspect(connection).get_table_names() if name not in {"alembic_version", "realtime_sessions", "media_sources", "media_artifacts", "media_processing_jobs", "source_evidence", "source_memory_candidates", "source_candidate_evidence", "memory_source_links"}}
 
 
 def test_postgresql_migration_ddl():

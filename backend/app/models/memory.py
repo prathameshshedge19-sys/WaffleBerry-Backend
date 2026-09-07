@@ -26,6 +26,7 @@ class MemoryOperation(str, enum.Enum):
 class Memory(Base):
     __tablename__ = "memories"
     __table_args__ = (
+        UniqueConstraint("legacy_id", "id", name="uq_memories_legacy_id_id"),
         CheckConstraint("length(trim(canonical_text)) > 0", name="ck_memories_canonical_text_not_blank"),
         CheckConstraint("confidence >= 0 AND confidence <= 1", name="ck_memories_confidence_range"),
         CheckConstraint("status IN ('active', 'superseded', 'deleted')", name="ck_memories_status"),

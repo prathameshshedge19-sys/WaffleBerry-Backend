@@ -3,12 +3,13 @@
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import os
+import subprocess
+import sys
 import threading
 from uuid import uuid4
 
 import pytest
-from alembic import command
-from alembic.config import Config
+from fastapi import HTTPException
 from sqlalchemy import func, select, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError
@@ -36,13 +37,13 @@ def pg(tmp_path_factory):
     os.environ.update({"DATABASE_URL": url, "LEGARYA_DEBUG": "true", "JWT_SECRET_KEY": "test-only-secret-with-sufficient-length-123456", "MEDIA_ENABLED": "true", "MEDIA_LOCAL_STORAGE_PATH": str(tmp_path_factory.mktemp("media-objects"))})
     get_settings.cache_clear()
 
-    config = Config(str(Path(__file__).parents[1] / "alembic.ini"))
-    command.upgrade(config, "head")
+    # Alembic configures logging globally; isolate it from the pytest process.
+    subprocess.run([sys.executable, "-m", "alembic", "upgrade", "head"], cwd=Path(__file__).parents[1], check=True)
     engine = build_engine(url)
     with engine.begin() as db:
         assert db.execute(text("SELECT current_database()")).scalar_one() == parsed.database
         assert db.execute(text("SELECT version()")).scalar_one().startswith("PostgreSQL ")
-        assert db.execute(text("SELECT version_num FROM public.alembic_version")).scalar_one() == "0017_media_sources"
+        assert db.execute(text("SELECT version_num FROM public.alembic_version")).scalar_one() == "0018_media_intelligence"
         tables = set(db.execute(text("SELECT table_name FROM information_schema.tables WHERE table_schema='public' AND table_name LIKE 'media_%'")).scalars())
         assert tables == {"media_sources", "media_artifacts", "media_processing_jobs"}
         constraints = set(db.execute(text("SELECT constraint_name FROM information_schema.table_constraints WHERE table_schema='public' AND table_name LIKE 'media_%'")).scalars())
@@ -96,8 +97,9 @@ def _race(factory, operation):
             barrier.wait(timeout=10)
             try:
                 return operation(db, index)
-            except Exception as exc:  # preserve the result for the assertion below
+            except HTTPException as exc:
                 db.rollback()
+                assert exc.status_code in {409, 410}, exc
                 return type(exc).__name__
 
     with ThreadPoolExecutor(max_workers=2) as pool:

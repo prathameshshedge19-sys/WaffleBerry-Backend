@@ -329,6 +329,7 @@ class LivingMemoryService:
         if len(vectors) != len(embeddable): raise MemoryProviderError("memory_embedding_count_mismatch")
         vector_by_id = {id(candidate): vector for candidate, vector in zip(embeddable, vectors)}
         changed: list[Memory] = []
+        self.lock_canonical_legacy(db, legacy.id)
         active = self.active_memories(db, legacy.id)
 
         for candidate in candidates:
@@ -402,10 +403,14 @@ class LivingMemoryService:
         if fingerprint == memory.normalized_fingerprint and (category is None or category == memory.category):
             memory.was_changed = False
             return memory
-        duplicate = db.scalar(select(Memory).where(Memory.legacy_id == legacy.id, Memory.status == MemoryStatus.ACTIVE, Memory.id != memory.id, Memory.normalized_fingerprint == fingerprint))
-        if duplicate: raise ValueError("duplicate_memory")
         vectors = await self.provider.embed([normalized.canonical_text])
         if len(vectors) != 1: raise MemoryProviderError("memory_embedding_count_mismatch")
+        self.lock_canonical_legacy(db, legacy.id)
+        db.refresh(memory)
+        if memory.status != MemoryStatus.ACTIVE.value:
+            raise ValueError("memory_not_active")
+        duplicate = db.scalar(select(Memory).where(Memory.legacy_id == legacy.id, Memory.status == MemoryStatus.ACTIVE, Memory.id != memory.id, Memory.normalized_fingerprint == fingerprint))
+        if duplicate: raise ValueError("duplicate_memory")
         self._record_revision(db, memory, memory.canonical_text, normalized.canonical_text, MemoryOperation.EDIT.value, "dashboard", user_id)
         memory.canonical_text = normalized.canonical_text; memory.normalized_fingerprint = fingerprint
         memory.category = category or memory.category; memory.source_language = normalized.source_language
@@ -416,14 +421,34 @@ class LivingMemoryService:
 
     @staticmethod
     def delete_memory(db: Session, memory: Memory, user_id: int) -> None:
+        LivingMemoryService.lock_canonical_legacy(db, memory.legacy_id)
+        db.refresh(memory)
         LivingMemoryService._record_revision(db, memory, memory.canonical_text, None, MemoryOperation.DELETE.value, "dashboard", user_id)
         memory.status = MemoryStatus.DELETED.value; memory.operation_type = MemoryOperation.DELETE.value
         memory.last_contributor_user_id = user_id
         LivingMemoryService._clear_embedding(memory); db.commit()
 
-    def _new_memory(self, legacy, conversation, source_message, source_text, analysis, candidate, vector, operation, explicit):
-        contributor_id = conversation.user_id
-        memory = Memory(legacy_id=legacy.id, canonical_text=candidate.canonical_text, category=candidate.category, subject_reference=legacy.subject_name, source_conversation_id=conversation.id, source_message_id=source_message.id, contributor_user_id=contributor_id, last_contributor_user_id=contributor_id, source_language=analysis.source_language if analysis else "english", source_excerpt=source_text.strip()[:2000], confidence=candidate.confidence, status=MemoryStatus.ACTIVE.value, operation_type=operation.value, explicit_save=explicit or operation == MemoryOperation.EXPLICIT_SAVE, normalized_fingerprint=_fingerprint(candidate.canonical_text), story_key=candidate.story_key)
+    @staticmethod
+    def lock_canonical_legacy(db: Session, legacy_id: int) -> None:
+        """Serialize canonical writers with reviewed-source promotion."""
+        db.scalar(select(Legacy).where(Legacy.id == legacy_id).with_for_update())
+
+    def preserve_reviewed_source(self, db: Session, legacy: Legacy, candidate: MemoryCandidate, *, source_language: str, user_id: int, vector: list[float]) -> tuple[Memory, str]:
+        """Caller owns authorization, review receipt, provenance and transaction."""
+        self.lock_canonical_legacy(db, legacy.id)
+        existing = db.scalar(select(Memory).where(Memory.legacy_id == legacy.id, Memory.status == MemoryStatus.ACTIVE.value, Memory.normalized_fingerprint == _fingerprint(candidate.canonical_text)).with_for_update().execution_options(populate_existing=True))
+        if existing is not None:
+            return existing, "linked_existing"
+        analysis = MemoryAnalysis(source_language=source_language, normalized_query=candidate.canonical_text)
+        memory = self._new_memory(legacy, None, None, "", analysis, candidate, vector, MemoryOperation.EXPLICIT_SAVE, True, contributor_id=user_id)
+        db.add(memory)
+        db.flush()
+        self._sync_entities(db, legacy, memory, candidate.entities)
+        return memory, "created"
+
+    def _new_memory(self, legacy, conversation, source_message, source_text, analysis, candidate, vector, operation, explicit, *, contributor_id=None):
+        contributor_id = conversation.user_id if conversation is not None else contributor_id
+        memory = Memory(legacy_id=legacy.id, canonical_text=candidate.canonical_text, category=candidate.category, subject_reference=legacy.subject_name, source_conversation_id=conversation.id if conversation is not None else None, source_message_id=source_message.id if source_message is not None else None, contributor_user_id=contributor_id, last_contributor_user_id=contributor_id, source_language=analysis.source_language if analysis else "english", source_excerpt=source_text.strip()[:2000], confidence=candidate.confidence, status=MemoryStatus.ACTIVE.value, operation_type=operation.value, explicit_save=explicit or operation == MemoryOperation.EXPLICIT_SAVE, normalized_fingerprint=_fingerprint(candidate.canonical_text), story_key=candidate.story_key)
         self._set_embedding(memory, vector); return memory if not (memory_db := getattr(conversation, "_sa_instance_state", None)) else self._attach(memory, conversation)
 
     @staticmethod

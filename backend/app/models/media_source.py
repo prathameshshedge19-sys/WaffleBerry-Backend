@@ -130,6 +130,7 @@ class MediaSource(Base):
 class MediaArtifact(Base):
     __tablename__ = "media_artifacts"
     __table_args__ = (
+        UniqueConstraint("legacy_id", "source_id", "generation", "id", name="uq_media_artifacts_identity_scope"),
         UniqueConstraint("legacy_id", "source_id", "generation", "logical_key", name="uq_media_artifacts_source_logical"),
         UniqueConstraint("storage_backend", "object_key", name="uq_media_artifacts_storage_key"),
         CheckConstraint("state IN ('reserved','available','purge_pending','purged')", name="ck_media_artifacts_state"),
@@ -161,6 +162,7 @@ class MediaArtifact(Base):
 class MediaProcessingJob(Base):
     __tablename__ = "media_processing_jobs"
     __table_args__ = (
+        UniqueConstraint("legacy_id", "source_id", "generation", "id", name="uq_media_jobs_identity_scope"),
         UniqueConstraint("source_id", "generation", "kind", "pipeline_version", name="uq_media_jobs_source_generation_kind_pipeline"),
         CheckConstraint("attempts >= 0", name="ck_media_jobs_attempts"),
         CheckConstraint("state IN ('queued','running','retry_wait','succeeded','partial','failed','cancelled')", name="ck_media_jobs_state"),

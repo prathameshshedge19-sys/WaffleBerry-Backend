@@ -47,6 +47,7 @@ async def edit_memory(payload: MemoryUpdate, memory_id: int, legacy_id: int = Qu
     except ValueError as exc:
         db.rollback()
         if str(exc) == "duplicate_memory": raise HTTPException(status_code=409, detail="An equivalent active memory already exists.") from None
+        if str(exc) == "memory_not_active": raise HTTPException(status_code=409, detail="This memory changed while the edit was being prepared.") from None
         raise
     except MemoryProviderError as exc:
         db.rollback(); raise HTTPException(status_code=503, detail={"code": exc.kind, "message": "Memory could not be updated right now."}) from None

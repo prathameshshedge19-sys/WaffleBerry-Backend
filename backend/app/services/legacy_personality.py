@@ -9,7 +9,7 @@ from hashlib import sha256
 import json
 import re
 
-from sqlalchemy import select
+from sqlalchemy import exists, or_, select
 
 from app.models.legacy import Legacy
 from app.models.memory import Memory, MemoryEntity, MemoryEntityLink
@@ -77,14 +77,18 @@ def load_evidence(db, legacy_id):
     legacy = db.get(Legacy, legacy_id)
     if legacy is None:
         return ()
-    memories = db.scalars(select(Memory).where(Memory.legacy_id == legacy_id, Memory.status == "active").order_by(Memory.id).limit(MAX_MEMORIES + 1)).all()
+    from app.models.media_intelligence import MemorySourceLink, SupportState
+    source_link = exists(select(MemorySourceLink.id).where(MemorySourceLink.memory_id == Memory.id, MemorySourceLink.legacy_id == legacy_id))
+    approved_source_link = exists(select(MemorySourceLink.id).where(MemorySourceLink.memory_id == Memory.id, MemorySourceLink.legacy_id == legacy_id, MemorySourceLink.support_state == SupportState.APPROVED.value, MemorySourceLink.removed_at.is_(None)))
+    usable = or_(~source_link, approved_source_link)
+    memories = db.scalars(select(Memory).where(Memory.legacy_id == legacy_id, Memory.status == "active", usable).order_by(Memory.id).limit(MAX_MEMORIES + 1)).all()
     if len(memories) > MAX_MEMORIES:
         raise ValueError("Personality evidence budget exceeded")
     entity_rows = db.execute(
         select(MemoryEntityLink.memory_id, MemoryEntity.id, MemoryEntity.name, MemoryEntityLink.role)
         .join(MemoryEntity, MemoryEntity.id == MemoryEntityLink.entity_id)
         .join(Memory, Memory.id == MemoryEntityLink.memory_id)
-        .where(Memory.legacy_id == legacy_id, MemoryEntity.legacy_id == legacy_id, Memory.status == "active")
+        .where(Memory.legacy_id == legacy_id, MemoryEntity.legacy_id == legacy_id, Memory.status == "active", usable)
         .order_by(MemoryEntity.id)
     ).all()
     entities = {}

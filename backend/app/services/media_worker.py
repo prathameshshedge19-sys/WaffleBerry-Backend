@@ -4,6 +4,7 @@ Extraction is intentionally fenced and reported as deferred until Phase C adds
 deterministic parsers and intelligence. No worker path imports canonical memory.
 """
 
+import asyncio
 from datetime import timedelta
 from uuid import uuid4
 
@@ -109,3 +110,29 @@ class MediaWorker:
             job.state = ProcessingJobState.SUCCEEDED.value; job.stage = "purged"; job.finished_at = now; job.lease_token = job.lease_expires_at = None
             source.state = SourceState.DELETED.value; source.purged_at = now; source.processing_finished_at = source.processing_finished_at or now
             return "purged"
+
+
+class MediaIntelligenceWorker(MediaWorker):
+    """Phase C worker facade; extraction remains separate from chat/realtime."""
+
+    def __init__(self, sessions=SessionLocal, storage: SourceStorage | None = None, *, provider=None, transcriber=None, lease_seconds: int = 120):
+        super().__init__(sessions=sessions, storage=storage, lease_seconds=lease_seconds)
+        if provider is None:
+            from app.services.media_intelligence import get_source_analysis_provider
+            provider = get_source_analysis_provider()
+        from app.services.media_intelligence import MediaIntelligenceService
+        self.intelligence = MediaIntelligenceService(provider, storage=self.storage, transcriber=transcriber)
+
+    def run_once(self):
+        claim = self.claim()
+        if claim is None:
+            return "idle"
+        job_id, token = claim
+        with self.sessions() as db:
+            job = db.get(MediaProcessingJob, job_id)
+            if job is None or job.lease_token != token:
+                return "stale"
+            kind = job.kind
+        if kind == ProcessingJobKind.PURGE.value:
+            return self._purge(job_id, token)
+        return asyncio.run(self.intelligence.process_claim(self.sessions, job_id, token))
