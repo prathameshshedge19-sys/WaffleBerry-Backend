@@ -136,3 +136,36 @@ class MediaIntelligenceWorker(MediaWorker):
         if kind == ProcessingJobKind.PURGE.value:
             return self._purge(job_id, token)
         return asyncio.run(self.intelligence.process_claim(self.sessions, job_id, token))
+
+
+def main():
+    """Separate durable worker entry point; never started by a web request."""
+    import argparse
+    import json
+    import time
+    from app.config import get_settings
+    parser = argparse.ArgumentParser(description="Process private L16 sources and pending erasure")
+    parser.add_argument("--once", action="store_true")
+    parser.add_argument("--poll-seconds", type=float, default=5)
+    args = parser.parse_args()
+    if args.poll_seconds < 1:
+        parser.error("poll-seconds must be at least 1")
+    if not get_settings().media_enabled:
+        parser.error("Media processing is disabled")
+    worker = MediaIntelligenceWorker()
+    while True:
+        started = time.monotonic()
+        try:
+            outcome = worker.run_once()
+        except Exception:
+            # Never emit parser/provider/storage exception bodies or contents.
+            outcome = "worker_unavailable"
+        print(json.dumps({"event": "media_worker_cycle", "outcome": outcome, "duration_ms": round((time.monotonic() - started) * 1000)}), flush=True)
+        if args.once:
+            return
+        if outcome in {"idle", "worker_unavailable", "failed", "retry_wait"}:
+            time.sleep(args.poll_seconds)
+
+
+if __name__ == "__main__":
+    main()

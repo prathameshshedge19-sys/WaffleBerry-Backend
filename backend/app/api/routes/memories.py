@@ -10,6 +10,7 @@ from app.schemas.memory import MemoryResponse, MemoryRevisionResponse, MemoryUpd
 from app.services.authorization import legacy_role, require_legacy
 from app.services.memory import LivingMemoryService, MemoryProvider, MemoryProviderError, get_memory_provider, serialize_memory
 from app.services.progression import local_date, record_builder_activity
+from app.services.media_provenance import memory_provenance
 
 
 router = APIRouter(prefix="/memories", tags=["Living memory"])
@@ -26,16 +27,19 @@ def _accessible_memory(db: Session, memory_id: int, legacy_id: int, user_id: int
 
 @router.get("", response_model=list[MemoryResponse])
 def list_memories(legacy_id: int = Query(..., ge=1), include_inactive: bool = False, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    require_legacy(db, user.id, legacy_id)
+    legacy = require_legacy(db, user.id, legacy_id)
     query = select(Memory).options(selectinload(Memory.entity_links).selectinload(MemoryEntityLink.entity), joinedload(Memory.contributor), joinedload(Memory.last_contributor)).execution_options(populate_existing=True).where(Memory.legacy_id == legacy_id)
     if not include_inactive: query = query.where(Memory.status == MemoryStatus.ACTIVE)
     memories = db.scalars(query.order_by(Memory.category, Memory.created_at.desc(), Memory.id.desc())).all()
-    return [serialize_memory(memory) for memory in memories]
+    provenance = memory_provenance(db, legacy, user.id, [memory.id for memory in memories])
+    return [{**serialize_memory(memory), "source_provenance": provenance[memory.id]} for memory in memories]
 
 
 @router.get("/{memory_id}", response_model=MemoryResponse)
 def get_memory(memory_id: int, legacy_id: int = Query(..., ge=1), user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    return serialize_memory(_accessible_memory(db, memory_id, legacy_id, user.id))
+    memory = _accessible_memory(db, memory_id, legacy_id, user.id)
+    legacy = require_legacy(db, user.id, legacy_id)
+    return {**serialize_memory(memory), "source_provenance": memory_provenance(db, legacy, user.id, [memory.id])[memory.id]}
 
 
 @router.patch("/{memory_id}", response_model=MemoryResponse)

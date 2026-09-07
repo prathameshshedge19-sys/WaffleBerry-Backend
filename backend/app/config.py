@@ -65,7 +65,7 @@ class Settings(BaseSettings):
     media_max_audio_bytes: int = Field(default=100 * 1024 * 1024, ge=1024, le=500 * 1024 * 1024)
     media_max_video_bytes: int = Field(default=100 * 1024 * 1024, ge=1024, le=500 * 1024 * 1024)
     media_upload_expire_seconds: int = Field(default=3600, ge=300, le=86400)
-    media_intelligence_model: str = "gpt-5.6-mini"
+    media_intelligence_model: str = "gpt-5.5"
 
     # L15 Phase B is opt-in infrastructure, with no product audio endpoint.
     realtime_enabled: bool = False

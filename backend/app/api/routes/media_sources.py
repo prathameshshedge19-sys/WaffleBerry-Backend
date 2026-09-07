@@ -1,6 +1,7 @@
 from collections.abc import Iterator
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from urllib.parse import quote
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -13,9 +14,15 @@ from app.models.user import User
 from app.schemas.media_source import SourceCreate, SourceResponse
 from app.services.media_sources import MediaSourceService, serialize_source
 from app.services.media_storage import StorageError
+from app.services.authorization import require_legacy, legacy_role
+from app.services.media_sources import max_bytes
 
 
-router = APIRouter(prefix="/legacies/{legacy_id}/sources", tags=["Media & Sources"])
+def _private(response: Response):
+    response.headers["Cache-Control"] = "private, no-store"
+
+
+router = APIRouter(prefix="/legacies/{legacy_id}/sources", tags=["Media & Sources"], dependencies=[Depends(_private)])
 
 
 def _enabled() -> None:
@@ -25,7 +32,23 @@ def _enabled() -> None:
 
 def _with_job(db: Session, source):
     job = db.scalar(select(MediaProcessingJob).where(MediaProcessingJob.source_id == source.id, MediaProcessingJob.generation == source.generation).order_by(MediaProcessingJob.created_at.desc()))
-    return serialize_source(source, job)
+    result = serialize_source(source, job)
+    uploader = db.get(User, source.uploader_user_id) if source.uploader_user_id else None
+    result["uploader_name"] = uploader.full_name if uploader else None
+    return result
+
+
+@router.get("/capabilities")
+def source_capabilities(legacy_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    legacy = require_legacy(db, user.id, legacy_id)
+    settings = get_settings()
+    active = legacy.setup_status == "active"
+    return {"enabled": settings.media_enabled and active, "can_review": legacy_role(db, user.id, legacy) == "owner",
+            "formats": [{"kind": kind, "mime_type": mime, "extensions": extensions, "max_bytes": max_bytes(kind, settings)}
+                        for kind, mime, extensions in [("document", "text/plain", [".txt"]), ("document", "application/pdf", [".pdf"]),
+                            ("image", "image/jpeg", [".jpg", ".jpeg"]), ("image", "image/png", [".png"]), ("image", "image/webp", [".webp"])]],
+            "audio_video_intelligence": False, "scanned_pdf_intelligence": False,
+            "coverage_note": "Document review covers up to 32 text sections. Scanned PDFs and audio/video transcription are not available."}
 
 
 @router.post("", response_model=SourceResponse, status_code=status.HTTP_201_CREATED)
@@ -41,7 +64,12 @@ def create_source(legacy_id: int, payload: SourceCreate, user: User = Depends(ge
 async def receive_source(legacy_id: int, source_id: str, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     _enabled()
     settings = get_settings()
-    limit = max(settings.media_max_photo_bytes, settings.media_max_document_bytes, settings.media_max_audio_bytes, settings.media_max_video_bytes)
+    source = MediaSourceService().get(db, user, legacy_id, source_id)
+    limit = min(source.declared_size_bytes, max_bytes(source.kind, settings))
+    # End the read-only preflight transaction before waiting for network I/O.
+    # Expire its identity map so receive() locks and checks current source state
+    # if deletion or another upload commits while the body is arriving.
+    db.rollback()
     body = bytearray()
     async for chunk in request.stream():
         body.extend(chunk)
@@ -63,6 +91,19 @@ def get_source(legacy_id: int, source_id: str, user: User = Depends(get_current_
     _enabled()
     source = MediaSourceService().get(db, user, legacy_id, source_id)
     return _with_job(db, source)
+
+
+@router.get("/{source_id}/evidence")
+def source_evidence(legacy_id: int, source_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    _enabled()
+    source = MediaSourceService().get(db, user, legacy_id, source_id)
+    if source.state in {"deleting", "deleted"}:
+        raise HTTPException(410, detail="Original source no longer available.")
+    from app.models.media_intelligence import SourceEvidence
+    rows = db.scalars(select(SourceEvidence).where(SourceEvidence.legacy_id == legacy_id, SourceEvidence.source_id == source_id,
+        SourceEvidence.removed_at.is_(None)).order_by(SourceEvidence.created_at, SourceEvidence.id).limit(200)).all()
+    return [{"id": row.id, "kind": row.kind, "text": row.text, "locator": row.locator_json,
+             "language": row.language, "confidence": row.confidence, "origin": row.origin_json} for row in rows]
 
 
 def _stream(handle) -> Iterator[bytes]:
@@ -90,9 +131,8 @@ def read_source(legacy_id: int, source_id: str, user: User = Depends(get_current
         handle = service.storage.open(artifact.object_key)
     except StorageError:
         raise HTTPException(503, detail={"code": "storage_unavailable", "message": "Source content is temporarily unavailable."}) from None
-    filename = source.original_filename.replace('"', "")
     return StreamingResponse(_stream(handle), media_type=source.detected_mime_type or source.declared_mime_type,
-                                    headers={"Content-Disposition": f'attachment; filename="{filename}"',
+                                    headers={"Content-Disposition": f"attachment; filename=source; filename*=UTF-8''{quote(source.original_filename, safe='')}",
                                              "X-Content-Type-Options": "nosniff", "Cache-Control": "private, no-store"})
 
 

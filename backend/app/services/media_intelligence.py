@@ -128,7 +128,7 @@ class OpenAISourceAnalysisProvider:
         if not self.settings.openai_api_key:
             raise SourceProviderError("source_provider_configuration")
         self.model = self.settings.media_intelligence_model
-        self.client = AsyncOpenAI(api_key=self.settings.openai_api_key)
+        self.client = AsyncOpenAI(api_key=self.settings.openai_api_key, timeout=60, max_retries=0)
 
     async def analyze(self, legacy: Legacy, source_kind: str, evidence: Sequence[SourceEvidenceInput]) -> SourceAnalysis:
         payload = [{"index": index, "kind": item.kind, "text": item.text, "locator": item.locator, "language": item.language} for index, item in enumerate(evidence)]
@@ -143,6 +143,7 @@ class OpenAISourceAnalysisProvider:
         try:
             response = await self.client.responses.create(
                 model=self.model, instructions=instructions, input="Analyze the supplied source data.", store=False,
+                reasoning={"effort": "low"}, max_output_tokens=4096,
                 text={"format": {"type": "json_schema", "name": "legarya_source_analysis", "strict": True, "schema": _analysis_schema()}},
             )
             return SourceAnalysis.model_validate_json(response.output_text)
@@ -160,7 +161,7 @@ class OpenAISourceAnalysisProvider:
         import base64
         content = [{"type": "input_text", "text": instructions}, {"type": "input_image", "image_url": f"data:{mime_type};base64,{base64.b64encode(image).decode()}"}]
         try:
-            response = await self.client.responses.create(model=self.model, instructions="Follow the data boundary exactly.", input=[{"role": "user", "content": content}], store=False, text={"format": {"type": "json_schema", "name": "legarya_image_analysis", "strict": True, "schema": _analysis_schema()}})
+            response = await self.client.responses.create(model=self.model, instructions="Follow the data boundary exactly.", input=[{"role": "user", "content": content}], store=False, reasoning={"effort": "low"}, max_output_tokens=4096, text={"format": {"type": "json_schema", "name": "legarya_image_analysis", "strict": True, "schema": _analysis_schema()}})
             return SourceAnalysis.model_validate_json(response.output_text)
         except Exception as exc:
             raise SourceProviderError("source_provider_invalid_response") from exc

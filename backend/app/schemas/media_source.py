@@ -29,6 +29,7 @@ class SourceResponse(BaseModel):
     id: str
     legacy_id: int
     uploader_user_id: int | None
+    uploader_name: str | None = None
     kind: str
     original_filename: str
     mime_type: str

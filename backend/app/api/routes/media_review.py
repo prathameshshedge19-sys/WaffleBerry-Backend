@@ -9,9 +9,10 @@ from app.models.user import User
 from app.schemas.media_intelligence import CandidateResponse, CandidateReviewRequest, ReviewDraftRequest
 from app.services.memory import MemoryProviderError, get_memory_provider
 from app.services.media_review import MediaReviewService, _owner_legacy
+from app.api.routes.media_sources import _private
 
 
-router = APIRouter(prefix="/media-review", tags=["Media source review"])
+router = APIRouter(prefix="/media-review", tags=["Media source review"], dependencies=[Depends(_private)])
 
 
 def _service() -> MediaReviewService:

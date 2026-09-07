@@ -1,0 +1,27 @@
+[Unit]
+Description=LegaRya private media processing worker
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=waffleberry
+Group=waffleberry
+WorkingDirectory=/home/waffleberry/WaffleBerry-Backend/backend
+EnvironmentFile=/home/waffleberry/WaffleBerry-Backend/backend/.env
+ExecStart=/home/waffleberry/WaffleBerry-Backend/backend/.venv/bin/python -m app.services.media_worker --poll-seconds 5
+Restart=always
+RestartSec=5
+TimeoutStopSec=90
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+UMask=0077
+MemoryMax=768M
+TasksMax=32
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

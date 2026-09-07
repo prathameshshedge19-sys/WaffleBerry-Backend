@@ -38,6 +38,7 @@ class MemoryResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
     entities: list[MemoryEntityResponse] = Field(default_factory=list)
+    source_provenance: list[dict] = Field(default_factory=list)
 
 
 class MemoryUpdate(BaseModel):
