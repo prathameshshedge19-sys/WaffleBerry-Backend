@@ -48,6 +48,24 @@ class Settings(BaseSettings):
     voice_max_recording_seconds: int = Field(default=300, ge=10, le=600)
     voice_max_tts_characters: int = Field(default=4096, ge=100, le=4096)
 
+    # L16 Media & Sources. Production must explicitly select an encrypted
+    # S3-compatible backend; local storage is only the debug/test adapter.
+    media_enabled: bool = False
+    media_storage_backend: Literal["local", "s3"] = "local"
+    media_local_storage_path: str = "./media-storage"
+    media_s3_endpoint_url: str | None = None
+    media_s3_bucket: str | None = None
+    media_s3_region: str | None = None
+    media_s3_access_key_id: str | None = None
+    media_s3_secret_access_key: str | None = None
+    media_s3_sse_customer_key: str | None = None
+    media_s3_sse_customer_key_id: str | None = None
+    media_max_photo_bytes: int = Field(default=20 * 1024 * 1024, ge=1024, le=100 * 1024 * 1024)
+    media_max_document_bytes: int = Field(default=50 * 1024 * 1024, ge=1024, le=200 * 1024 * 1024)
+    media_max_audio_bytes: int = Field(default=100 * 1024 * 1024, ge=1024, le=500 * 1024 * 1024)
+    media_max_video_bytes: int = Field(default=100 * 1024 * 1024, ge=1024, le=500 * 1024 * 1024)
+    media_upload_expire_seconds: int = Field(default=3600, ge=300, le=86400)
+
     # L15 Phase B is opt-in infrastructure, with no product audio endpoint.
     realtime_enabled: bool = False
     realtime_model: str = "gpt-realtime-2.1"
@@ -86,6 +104,13 @@ class Settings(BaseSettings):
     def validate_production_database(self):
         if not self.legarya_debug and self.database_url.lower().startswith("sqlite"):
             raise ValueError("Production requires an explicit PostgreSQL DATABASE_URL.")
+        if not self.legarya_debug and self.media_enabled:
+            if self.media_storage_backend != "s3":
+                raise ValueError("Production media requires an explicit S3-compatible storage backend.")
+            if not all((self.media_s3_endpoint_url, self.media_s3_bucket, self.media_s3_access_key_id,
+                        self.media_s3_secret_access_key, self.media_s3_sse_customer_key,
+                        self.media_s3_sse_customer_key_id)):
+                raise ValueError("Production media requires private S3 credentials and SSE-C configuration.")
         return self
 
 

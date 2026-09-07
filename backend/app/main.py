@@ -12,6 +12,7 @@ from app.api.routes.memories import router as memory_router
 from app.api.routes.progress import router as progress_router
 from app.api.routes.voice import router as voice_router
 from app.api.routes.realtime import router as realtime_router
+from app.api.routes.media_sources import router as media_sources_router
 from app.config import get_settings
 from app.services.realtime_runtime import lifespan
 
@@ -41,6 +42,7 @@ app.include_router(legacy_conversation_router, prefix="/api/v1")
 app.include_router(progress_router, prefix="/api/v1")
 app.include_router(voice_router, prefix="/api/v1")
 app.include_router(realtime_router, prefix="/api/v1")
+app.include_router(media_sources_router, prefix="/api/v1")
 
 
 @app.get("/health")
