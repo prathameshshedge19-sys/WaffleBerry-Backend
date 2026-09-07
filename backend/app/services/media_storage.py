@@ -7,6 +7,8 @@ secret is ever persisted in the database or returned by an API.
 
 from __future__ import annotations
 
+import base64
+import binascii
 from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO, Protocol
@@ -101,9 +103,17 @@ class S3SourceStorage:
             raise StorageError("storage_dependency") from None
         self.bucket = settings.media_s3_bucket
         self.encryption_key_id = settings.media_s3_sse_customer_key_id
+        customer_key = settings.media_s3_sse_customer_key
+        if customer_key.startswith("base64:"):
+            try:
+                customer_key = base64.b64decode(customer_key[7:], validate=True)
+            except (ValueError, binascii.Error):
+                raise StorageError("storage_encryption_configuration") from None
+            if len(customer_key) != 32:
+                raise StorageError("storage_encryption_configuration")
         self._sse = {
             "SSECustomerAlgorithm": "AES256",
-            "SSECustomerKey": settings.media_s3_sse_customer_key,
+            "SSECustomerKey": customer_key,
         }
         self.client = boto3.client(
             "s3", endpoint_url=settings.media_s3_endpoint_url,

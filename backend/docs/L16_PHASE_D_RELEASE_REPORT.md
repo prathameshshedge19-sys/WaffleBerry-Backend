@@ -1,8 +1,75 @@
 # L16 Phase D — Product integration and release readiness
 
-Status: **RELEASE BLOCKED — L16 is not complete.** Local implementation and automated acceptance are recorded below. No Phase D production deployment or milestone tag has occurred.
+Status: **STORAGE ACCEPTED; remaining production release gates pending.** Local implementation and automated acceptance are recorded below. No Phase D application deployment or milestone tag has occurred.
+
+Latest production release work: authoritative host/database verification and live private SSE-C storage acceptance passed. The protected production environment now contains the authorized storage settings; media remains disabled pending deployment. Manual browser UX acceptance is expressly waived as a release blocker.
 
 Validation date: 2026-09-07.
+
+## Protected storage configuration and live acceptance — 2026-09-07
+
+The user created private bucket `waffleberry-legarya-media-prod` in the existing **WaffleBerry** project, Helsinki **hel1**, and generated dedicated S3 credentials. The backend and personality worker currently load `/home/waffleberry/WaffleBerry-Backend/backend/.env`; the accepted media-worker unit uses that exact same file. Its owner/group are `waffleberry:waffleberry`, mode **0600**. The media unit is not installed yet.
+
+A root-only server helper at `/root/legarya-l16-secrets.py` prepared bucket/endpoint/region settings with `MEDIA_ENABLED=false`, generated 32 random bytes for SSE-C without printing them, and atomically wrote the protected environment while preserving ownership/mode. The user entered credentials directly through hidden terminal prompts; no values appeared in chat, command arguments, Git or helper output. The second invocation retained the existing SSE-C key. No service was restarted. This is an authorized production configuration change; the earlier no-mutation preflight below is historical.
+
+The environment key uses `base64:<encoded random bytes>`. A necessary narrow adapter fix decodes that explicit prefix to exactly 32 bytes before boto3's own request encoding, avoiding double encoding. Invalid prefixed encodings/lengths fail closed; existing unprefixed configurations retain their prior behavior. The example environment documents the format. Six new tests cover actual botocore header encoding, put/read/head use, malformed values and compatibility. No database, processing, authorization or promotion semantics changed.
+
+Live storage smoke ran on the authoritative production server against `https://hel1.your-objectstorage.com`, using a temporary isolated Python environment, one random synthetic object key and non-private fixture text. **9/9 checks passed**:
+
+- Bucket ACL grants no public/anonymous group access.
+- Anonymous bucket listing is denied.
+- Upload confirms SSE-C AES256.
+- Authenticated encrypted read returns exactly the synthetic payload.
+- Authenticated read without the SSE-C key is denied.
+- Authenticated read with a wrong 32-byte key is denied.
+- Anonymous read even with the correct SSE-C key is denied.
+- Anonymous read without the key is denied.
+- The synthetic object is deleted and a subsequent read returns 404.
+
+Only sanitized booleans/bucket/region were recorded in `backups/l16-phase-d/production-storage-result.json`; no secrets, signed URLs or source content were emitted. The cleanup journal was removed after confirmed deletion. The SSE-C key remains in the protected environment and must be retained securely for future reads.
+
+Validation after the adapter change: **58 focused tests passed**, then **821 backend tests passed, 37 skipped, 2 warnings** in 220.69 seconds. Evidence: `sse-focused.log`, `sse-backend-full.log`, `sse-backend-final.xml` under `backups/l16-phase-d/`. Skips are opt-in PostgreSQL suites; the earlier 23-test live L16 PostgreSQL acceptance remains applicable because this fix changes storage key decoding only.
+
+Production application revision, services and database remain unchanged at this checkpoint. Fresh backup, migration, worker installation, application/frontend deployment and production API acceptance remain outstanding. No L16 tag exists.
+
+## Historical production preflight before storage provisioning — 2026-09-07
+
+The user authorized production release/tagging after every automatable gate passes, and waived manual visual/browser/microphone UX as a blocker. No manual browser/product test was attempted or requested. Exact desktop/mobile layout, native file-picker interaction, keyboard/focus UX, microphone permission/capture, spoken L12/L15 interactions and subjective polish are recorded as **Not manually browser-verified in Phase D**. They are post-release observation items under the revised policy, not blockers.
+
+Authoritative production identity was re-established through strict-known-host SSH, provider machine metadata, repository/service configuration, database queries, DNS and public HTTPS:
+
+| Check | Observed result |
+| --- | --- |
+| Hetzner project | `WaffleBerry`, confirmed by the user's Hetzner Console observation; no alternate project is authorized. |
+| Hostname / metadata hostname | `WaffleBerry-server` / `WaffleBerry-server`. |
+| Public IPv4 / metadata | **89.167.14.211**. The incomplete old `167.14.211` text is not a release target. |
+| Instance / location | Instance `157705364`; `hel1-dc2`; network zone `eu-central`. |
+| Repository | `/home/waffleberry/WaffleBerry-Backend`; production Git status clean. |
+| Running production revision | `4e6d13cdf35edf0ece97036467181e284e846ba9`. |
+| Backend service | `waffleberry-backend.service`: loaded, active/running; working directory `/home/waffleberry/WaffleBerry-Backend/backend`. |
+| Personality worker | `waffleberry-personality-worker.service`: loaded, active/running; same application working directory. |
+| Active database | Configured database and `SELECT current_database()` both **legarya**. |
+| Current migration | **0016_realtime_sessions**, as required before L16. |
+| Public backend DNS | `89-167-14-211.sslip.io` resolves to **89.167.14.211**. |
+| Public health | HTTPS `/health`: 200, expected `legarya-backend` service identity. |
+| Existing frontend | `https://waffleberry.app/chat.html` redirects to `https://www.waffleberry.app/chat.html`, HTTP 200; new L16 media script not yet present. |
+
+The host is not ambiguous. The SSH probe used a per-command Git safe-directory exception because root was reading the existing service-user repository; no global Git configuration was changed.
+
+Object Storage target: **Helsinki `hel1`**, endpoint **https://hel1.your-objectstorage.com**, matching the confirmed backend city. This is the documented Object Storage location, not the server zone `hel1-dc2`. [Hetzner's official endpoint list](https://docs.hetzner.com/storage/object-storage/overview/) confirms Helsinki availability. Project-specific access/quota and actual bucket availability remain unverified without authenticated provisioning access. [Hetzner's S3 credential workflow](https://docs.hetzner.com/storage/object-storage/getting-started/generating-s3-keys/) generates credentials within the selected Console project. [Hetzner's SSE-C guidance](https://docs.hetzner.com/storage/object-storage/howto-protect-objects/encrypt-with-sse-c/) requires a securely retained 32-byte key and the same key for reads.
+
+Blocking evidence:
+
+- Production `MEDIA_ENABLED=false`; all seven media S3 endpoint/bucket/region/access-key/secret-key/SSE-C-key/key-ID settings remain absent.
+- No Hetzner/S3 provisioning credentials were found in the checked process/user/machine environment or standard local and server hcloud/S3/AWS configuration locations. No credential values were printed or copied into reports.
+- No applicable installed Hetzner connector/API tool was available. The fallback Console connection was checked solely for infrastructure provisioning: selection reported unavailable and discovery returned `[]`. No session/cookie/profile bypass or alternate account was used. This is lack of authenticated infrastructure access, not a manual UX gate.
+- Consequently no private bucket, scoped server credentials or SSE-C configuration was provisioned. The required encrypted upload / authorized read / anonymous denial / delete / deleted-object denial smoke could not run. Privacy/encryption is **unverified**, not passed.
+
+Release stopped before any production mutation. No fresh backup was made because migration is not imminent; a successful fresh, non-empty `legarya` backup with timestamp/path/size remains mandatory immediately before migration after storage is ready. No Alembic migration, backend restart/deploy, media unit installation, Vercel deploy, production test account/Legacy, review action, provider production smoke or cleanup mutation occurred. The media unit remains not installed (`not-found`, inactive). No new realtime/WSS/provider smoke is claimed. No L16 tag was created.
+
+Accepted local application SHAs remain backend **634a4a04129fd99dedc5d5b687e67aa4cb01d21d** and frontend **66a4162c03b6c86b88b06162b3c2b038dfa26658**. Their required ancestor commits are present. No intended application source changed since the recorded final tests, so regression was not redundantly rerun during this read-only preflight. Only this release report changed in the repositories. Known pre-existing realtime edits and the untracked Phase A document are still excluded. Current authoritative preflight evidence is outside Git at `backups/l16-phase-d/production-release-preflight.json`; the read-only probe script is beside it.
+
+Required next dependency: authenticated provisioning access to the **existing WaffleBerry project**, either through an available Console connection or that project's S3 credentials in the existing secure environment mechanism. Only a configuration location/connection label was requested; secrets must not be pasted into chat. The storage smoke and all remaining automatable production gates must then pass before deploy/tag. Production remains unchanged.
 
 Latest provider-only follow-up: the structured-output failure has been reproduced, diagnosed and corrected locally. Live PDF, synthetic PNG and injection processing now pass with zero canonical writes. Full follow-up regression and fix commit are recorded below. No browser acceptance was attempted in this follow-up; the user deferred browser/product acceptance to production later. Storage and production release acceptance remain outstanding.
 
@@ -101,7 +168,7 @@ Sanitized evidence outside Git: `provider-validation-diagnosis.json`, `provider-
 
 Fix checkpoint: the commit containing this follow-up, titled `fix(l16): align media provider structured output` (exact SHA in the handoff; resolve with `git log -1 --format=%H -- backend/tests/test_media_provider_schema_l16.py`). Full regression, live checks and final diff review passed before committing. Files are only `backend/app/services/media_intelligence.py`, `backend/tests/test_media_provider_schema_l16.py`, and this report. The existing realtime edits and untracked Phase A document remain excluded. No push, deployment, tag or production modification is authorized/performed in this provider-only follow-up.
 
-## Production storage and infrastructure verification
+## Initial production storage and infrastructure verification (historical)
 
 Read-only SSH checks verified the backend host's metadata: instance `157705364`, availability zone `hel1-dc2`, metadata region `eu-central`. This is backend location evidence, not proof of an Object Storage account/project or bucket region. Phase A/B documentation does not establish a dedicated storage region.
 
@@ -184,6 +251,6 @@ Both intended diffs were inspected, including new API/client/worker/provenance/t
 
 Known pre-existing edits are excluded: backend `app/services/realtime_provider.py`, `tests/test_realtime_l15.py` and untracked `docs/L16_PHASE_A_ARCHITECTURE.md`; frontend `js/realtime-worklet.js` and `tests/realtime-playback-l15.test.mjs`. Regression results are for the local worktree including those existing edits. No secret, runtime cluster, synthetic fixture, temporary credential or backup is included in either repository's intended commit.
 
-Remaining release blockers after the provider follow-up: verified existing Hetzner project identity and private S3/SSE-C configuration; fresh backup, production migrations/deployments, worker/log/storage checks and all production product/L12/L15 gates. Browser/product acceptance is deferred to production by the latest user instruction and was outside the provider-fix task. Bounded local document/image/injection provider acceptance now passes; this does not establish production or broad photo quality. Unsupported OCR and audio/video intelligence remain explicitly excluded. Existing Phase B/C bounds and production hardening assumptions still need verification; this report does not assert malware sandboxing, complete-document understanding or infrastructure erasure reconciliation that has not been demonstrated.
+Current release blockers: authenticated Object Storage provisioning access within the now-confirmed WaffleBerry project and verified private S3/SSE-C configuration; fresh backup, production migrations/deployments, worker/log/storage checks and all automatable production product/L12/L15 gates. Manual visual/browser/microphone UX acceptance is waived as a release blocker by the latest user instruction and remains explicitly unverified. Bounded local document/image/injection provider acceptance passes; this does not establish production or broad photo quality. Unsupported OCR and audio/video intelligence remain explicitly excluded. Existing Phase B/C bounds and production hardening assumptions still need verification; this report does not assert malware sandboxing, complete-document understanding or infrastructure erasure reconciliation that has not been demonstrated.
 
 Production was accessed read-only for configuration/identity checks and was **not modified**. L16 remains open and untagged.
