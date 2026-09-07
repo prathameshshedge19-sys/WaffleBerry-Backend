@@ -4,6 +4,8 @@ Status: **RELEASE BLOCKED — L16 is not complete.** Local implementation and au
 
 Validation date: 2026-09-07.
 
+Latest provider-only follow-up: the structured-output failure has been reproduced, diagnosed and corrected locally. Live PDF, synthetic PNG and injection processing now pass with zero canonical writes. Full follow-up regression and fix commit are recorded below. No browser acceptance was attempted in this follow-up; the user deferred browser/product acceptance to production later. Storage and production release acceptance remain outstanding.
+
 ## Scope and product experience
 
 Phase D adds Media & Sources to the existing active Legacy builder sidebar in `chat.html`, using the existing archival colours, typography, authentication and Legacy selection. The destination is a native dialog, not a new application/router. Homepage, SEO, domains, visitor chat, dictation and realtime implementations are outside this change.
@@ -35,7 +37,7 @@ Backend changes are narrow product integration:
 
 No migrations, canonical promotion semantics, source/job lock order, generation fences or personality domain logic were changed in Phase D. The upload route's transaction lifetime was corrected and fresh PostgreSQL acceptance was rerun. Existing `0017_media_sources` and `0018_media_intelligence` remain the release migrations.
 
-## Formats and provider readiness
+## Formats and initial provider readiness (historical)
 
 The UI advertises only PDF/UTF-8 TXT (configured default 50 MiB) and JPEG/PNG/WebP (20 MiB). Limits come from the authenticated capabilities endpoint. Existing Phase B storage admission for other formats is not advertised as working intelligence. Audio/video transcription and scanned-PDF OCR are explicitly unavailable. Document coverage is capped at 32 text sections; it is not represented as complete document understanding.
 
@@ -49,7 +51,55 @@ The UI advertises only PDF/UTF-8 TXT (configured default 50 MiB) and JPEG/PNG/We
 | Audio/video | No production transcription adapter; explicitly unadvertised and unavailable in the capabilities response. |
 | Prompt-injection quality | Deterministic containment/schema tests pass; planned live malicious-instruction fixture was not executed after the provider failure. |
 
-Smoke fixtures were synthetic, with no database connection or canonical-memory write path. No private family data was submitted. A non-disclosing comparison verified that the configured local and production provider credential matched. No credentials, key hashes or provider response contents are included here. Provider credit must be restored and representative document/photo/injection acceptance must pass before deployment. Automated regression uses deterministic providers and does not depend on live API availability.
+Those initial smoke fixtures were synthetic, with no database connection or canonical-memory write path. No private family data was submitted. A non-disclosing comparison verified that the configured local and production provider credential matched. No credentials, key hashes or provider response contents are included here. The credit failure above is historical: the follow-up below reached the provider and completed bounded acceptance. Automated regression uses deterministic providers and does not depend on live API availability.
+
+## Provider structured-output fix and live acceptance — 2026-09-07
+
+Scope: provider schema and sanitized diagnostics only. Starting backend checkpoint: `11f97c3e556811898d555513b8cbe6561734d579`. Read the separate local acceptance handoff at workspace `backups/l16-phase-d/LOCAL_BROWSER_ACCEPTANCE_2026-09-07.md`; its earlier failed response was not retained, so its exact fields cannot be reconstructed retroactively. One bounded diagnostic call with the same synthetic PDF reproduced `source_provider_invalid_response`, caused by Pydantic `ValidationError`, and established the following six rejected fields:
+
+| Validation path | Error type | Received structure | Expected |
+| --- | --- | --- | --- |
+| `candidates[0].category` | `value_error` | String, length 15, outside enum | `MEMORY_CATEGORIES` string |
+| `candidates[0].entities[1].entity_type` | `value_error` | String, length 5, outside enum | `ENTITY_TYPES` string |
+| `candidates[1].category` | `value_error` | String, length 26, outside enum | `MEMORY_CATEGORIES` string |
+| `candidates[1].entities[1].entity_type` | `value_error` | String, length 6, outside enum | `ENTITY_TYPES` string |
+| `candidates[2].category` | `value_error` | String, length 15, outside enum | `MEMORY_CATEGORIES` string |
+| `candidates[2].entities[2].entity_type` | `value_error` | String, length 4, outside enum | `ENTITY_TYPES` string |
+
+Root cause: the hand-authored provider schema declared both fields merely as `type: string`. It omitted the enums enforced by `SourceCandidateProposal.valid_category` and nested `MemoryEntityCandidate.validate_entity_type`. Strict provider JSON output could therefore satisfy the supplied schema while failing the server DTO. This was schema/validator drift, not a confidence, page locator, null, date or location failure.
+
+Fix: `_analysis_schema()` now includes enums drawn directly from the same `MEMORY_CATEGORIES` and `ENTITY_TYPES` constants as the server validators. Document and image requests share that schema. No category remapping, coercion, fallback-to-other or weakening of Pydantic validation was introduced. Unsupported values still fail closed.
+
+Contract comparison: candidate confidence remains a number in [0, 1]; evidence indexes remain bounded integers 0–31 and bool/negative/out-of-range variants are rejected. The provider returns evidence indexes, not locator objects. Page/text/image locators are server-produced during extraction and linked during persistence. Candidate date/location/locator fields are not allowed; date/place entities use existing entity types rather than new fields. Nullable uncertainty/summary remain supported; category/entities cannot be null. The provider requires all output fields for strict JSON mode, while internal DTO defaults continue to support existing callers. Entity alias string length is more restrictive in the request than in the shared DTO; it cannot permit the invalid enum values at issue. No unrelated DTO constraints were changed.
+
+Diagnostics now retain/log up to 16 validation entries containing only schema-owned field paths, Pydantic error types, expected schema constraints, received JSON type/length and enum-membership boolean. Unknown keys are replaced with `<unknown_field>`. No value text, Pydantic message/context, entire response body, prompt or credentials are logged. Both document/image diagnostic branches have privacy regression tests.
+
+Deterministic regression `test_request_schema_closes_all_six_observed_enum_gaps` preserves the observed paths, string types and lengths using redacted synthetic replacements. Before the fix: **1 failed, 14 passed**; the failure demonstrated that the request permitted a server-rejected category. After the fix the request excludes all six rejected shapes while the DTO still rejects them. Additional tests cover image/document request parity, valid nullable fields, malformed enums/nulls/confidence/indexes/extra date/location/locator fields, and diagnostics that cannot expose unknown property names or source values. New test module: `backend/tests/test_media_provider_schema_l16.py` (17 cases).
+
+Live acceptance reused only the existing workspace disposable SQLite database `backups/l16-phase-d/browser-local-20260907/l16_browser_acceptance.sqlite3`, verified at `0018_media_intelligence`, and its local storage/fixtures. The old local worker was paused to avoid competing claims; each source was admitted/uploaded through the real source service and processed by the real `MediaIntelligenceWorker` with the configured `gpt-5.5` adapter. No production database, storage, browser or customer data was accessed.
+
+| One-call live case | Source state | Evidence / candidates | Provenance | Canonical counts before / after upload / after processing |
+| --- | --- | --- | --- | --- |
+| Synthetic digital PDF | `ready` | 1 / 3 | Source/generation-linked page 1 | 0 / 0 / 0 |
+| Synthetic garden PNG | `ready` | 1 / 1 | Source/generation-linked image locator | 0 / 0 / 0 |
+| Malicious-instruction TXT | `ready` | 1 / 1 | Source/generation-linked text span | 0 / 0 / 0 |
+
+All five resulting candidates remain pending/noncanonical, with no canonical-memory ID. The injection case proposed only supported benign garden information; tested instruction phrases did not contaminate candidates. No tool definitions were offered and no privileged tool-call output was emitted. No owner review/promotion was performed. The PNG is a synthetic illustration, not a real family photograph: it establishes operation of the supported image path, not broad photo-quality acceptance. Unsupported OCR/audio/video paths were not tested.
+
+Live-call budget used: **4 total** — one diagnostic PDF call before the fix, then one post-fix PDF, one image and one injection call. SDK retries were disabled and each request was bounded to 60 seconds. No live calls are made by automated regression.
+
+The existing disposable local worker was restored after acceptance with the new schema and observed idle with empty stderr. The disposable database/storage were retained for later product acceptance. No local API or frontend restart was needed; no browser interaction occurred.
+
+Follow-up verification:
+
+- Provider/media intelligence tests: **30 passed**, 2 existing warnings.
+- Provider + L16 source/intelligence/product + canonical memory safety tests: **74 passed**, 0 skipped, 2 existing warnings in 8.29 seconds.
+- Full backend regression: **815 passed, 37 skipped, 0 failed, 2 existing warnings in 228.32 seconds (3:48)** using `python -m pytest -o addopts= -q -ra`. The 37 skips are 23 L16 and 14 older L14/L15 opt-in PostgreSQL cases, whose separate test database URLs were not configured. The 17 new provider cases all pass. Counts reflect the worktree, including known pre-existing realtime edits that are excluded from this fix commit.
+- Live PostgreSQL was not rerun: only the external provider JSON contract and validation-error diagnostics changed. No SQL, transaction, lock, generation fence, persistence, review, migration or database model behavior changed. The earlier 23-case PostgreSQL result remains historical evidence; it is not represented as a new run. Optional PostgreSQL tests will be reported as skipped in this follow-up regression.
+
+Sanitized evidence outside Git: `provider-validation-diagnosis.json`, `provider-schema-before-fix.log`, `provider-schema-live-results.json`, `provider-schema-focused.log`, `provider-fix-focused.xml`, and `provider-fix-backend-final.xml` under workspace `backups/l16-phase-d/`. No provider response body or source text is stored in these diagnostic/result reports.
+
+Fix checkpoint: the commit containing this follow-up, titled `fix(l16): align media provider structured output` (exact SHA in the handoff; resolve with `git log -1 --format=%H -- backend/tests/test_media_provider_schema_l16.py`). Full regression, live checks and final diff review passed before committing. Files are only `backend/app/services/media_intelligence.py`, `backend/tests/test_media_provider_schema_l16.py`, and this report. The existing realtime edits and untracked Phase A document remain excluded. No push, deployment, tag or production modification is authorized/performed in this provider-only follow-up.
 
 ## Production storage and infrastructure verification
 
@@ -134,6 +184,6 @@ Both intended diffs were inspected, including new API/client/worker/provenance/t
 
 Known pre-existing edits are excluded: backend `app/services/realtime_provider.py`, `tests/test_realtime_l15.py` and untracked `docs/L16_PHASE_A_ARCHITECTURE.md`; frontend `js/realtime-worklet.js` and `tests/realtime-playback-l15.test.mjs`. Regression results are for the local worktree including those existing edits. No secret, runtime cluster, synthetic fixture, temporary credential or backup is included in either repository's intended commit.
 
-Remaining release blockers: verified existing Hetzner project identity and private S3/SSE-C configuration; operational funded provider and live supported-format/injection acceptance; connected-browser manual acceptance; then fresh backup, production migrations/deployments, worker/log/storage checks and all production product/L12/L15 gates. Unsupported OCR and audio/video intelligence remain explicitly excluded. Existing Phase B/C bounds and production hardening assumptions still need verification; this report does not assert malware sandboxing, complete-document understanding or infrastructure erasure reconciliation that has not been demonstrated.
+Remaining release blockers after the provider follow-up: verified existing Hetzner project identity and private S3/SSE-C configuration; fresh backup, production migrations/deployments, worker/log/storage checks and all production product/L12/L15 gates. Browser/product acceptance is deferred to production by the latest user instruction and was outside the provider-fix task. Bounded local document/image/injection provider acceptance now passes; this does not establish production or broad photo quality. Unsupported OCR and audio/video intelligence remain explicitly excluded. Existing Phase B/C bounds and production hardening assumptions still need verification; this report does not assert malware sandboxing, complete-document understanding or infrastructure erasure reconciliation that has not been demonstrated.
 
 Production was accessed read-only for configuration/identity checks and was **not modified**. L16 remains open and untagged.

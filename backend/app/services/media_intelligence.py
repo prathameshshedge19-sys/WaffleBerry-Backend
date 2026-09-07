@@ -8,11 +8,14 @@ from __future__ import annotations
 
 import hashlib
 import io
+import json
+import logging
 import re
 from dataclasses import dataclass
 from typing import Protocol, Sequence
 
 from openai import APIConnectionError, APIStatusError, AsyncOpenAI, AuthenticationError, OpenAIError, RateLimitError
+from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -23,6 +26,7 @@ from app.models.media_source import ArtifactKind, ArtifactState, MediaArtifact, 
 from app.schemas.media_intelligence import SourceAnalysis, SourceCandidateProposal, SourceEvidenceInput
 from app.services.media_sources import PIPELINE_VERSION, utcnow
 from app.services.media_storage import SourceStorage, StorageError, get_source_storage
+from app.services.memory import MEMORY_CATEGORIES, ENTITY_TYPES
 
 
 MAX_CHUNKS = 32
@@ -107,19 +111,52 @@ def _analysis_schema() -> dict:
                 "type": "object", "additionalProperties": False,
                 "properties": {
                     "canonical_text": {"type": "string", "minLength": 3, "maxLength": 1200},
-                    "category": {"type": "string"},
+                    "category": {"type": "string", "enum": list(MEMORY_CATEGORIES)},
                     "confidence": {"type": "number", "minimum": 0, "maximum": 1},
                     "evidence_indexes": {"type": "array", "minItems": 1, "maxItems": 8, "items": {"type": "integer", "minimum": 0, "maximum": 31}},
                     "uncertainty": {"type": ["string", "null"], "maxLength": 500},
                     "source_language": {"type": "string", "minLength": 2, "maxLength": 80},
                     "entities": {"type": "array", "maxItems": 16, "items": {"type": "object", "additionalProperties": False, "properties": {
-                        "name": {"type": "string", "minLength": 1, "maxLength": 255}, "entity_type": {"type": "string"},
+                        "name": {"type": "string", "minLength": 1, "maxLength": 255}, "entity_type": {"type": "string", "enum": list(ENTITY_TYPES)},
                         "role": {"type": "string", "minLength": 1, "maxLength": 80}, "aliases": {"type": "array", "maxItems": 12, "items": {"type": "string", "maxLength": 255}},
                     }, "required": ["name", "entity_type", "role", "aliases"]}},
                 }, "required": ["canonical_text", "category", "confidence", "evidence_indexes", "uncertainty", "source_language", "entities"],
             }},
         }, "required": ["source_language", "summary", "candidates"],
     }
+
+
+def _validation_diagnostics(exc: ValidationError) -> list[dict]:
+    """Only schema-owned paths/constraints and value shapes; never response data."""
+    result = []
+    for error in exc.errors(include_url=False, include_context=False)[:16]:
+        node = _analysis_schema()
+        path = []
+        for part in error['loc']:
+            if isinstance(part, int):
+                path.append(part)
+                node = node.get('items', {})
+            else:
+                properties = node.get('properties', {})
+                path.append(part if part in properties else '<unknown_field>')
+                node = properties.get(part, {})
+        value = error.get('input')
+        shape = {'type': type(value).__name__}
+        if isinstance(value, (str, list, dict)):
+            shape['length'] = len(value)
+        if 'enum' in node:
+            shape['enum_member'] = value in node['enum']
+        expected = {key: node[key] for key in ('type', 'enum', 'minimum', 'maximum', 'minLength', 'maxLength', 'minItems', 'maxItems') if key in node}
+        result.append({'path': path, 'error_type': error['type'], 'expected': expected, 'received': shape})
+    return result
+
+
+def _invalid_analysis(exc: ValidationError) -> SourceProviderError:
+    diagnostics = _validation_diagnostics(exc)
+    logging.getLogger(__name__).warning('media_provider_validation %s', json.dumps(diagnostics))
+    error = SourceProviderError('source_provider_invalid_response')
+    error.validation_diagnostics = diagnostics
+    return error
 
 
 class OpenAISourceAnalysisProvider:
@@ -149,6 +186,8 @@ class OpenAISourceAnalysisProvider:
             return SourceAnalysis.model_validate_json(response.output_text)
         except (AuthenticationError, RateLimitError, APIConnectionError, APIStatusError, OpenAIError) as exc:
             raise SourceProviderError("source_provider_failed") from exc
+        except ValidationError as exc:
+            raise _invalid_analysis(exc) from exc
         except Exception as exc:
             raise SourceProviderError("source_provider_invalid_response") from exc
 
@@ -163,6 +202,8 @@ class OpenAISourceAnalysisProvider:
         try:
             response = await self.client.responses.create(model=self.model, instructions="Follow the data boundary exactly.", input=[{"role": "user", "content": content}], store=False, reasoning={"effort": "low"}, max_output_tokens=4096, text={"format": {"type": "json_schema", "name": "legarya_image_analysis", "strict": True, "schema": _analysis_schema()}})
             return SourceAnalysis.model_validate_json(response.output_text)
+        except ValidationError as exc:
+            raise _invalid_analysis(exc) from exc
         except Exception as exc:
             raise SourceProviderError("source_provider_invalid_response") from exc
 
