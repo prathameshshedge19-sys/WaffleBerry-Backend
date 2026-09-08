@@ -105,9 +105,15 @@ def audit_chapter(draft: StoryChapterDraft, perspective: str, facts: Sequence[di
     causal = bool(re.search(r"\b(because|therefore|so that|which led to)\b", text, re.I))
     causal_supported = bool(re.search(r"\b(because|therefore|so that|which led to)\b", source, re.I))
     absolute = bool(re.search(r"\b(always|never|only thing that mattered|the most important)\b", text, re.I))
-    first = bool(re.search(r"\bI\b|\bmy\b|\bwe\b", text))
-    third = bool(re.search(r"\bI\b|\bmy\b|\bwe\b", text))
-    perspective_ok = first if _first_person(perspective) else not third
+    first = bool(re.search(r"\bI\b|\bmy\b|\bwe\b", text, re.I))
+    third_pronoun = bool(re.search(r"\b(?:he|she|they|his|her|their)\b", text, re.I))
+    # Provider output can contain both first-person markers and a stale
+    # subject-named sentence. Derive likely subject names from the supplied
+    # facts and reject those names when they are used as sentence subjects.
+    subject_names = set(re.findall(r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s+(?=(?:moved|became|lived|worked|started|went|studied|joined|taught|raised)\b)", source))
+    named_third = any(re.search(rf"\b{re.escape(name)}\s+(?:moved|became|lived|worked|started|went|studied|joined|taught|raised)\b", text, re.I) for name in subject_names)
+    third = third_pronoun or named_third
+    perspective_ok = (first and not third) if _first_person(perspective) else not first
     reasons = []
     if unsupported_years: reasons.append("unsupported_date")
     if quoted and not quote_supported: reasons.append("unsupported_quote")

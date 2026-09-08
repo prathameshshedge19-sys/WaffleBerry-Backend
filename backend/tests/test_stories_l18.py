@@ -35,6 +35,7 @@ def test_audit_allows_direct_fact_and_safe_implication_but_rejects_invention():
     assert audit_chapter(StoryChapterDraft(title="x", narrative_text="Pallavi moved to Pune in 1998. A few years later, she began teaching.", memory_ids=[1, 2]), "biography_third_person", facts)["accepted"]
     assert "unsupported_causality" in audit_chapter(StoryChapterDraft(title="x", narrative_text="She moved because teaching had always been her dream.", memory_ids=[1, 2]), "biography_third_person", facts)["reasons"]
     assert "unsupported_quote" in audit_chapter(StoryChapterDraft(title="x", narrative_text="She always said, 'Never give up.'", memory_ids=[1]), "biography_third_person", facts)["reasons"]
+    assert "perspective_mismatch" in audit_chapter(StoryChapterDraft(title="x", narrative_text="I moved to Pune in 1998. Pallavi became a teacher in 2001.", memory_ids=[1, 2]), "legacy_first_person", facts)["reasons"]
 
 
 def test_story_generation_has_zero_canonical_side_effects_and_supports_both_perspectives(test_context):
