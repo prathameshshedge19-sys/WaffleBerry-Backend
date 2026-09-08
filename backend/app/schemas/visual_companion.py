@@ -13,6 +13,7 @@ class Crop(BaseModel):
     width: float = Field(gt=0, le=1)
     height: float = Field(gt=0, le=1)
     rotation: Literal[0, 90, 180, 270] = 0
+    auto_fit: bool = Field(default=False, strict=True)
 
     @model_validator(mode="after")
     def in_bounds(self):

@@ -39,7 +39,8 @@ def test_unnamed_owner_can_prepare_preview_approve_and_toggle_without_factual_ef
     for enabled in (False,True):
         revision=api.request('GET',BASE).json()['revision']
         private(api.request('PATCH',BASE,json={'enabled':enabled,'expected_revision':revision}),200)
-    private(api.request('GET',BASE+'/active-manifest',actor=3),404)
+        private(api.request('GET',BASE+'/active-manifest',actor=3),200 if enabled else 404)
+    private(api.request('GET',BASE+'/active-manifest',actor=4),404)
     with api.factory() as db:
         assert factual_snapshot(db)==before
         assert db.get(Legacy,1).subject_name is None

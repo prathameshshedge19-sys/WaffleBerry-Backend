@@ -139,7 +139,8 @@ class LocalPortraitRigProvider:
         if time.monotonic() >= limit:
             raise VisualBundleError('visual_native_timeout')
         png = normalize_crop(data, crop)
-        payload = json.dumps({'png':base64.b64encode(png).decode(), 'request_digest':identity}).encode()
+        payload = json.dumps({'png':base64.b64encode(png).decode(), 'request_digest':identity,
+                              'auto_fit': crop.get('auto_fit', False)}).encode()
         # No shared spool or durable private image cache; TemporaryDirectory is
         # 0700 and cleanup happens after the entire child process group is gone.
         with native_workspace() as (root, workspace_lease):

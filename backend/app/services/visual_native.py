@@ -193,6 +193,27 @@ def build_rig(png, landmarks, request_digest):
     return bundle
 
 
+def auto_frame(png, landmarks, padding=2.0):
+    """Frame the sole detected face with headroom; never choose among people."""
+    from PIL import Image
+    if len(landmarks) < 468 or any(not math.isfinite(v) or not 0 <= v <= 1 for p in landmarks for v in p):
+        raise ValueError('visual_needs_recrop')
+    xs, ys = [p[0] for p in landmarks], [p[1] for p in landmarks]
+    height = max(ys)-min(ys)
+    if height < .045:
+        raise ValueError('visual_needs_recrop')
+    edge = min(1., max(height * padding, (max(xs)-min(xs)) * padding))
+    x = min(max(0., (min(xs)+max(xs)-edge)/2), 1-edge)
+    y = min(max(0., (min(ys)+max(ys)-edge)/2 + height*.08), 1-edge)
+    with Image.open(io.BytesIO(png)) as image:
+        if image.size != (1024, 1024):
+            raise ValueError('visual_image_dimensions')
+        with image.resize((512,512), Image.Resampling.LANCZOS,
+                          box=(x*1024,y*1024,(x+edge)*1024,(y+edge)*1024)) as framed:
+            output=io.BytesIO(); framed.save(output,format='PNG')
+    return output.getvalue(), [[(px-x)/edge,(py-y)/edge] for px,py in landmarks]
+
+
 def main():
     import resource
     libc = ctypes.CDLL(None, use_errno=True)
@@ -205,6 +226,9 @@ def main():
         raise ValueError('visual_model_mismatch')
     payload = json.loads(sys.stdin.buffer.read(3*1024*1024 + 1))
     png = base64.b64decode(payload['png'], validate=True)
+    auto_fit = payload.get('auto_fit', False)
+    if type(auto_fit) is not bool:
+        raise ValueError('visual_request_invalid')
     if len(png)>2*1024*1024 or len(payload['request_digest']) != 64:
         raise ValueError('visual_request_invalid')
     confine([sys.argv[2]] if sys.argv[2] else [])
@@ -220,13 +244,28 @@ def main():
         num_faces=2, output_face_blendshapes=False, output_facial_transformation_matrixes=False)
     with mp.tasks.vision.FaceLandmarker.create_from_options(opts) as detector:
         with Image.open(io.BytesIO(png)) as image:
-            if image.size != (512,512):
+            if image.size != ((1024,1024) if auto_fit else (512,512)):
                 raise ValueError('visual_image_dimensions')
             result = detector.detect(mp.Image(image_format=mp.ImageFormat.SRGB, data=np.array(image.convert('RGB'))))
     if len(result.face_landmarks) != 1:
         raise ValueError('visual_needs_recrop')
     points = [[p.x,p.y] for p in result.face_landmarks[0]]
-    bundle = build_rig(png, points, payload['request_digest'])
+    if auto_fit:
+        # Fixed-grid alignment can make a usable face miss an eye/lip control.
+        # Try bounded deterministic framing alternatives, retaining full geometry
+        # validation rather than lowering the usable-motion threshold.
+        for padding in (2.0, 1.8, 1.6, 2.2):
+            framed, adjusted = auto_frame(png, points, padding)
+            try:
+                bundle = build_rig(framed, adjusted, payload['request_digest'])
+                break
+            except ValueError as error:
+                if str(error) != 'visual_needs_recrop':
+                    raise
+        else:
+            raise ValueError('visual_needs_recrop')
+    else:
+        bundle = build_rig(png, points, payload['request_digest'])
     print(json.dumps({'assets':{k:base64.b64encode(v).decode() for k,v in bundle.assets.items()},
         'seconds':time.monotonic()-before,'peak_rss_kib':resource.getrusage(resource.RUSAGE_SELF).ru_maxrss}))
 

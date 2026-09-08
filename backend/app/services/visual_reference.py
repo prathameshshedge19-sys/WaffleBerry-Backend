@@ -47,7 +47,7 @@ def _check_bytes(data):
 def _crop_values(crop):
     if hasattr(crop, "model_dump"):
         crop = crop.model_dump()
-    if not isinstance(crop, dict) or set(crop) - {"x", "y", "width", "height", "rotation"}:
+    if not isinstance(crop, dict) or set(crop) - {"x", "y", "width", "height", "rotation", "auto_fit"}:
         raise VisualReferenceError("visual_crop_invalid")
     values = {}
     for key in ("x", "y", "width", "height"):
@@ -60,7 +60,9 @@ def _crop_values(crop):
         raise VisualReferenceError("visual_crop_invalid")
     if values["width"] <= 0 or values["height"] <= 0 or values["x"] + values["width"] > 1 or values["y"] + values["height"] > 1:
         raise VisualReferenceError("visual_crop_invalid")
-    return {**values, "rotation": int(rotation)}
+    if type(crop.get("auto_fit", False)) is not bool:
+        raise VisualReferenceError("visual_crop_invalid")
+    return {**values, "rotation": int(rotation), **({"auto_fit": True} if crop.get("auto_fit") else {})}
 
 
 def _decode_image(data: bytes, crop=None):
@@ -104,6 +106,22 @@ def _decode_image(data: bytes, crop=None):
                     rotated = oriented.rotate(-crop["rotation"], expand=True)
                     try:
                         w, h = rotated.size
+                        if crop.get("auto_fit"):
+                            # Detect on the whole oriented image, never a guessed
+                            # center crop. Preserve aspect ratio/background and
+                            # strip metadata inside the confined decoder.
+                            with rotated.convert("RGB") as rgb:
+                                rgb.thumbnail((1024, 1024), Image.Resampling.LANCZOS)
+                                with Image.new("RGB", (1024, 1024), (238, 238, 238)) as clean:
+                                    clean.paste(rgb, ((1024-rgb.width)//2, (1024-rgb.height)//2))
+                                    output = io.BytesIO()
+                                    clean.save(output, format="PNG")
+                                    if len(output.getvalue()) > 1400 * 1024:
+                                        output = io.BytesIO()
+                                        with clean.quantize(colors=256, dither=Image.Dither.NONE) as reduced:
+                                            with reduced.convert("RGB") as bounded:
+                                                bounded.save(output, format="PNG")
+                                    return output.getvalue()
                         if crop["width"] * w < 128 or crop["height"] * h < 128:
                             raise VisualReferenceError("visual_crop_too_small")
                         # Coordinates are fractions of the oriented source axes.
@@ -232,7 +250,7 @@ def validate_visual_reference(data: bytes, *, expected_mime_type: str | None = N
 
 
 def normalize_crop(data: bytes, crop) -> bytes:
-    """Return a metadata-free 512x512 PNG; crop follows EXIF and clockwise rotation."""
+    """Metadata-free manual 512 crop or whole-image 1024 auto-detection input."""
     return _run_decoder(data, crop)
 
 

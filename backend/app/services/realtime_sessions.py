@@ -75,7 +75,8 @@ def resolve_scope(db, actor_id, *, conversation_id=None, legacy_id=None, mode=No
     role = legacy_role(db, actor_id, legacy) if mode == "rya" else "viewer" if mode == "legacy" and can_talk_to_legacy(db, actor_id, legacy) else None
     if role is None:
         raise RealtimeError("realtime_not_authorized")
-    if legacy.setup_status != "active":
+    allowed = {"active", "collecting_identity"} if mode == "legacy" else {"active"}
+    if legacy.setup_status not in allowed:
         raise RealtimeError("realtime_setup_incomplete", 409)
     return legacy.id, mode, role, user.voice_preference
 

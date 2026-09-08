@@ -316,9 +316,9 @@ def read_scope(db, user_id, legacy_id, *, viewer=False, version_id=None):
         require_persona_legacy(db, user_id, legacy_id)
     elif legacy is None or legacy.owner_user_id != user_id:
         raise HTTPException(404, detail="Legacy not found.")
-    # Private owner preparation/approval is independent of identity setup.
-    # Visitor call availability still follows the existing active-Legacy rules.
-    allowed = {"active"} if viewer else {"active", "collecting_identity"}
+    # Authorized visitor chat and an explicitly approved face are both available
+    # before identity setup. Draft status must not hide an approved portrait.
+    allowed = {"active", "collecting_identity"}
     if legacy.deletion_requested_at is not None or legacy.setup_status not in allowed:
         raise HTTPException(404, detail="Visual Presence unavailable.")
     profile = db.scalar(select(VisualCompanion).where(VisualCompanion.legacy_id == legacy_id))
