@@ -21,7 +21,7 @@ class BadProvider:
     model = "test-bad"
     async def outline(self, *args):
         return type("Outline", (), {"chapters": [OutlineChapter(title="Bad", memory_ids=[1], event_ids=[])]})()
-    async def chapter(self, *args):
+    async def chapter(self, *args, **kwargs):
         return StoryChapterDraft(title="Bad", narrative_text="She moved because it was her only dream. She always said, 'Never give up.'", memory_ids=[1], event_ids=[])
 
 

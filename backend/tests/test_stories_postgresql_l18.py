@@ -3,6 +3,8 @@
 import asyncio
 import os
 import threading
+from datetime import datetime, timezone
+from uuid import uuid4
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -14,6 +16,9 @@ from sqlalchemy.orm import sessionmaker
 from app.database import build_engine
 from app.models.legacy import Legacy
 from app.models.memory import Memory
+from app.models.timeline import LifeEvent
+from app.models.media_intelligence import SourceEvidence
+from app.models.media_source import MediaSource, MediaArtifact, MediaProcessingJob
 from app.models.story import Story, StoryChapter, StorySupportLink, StoryVersion
 from app.services.stories import DeterministicStoryProvider, StoryEngine
 
@@ -82,6 +87,27 @@ def test_pg_duplicate_generation_request_is_idempotent(pg):
         assert db.scalar(select(func.count()).select_from(StoryChapter)) == 1
 
 
+@pytest.mark.parametrize("kind", ["timeline_event", "source_evidence"])
+def test_pg_foreign_event_and_evidence_support_rejected(pg, kind):
+    with pg() as db:
+        event_id, source_id, job_id, artifact_id, evidence_id = [str(uuid4()) for _ in range(5)]
+        db.add(LifeEvent(id=event_id, legacy_id=2, admission_key=str(uuid4()), title="Foreign QA", event_type="other", origin="human_created", review_state="approved", lifecycle_state="active"))
+        db.add(MediaSource(id=source_id, legacy_id=2, uploader_user_id=1, kind="document", original_filename="QA.txt", declared_mime_type="text/plain", declared_size_bytes=1, upload_request_key=str(uuid4()), upload_request_digest="x"*64, upload_expires_at=datetime.now(timezone.utc)))
+        db.flush()
+        db.add(MediaProcessingJob(id=job_id, legacy_id=2, source_id=source_id, generation=1, kind="extract", pipeline_version="test"))
+        db.add(MediaArtifact(id=artifact_id, legacy_id=2, source_id=source_id, generation=1, kind="text", logical_key="text", storage_backend="local", object_key="qa"))
+        db.flush()
+        db.add(SourceEvidence(id=evidence_id, legacy_id=2, source_id=source_id, generation=1, job_id=job_id, artifact_id=artifact_id, stable_key="qa", kind="text_span", text="Synthetic QA evidence"))
+        db.flush()
+        story = _story(db)
+        db.add(StoryVersion(id="scope-version",legacy_id=1,story_id=story.id,version_number=1,status="ready",created_by_user_id=1)); db.flush()
+        db.add(StoryChapter(id="scope-chapter",legacy_id=1,story_version_id="scope-version",ordinal=0,title="QA",narrative_text="QA",generation_status="ready")); db.flush()
+        target = {"life_event_id":event_id} if kind == "timeline_event" else {"evidence_id":evidence_id}
+        with pytest.raises(IntegrityError):
+            db.add(StorySupportLink(id=str(uuid4()),legacy_id=1,story_version_id="scope-version",chapter_id="scope-chapter",support_kind=kind,**target)); db.flush()
+        db.rollback()
+
+
 class BlockingProvider(DeterministicStoryProvider):
     started = threading.Event()
     release = threading.Event()
@@ -124,6 +150,21 @@ def test_pg_memory_correction_marks_story_stale_without_rewriting_text(pg):
         story = db.get(Story, story_id); chapter = db.scalar(select(StoryChapter).where(StoryChapter.story_version_id == version_id))
         assert story.staleness_state == "stale"
         assert "1998" in chapter.narrative_text
+
+
+def test_pg_old_request_replay_does_not_undo_owner_edit(pg):
+    with pg() as db:
+        _memory(db); story = _story(db)
+        asyncio.run(StoryEngine(db).generate(story, db.get(Legacy, 1), 1, "original"))
+        chapter = db.scalar(select(StoryChapter))
+        StoryEngine(db).edit_chapter(story, chapter.id, 1, "Owner edit", "Owner preserved Story edit.")
+        edited_id = story.current_version_id
+    with pg() as db:
+        story = db.get(Story, "story-1")
+        asyncio.run(StoryEngine(db).generate(story, db.get(Legacy, 1), 1, "original"))
+        db.commit()
+        assert story.current_version_id == edited_id
+        assert db.scalar(select(func.count()).select_from(StoryVersion)) == 2
 
 
 def test_pg_publish_archive_race_has_one_coherent_final_state(pg):

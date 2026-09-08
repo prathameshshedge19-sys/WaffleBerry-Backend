@@ -23,7 +23,7 @@ def _story(db, story_id: str, legacy_id: int, user_id: int, *, owner=False, pers
 
 @router.post("", response_model=StoryResponse, status_code=status.HTTP_201_CREATED)
 def create_story(payload: StoryCreate, legacy_id: int = Query(..., ge=1), user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    legacy = require_legacy(db, user.id, legacy_id)
+    legacy = require_legacy(db, user.id, legacy_id, owner_only=True)
     story = StoryEngine(db).create(legacy, user.id, payload.title, payload.scope, payload.narrative_perspective)
     db.commit(); db.refresh(story); return serialize_story(db, story)
 
