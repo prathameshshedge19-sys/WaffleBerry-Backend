@@ -14,7 +14,7 @@ from app.models.viewer import LegacyViewerAccess, ViewerAccessStatus
 from app.schemas.access import AccessInviteAccepted, AccessInviteCreate, AccessInvitePreview, AccessPanelResponse
 from app.services.access_management import (accept_invite, create_invite, ensure_pending, get_invite,
     invite_attempt_limiter, record_access_event)
-from app.services.authorization import require_legacy
+from app.services.authorization import require_legacy, is_active_collaborator, is_active_viewer
 from app.services.collaboration import decrypt_code, rotate_code
 from app.services.email import EmailDeliveryError, email_sender
 from app.services.legacy_access import decrypt_viewer_code, rotate_viewer_code
@@ -83,10 +83,19 @@ def revoke_invite(legacy_id: int, invite_id: int, user: User = Depends(get_curre
 @router.get("/invites/{token}", response_model=AccessInvitePreview)
 def preview_invite(token: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     if not invite_attempt_limiter.allow(user.id): raise HTTPException(429, "Too many attempts. Please wait and try again.")
-    invite = get_invite(db, token); ensure_pending(invite)
+    invite = get_invite(db, token)
     if user.email.lower() != invite.email.lower():
         raise HTTPException(403, "Sign in with the email address that received this invitation.")
     legacy = invite.legacy
+    # An accepted email can reopen existing access, never grant it again.
+    # The authenticated original recipient and the current role are both checked.
+    if invite.status == InviteStatus.ACCEPTED.value:
+        has_access = is_active_viewer if invite.role == "viewer" else is_active_collaborator
+        if invite.accepted_by_user_id != user.id or not has_access(db, user.id, legacy):
+            raise HTTPException(403, "Your access to this Legacy has changed. Please contact its owner.")
+    else:
+        ensure_pending(invite)
+    invite_attempt_limiter.clear(user.id)
     return {"legacy_id": legacy.id, "subject_name": legacy.subject_name or "this Legacy", "owner_name": legacy.owner.full_name,
         "email": invite.email, "role": invite.role, "status": invite.status, "expires_at": invite.expires_at}
 

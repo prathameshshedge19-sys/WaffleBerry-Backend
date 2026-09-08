@@ -63,12 +63,13 @@ def rotate_viewer_code(db: Session, legacy: Legacy) -> str:
 
 def legacy_for_viewer_code(db: Session, code: str) -> Legacy | None:
     normalized = normalize_code(code)
-    if len(normalized) != 11 or not normalized.startswith("LEG"):
+    if len(normalized) != 11 or not normalized.startswith("LEG") or not normalized.isascii():
         return None
     return db.scalar(select(Legacy).where(
         Legacy.viewer_code_digest == viewer_code_digest(normalized),
         Legacy.viewer_code_enabled.is_(True),
-        Legacy.setup_status == LegacySetupStatus.ACTIVE.value,
+        Legacy.setup_status.in_((LegacySetupStatus.COLLECTING_IDENTITY.value, LegacySetupStatus.ACTIVE.value)),
+        Legacy.deletion_requested_at.is_(None),
     ))
 
 
