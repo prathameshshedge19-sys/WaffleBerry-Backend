@@ -228,15 +228,19 @@ def test_crash_expiry_recovery(live,case):
 
 
 def test_logout_ends_call_and_denies_old_token(live):
-    grant=create(live).json()
+    # Reuse the pre-logout token: create()/headers() mint a fresh token on each
+    # call, which legitimately becomes newer than logout at a second boundary.
+    old_headers=headers()
+    payload={"legacy_id":1,"mode":"rya"}
+    grant=live[0].post("/api/v1/realtime/sessions",json=payload,headers=old_headers).json()
     with authenticate(live[0],grant) as ws:
         connected(ws,grant)
-        assert live[0].post("/api/v1/auth/logout",headers=headers()).status_code == 204
+        assert live[0].post("/api/v1/auth/logout",headers=old_headers).status_code == 204
         ws.send_json({"type":"ping"})
         assert ws.receive_json()["code"] == "realtime_access_changed"
-    assert create(live).status_code == 403
+    assert live[0].post("/api/v1/realtime/sessions",json=payload,headers=old_headers).status_code == 403
     # The existing auth behavior is deliberately unchanged for text/API access.
-    assert live[0].get("/api/v1/auth/me",headers=headers()).status_code == 200
+    assert live[0].get("/api/v1/auth/me",headers=old_headers).status_code == 200
 
 
 @pytest.mark.parametrize("actor,role",[(2,"collaborator"),(3,"viewer")])

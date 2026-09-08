@@ -340,3 +340,35 @@ provisioning and release acceptance remain pending the required protected
 database-backup authorization and subsequent deployment/production gates; see
 `L19_PHASE_C_RELEASE_REPORT.md`. No production model installation or release tag
 is claimed here.
+
+## 12. Phase C authorized production provisioning — 2026-09-08
+
+After the explicitly authorized protected database backup was verified, the
+accepted runtime was provisioned privately at `/opt/legarya-visual/venv`, using
+CPython 3.14.4 and `deploy/visual-native-linux.lock` with `--require-hashes`.
+`pip check` passed. The accepted OS-library versions were extracted into the
+private sysroot; global linking and unrelated virtual environments were not
+changed. Complete package inventory and native installation-report hashes are
+retained under the private runtime. Wheel LICENSE/NOTICE and model provenance
+are retained in its private `notices` directory.
+
+The numbered upstream model was downloaded and verified at 3758596 bytes and
+SHA-256 `64184e229b263107bc2b804c6625db1341ff2bb731874b0bcc2fe6544e0bc9ff`.
+Installed path is `/opt/legarya-visual/face_landmarker.task`, root:waffleberry
+0640, under root:waffleberry 0750. It is neither in Git nor HTTP/static assets.
+The dedicated bounded worker and purge-health timer are running; real fictional
+QA portrait preparation and authenticated private browser rendering succeeded.
+The existing native child confinement is unchanged. No MediaPipe import or
+dependency closure was added to the API process. Observed worker cgroup peak
+was 330407936 bytes, with zero restarts; the 768 MiB cap was not raised.
+
+Final mandatory production/security/integrity gates passed; consult the final
+acceptance in `L19_PHASE_C_RELEASE_REPORT.md`. Three actual native production
+versions were privately previewed and explicitly activated. Both fictional
+source originals and all 12 registered generated assets were purged, with zero
+remaining versions/markers across 14 exact tracked keys. Purge health is green
+with zero pending jobs. The temporary exact-object registry was removed; the
+required private production runtime/model/notices remain. This section
+supersedes earlier statements that production provisioning or acceptance was
+pending. The exact final backend release commit is resolved by annotated tag
+`legarya-l19-visual-speaking-companion`; the frontend SHA is recorded separately.
