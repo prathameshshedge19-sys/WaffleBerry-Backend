@@ -87,7 +87,9 @@ def capabilities(legacy_id: int, user=Depends(get_current_user), db=Depends(get_
     if role is None:
         require_persona_legacy(db, user.id, legacy_id)
     can_prepare = False
-    if role == 'owner' and get_settings().visual_presence_enabled and legacy.setup_status == 'active':
+    if (role == 'owner' and get_settings().visual_presence_enabled
+            and get_settings().visual_preparation_enabled
+            and legacy.setup_status in {'active', 'collecting_identity'}):
         try:
             preparation_service()
             can_prepare = True

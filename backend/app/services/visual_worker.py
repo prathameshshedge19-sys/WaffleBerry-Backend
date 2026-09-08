@@ -115,7 +115,8 @@ class VisualWorker:
 
     def _eligible(self, db, scope, now):
         legacy, profile, version, sources, _ = scope
-        if (legacy.setup_status != "active" or profile.deleted_at is not None
+        if (legacy.setup_status not in {"active", "collecting_identity"}
+                or legacy.deletion_requested_at is not None or profile.deleted_at is not None
                 or profile.desired_version_id != version.id
                 or version.state not in {"queued", "preparing"}
                 or version.removed_at is not None

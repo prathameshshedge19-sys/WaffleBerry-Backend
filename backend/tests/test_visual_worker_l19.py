@@ -92,12 +92,14 @@ def harness(request, tmp_path, monkeypatch):
     worker = VisualWorker(sessions, storage, provider=provider, source_storage=source, clock=clock)
     service = VisualCompanionService(provider_name=provider.provider_name, model_digest=provider.model_digest)
 
-    def seed():
+    def seed(setup_status="active"):
         with sessions.begin() as db:
             owner = User(full_name="Synthetic Owner", email=f"{uuid4()}@example.test", password_hash="unused", is_verified=True)
             db.add(owner)
             db.flush()
-            legacy = Legacy(owner_user_id=owner.id, subject_name="Synthetic subject", setup_status="active")
+            legacy = Legacy(owner_user_id=owner.id,
+                            subject_name="Synthetic subject" if setup_status == "active" else None,
+                            setup_status=setup_status)
             db.add(legacy)
             db.flush()
             source_id, artifact_id = str(uuid4()), str(uuid4())
@@ -199,6 +201,25 @@ def test_ready_is_atomic_private_and_reservations_precede_put(harness, monkeypat
             if name in Base.metadata.tables:
                 assert db.scalar(select(func.count()).select_from(Base.metadata.tables[name])) == 0
     assert len(set(calls)) == 3 and h.source.exists(ids.source)
+
+
+def test_unnamed_legacy_can_finish_private_preparation(harness):
+    from tests.visual_l19_helpers import factual_snapshot
+
+    h = harness
+    ids = h.seed(setup_status="collecting_identity")
+    with h.sessions() as db:
+        before = factual_snapshot(db)
+    assert h.worker.run_once() == "ready"
+    with h.sessions() as db:
+        legacy = db.get(Legacy, ids.legacy)
+        assert legacy.setup_status == "collecting_identity"
+        assert legacy.subject_name is None
+        assert legacy.relationship_to_owner is None and legacy.is_self is None
+        profile = db.get(VisualCompanion, ids.profile)
+        assert not profile.enabled and profile.current_version_id is None
+        assert db.get(Version, ids.version).state == "ready"
+        assert factual_snapshot(db) == before
 
 
 def test_reservation_rollback_leaves_no_untracked_put(harness):

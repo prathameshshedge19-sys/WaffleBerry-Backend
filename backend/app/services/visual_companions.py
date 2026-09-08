@@ -51,12 +51,13 @@ def locked(db, model, *conditions):
                       .execution_options(populate_existing=True).with_for_update()).all()
 
 
-def lock_scope(db, legacy_id, owner_id=None, *, require_active=True):
+def lock_scope(db, legacy_id, owner_id=None, *, require_active=True, allow_pending=False):
     rows = locked(db, Legacy, Legacy.id == legacy_id)
     legacy = rows[0] if rows else None
     if legacy is None or (owner_id is not None and (legacy.owner_user_id != owner_id or legacy.deletion_requested_at is not None)):
         raise HTTPException(404, detail="Legacy not found.")
-    if require_active and owner_id is not None and legacy.setup_status != "active":
+    allowed = {"active", "collecting_identity"} if allow_pending else {"active"}
+    if require_active and owner_id is not None and legacy.setup_status not in allowed:
         conflict("legacy_not_active")
     # Deliberately lock all this Legacy's sources in ID order before the profile.
     # This avoids a stale pointer discovery window when current A/candidate B change.
@@ -149,7 +150,7 @@ class VisualCompanionService:
         db.flush()
         db.scalar(select(User).where(User.id == owner_id)
             .execution_options(populate_existing=True).with_for_update(key_share=True))
-        legacy, profile, versions, sources = lock_scope(db, legacy_id, owner_id)
+        legacy, profile, versions, sources = lock_scope(db, legacy_id, owner_id, allow_pending=True)
         request = payload.model_dump(mode="json")
         # Expected revision is a concurrency precondition, not immutable intent.
         request.pop("expected_revision")
@@ -212,7 +213,7 @@ class VisualCompanionService:
         return version
 
     def activate(self, db, owner_id, legacy_id, payload):
-        legacy, profile, versions, sources = lock_scope(db, legacy_id, owner_id)
+        legacy, profile, versions, sources = lock_scope(db, legacy_id, owner_id, allow_pending=True)
         if profile is None or profile.deleted_at or profile.revision != payload.expected_revision:
             conflict()
         version = versions.get(str(payload.version_id))
@@ -238,7 +239,7 @@ class VisualCompanionService:
         return profile
 
     def toggle(self, db, owner_id, legacy_id, enabled, expected_revision):
-        legacy, profile, versions, sources = lock_scope(db, legacy_id, owner_id)
+        legacy, profile, versions, sources = lock_scope(db, legacy_id, owner_id, allow_pending=True)
         if profile is None or profile.deleted_at or profile.revision != expected_revision:
             conflict()
         if enabled:
@@ -325,7 +326,10 @@ def read_scope(db, user_id, legacy_id, *, viewer=False, version_id=None):
         require_persona_legacy(db, user_id, legacy_id)
     elif legacy is None or legacy.owner_user_id != user_id:
         raise HTTPException(404, detail="Legacy not found.")
-    if legacy.setup_status != "active":
+    # Private owner preparation/approval is independent of identity setup.
+    # Visitor call availability still follows the existing active-Legacy rules.
+    allowed = {"active"} if viewer else {"active", "collecting_identity"}
+    if legacy.deletion_requested_at is not None or legacy.setup_status not in allowed:
         raise HTTPException(404, detail="Visual Presence unavailable.")
     profile = db.scalar(select(VisualCompanion).where(VisualCompanion.legacy_id == legacy_id))
     if profile is None or profile.deleted_at or (viewer and not profile.enabled):
