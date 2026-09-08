@@ -1,6 +1,6 @@
 # L18 Phase C — Stories / Biography Release Report
 
-Status: local implementation and automated acceptance complete; production release blocked at the mandatory backup gate. Report date: 2026-09-08.
+Status: deployed and migrated, but final L18 acceptance/tagging is blocked because authenticated disposable production Story smoke data/session was unavailable. Report date: 2026-09-08.
 
 ## Scope
 
@@ -38,11 +38,11 @@ Full-biography generation remains bounded synchronous v1. The accepted Phase B l
 
 ## Production release gates
 
-Production preflight verified `WaffleBerry-server` at `89.167.14.211`, all three required services active, health 200, database exactly `legarya`, and revision `0019_legacy_timeline`. The mandatory backup attempt failed before mutation: PostgreSQL could not write `/home/waffleberry/backups/l18_pre_0020_20260908.dump` because the `postgres` dump process lacked permission to write the `waffleberry`-owned mode-700 backup directory. A read-only check confirmed the directory and existing files; no permission or ownership change was made.
+Production preflight verified `WaffleBerry-server` at `89.167.14.211`, all three required services active, health 200, database exactly `legarya`, and revision `0019_legacy_timeline`. The initial direct dump failed because the protected backup directory is mode 0700 and the `postgres` process could not write there. The safe staging resolution used restrictive `/var/tmp` staging, custom-format `pg_dump`, `pg_restore --list`, and privileged local `install` into the existing directory. Final verified backup: `/home/waffleberry/backups/l18_pre_0020_20260908T000945Z.dump`, timestamp `2026-09-08 00:09:45 UTC`, **211293 bytes**, owner `waffleberry:waffleberry`, mode `0600`; staging was removed.
 
-Therefore no production migration, deployment, Story smoke, synthetic production data, tag or other production mutation has been performed. The intended tested release SHAs are backend `284fdc52064454d6b795027b9e8de65baf5eb385` (based on accepted Phase B `b993ac5e1b36a51e2d47ab926f4c3a5aae933130`) and frontend `ef92033` (based on production L17 frontend `e7e880c43a2dfff4a31444b22e5eaec69dd4f9a0`).
+Migration `0019_legacy_timeline` → `0020_legacy_stories` succeeded, and the four expected tables/schema objects were verified. Backend commit `a9f2104d8d870a06b94ffd0c7d2b4488b9ec011c` is deployed; all required services are active, health is 200, the checkout is clean, and recent logs contain no Story startup/error/private-content findings. Frontend commit `ef92033` is pushed and its builder/visitor HTML, CSS and JS assets return HTTP 200 with expected markers. Unauthenticated Story endpoints correctly return 401.
 
-Required production steps remain after an operator resolves the backup-directory permission workflow: create and verify a fresh non-empty backup, apply `0020_legacy_stories`, deploy the two intended committed releases without unrelated realtime edits, health-check all required services, run synthetic Story/publication/visitor/zero-write/staleness smoke, inspect sanitized logs, clean synthetic data, then create `legarya-l18-stories-biography` on the exact backend release commit. The release was stopped rather than improvising around the failed backup gate.
+Final production Story acceptance remains required: an authenticated disposable owner/visitor setup must run memory-only, perspective, grounding, edit/version, regeneration, staleness, publication, visitor, collaborator and cross-Legacy checks, followed by synthetic cleanup. No disposable production Story data was created and no customer data was touched. The release is stopped before tagging because those authenticated smoke gates were not honestly verifiable without a disposable verified account/session; no direct database fixture or minted token was used.
 
 Manual visual/browser/microphone acceptance is intentionally not a release blocker under the current policy and is recorded as **not manually browser-verified in Phase C**.
 
