@@ -35,6 +35,28 @@ def list_stories(legacy_id: int = Query(..., ge=1), user: User = Depends(get_cur
     return [serialize_story(db, story, include_text=False) for story in stories]
 
 
+@router.get("/published", response_model=list[StoryResponse])
+def list_published_stories(legacy_id: int = Query(..., ge=1), user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Visitor-safe read path: published stories only, with no builder controls or provenance internals."""
+    require_persona_legacy(db, user.id, legacy_id)
+    stories = db.scalars(select(Story).where(
+        Story.legacy_id == legacy_id,
+        Story.lifecycle_state == StoryLifecycle.ACTIVE.value,
+        Story.visibility == StoryVisibility.PUBLISHED.value,
+    ).order_by(Story.updated_at.desc(), Story.id)).all()
+    result = []
+    for story in stories:
+        item = serialize_story(db, story, include_text=True)
+        version = item.get("current_version")
+        if version:
+            version["audit_summary"] = None
+            for chapter in version.get("chapters", []):
+                chapter["audit_summary"] = None
+                chapter["support"] = []
+        result.append(item)
+    return result
+
+
 @router.get("/{story_id}", response_model=StoryResponse)
 def get_story(story_id: str, legacy_id: int = Query(..., ge=1), user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     return serialize_story(db, _story(db, story_id, legacy_id, user.id))
