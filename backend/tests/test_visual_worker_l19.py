@@ -222,6 +222,61 @@ def test_unnamed_legacy_can_finish_private_preparation(harness):
         assert factual_snapshot(db) == before
 
 
+@pytest.mark.parametrize("failed_first", [False, True])
+def test_no_daily_preparation_quota_after_success_or_failure(harness, monkeypatch, failed_first):
+    from tests.visual_l19_helpers import command, approval, factual_snapshot
+    from app.services import visual_companions
+
+    h = harness
+    # Hold admission on one UTC day; only worker safety deadlines advance.
+    day = datetime.now(timezone.utc).replace(hour=12, minute=0, second=0, microsecond=0)
+    monkeypatch.setattr(visual_companions, "utcnow", lambda: day)
+    ids = h.seed(setup_status="collecting_identity")
+    h.clock.value = max(h.clock.value, day)
+    service = VisualCompanionService()
+    with h.sessions() as db:
+        before = factual_snapshot(db)
+    latest = ids.version
+    for index in range(12):
+        if index:
+            with h.sessions.begin() as db:
+                profile = db.get(VisualCompanion, ids.profile)
+                previous = profile.current_version_id
+                request = command(ids.source, profile.revision)
+                latest = service.admit(db, ids.owner, ids.legacy, request).id
+                assert profile.current_version_id == previous
+                assert service.admit(db, ids.owner, ids.legacy, request).id == latest
+        if failed_first and index == 0:
+            claim = h.worker.claim()
+            assert claim
+            assert h.worker._failed(*claim, code="visual_needs_recrop") == "failed"
+        else:
+            for _ in range(6):
+                outcome = h.worker.run_once()
+                if outcome == "ready":
+                    break
+                assert outcome == "purged"
+            assert outcome == "ready"
+            with h.sessions.begin() as db:
+                profile = db.get(VisualCompanion, ids.profile)
+                version = db.get(Version, latest)
+                service.activate(db, ids.owner, ids.legacy, approval(version, profile.revision))
+                assert profile.current_version_id == latest and profile.enabled
+        # Use the normal worker purge path, not a synthetic backlog reset.
+        h.clock.advance(121)
+        for _ in range(6):
+            outcome = h.worker.run_once()
+            if outcome == "idle":
+                break
+            assert outcome == "purged"
+        assert outcome == "idle"
+    with h.sessions() as db:
+        versions = db.scalars(select(Version).where(Version.legacy_id == ids.legacy)).all()
+        assert len(versions) == 12
+        assert {v.created_at.date() for v in versions} == {day.date()}
+        assert factual_snapshot(db) == before
+
+
 def test_reservation_rollback_leaves_no_untracked_put(harness):
     h = harness
     ids = h.seed()

@@ -183,7 +183,7 @@ def test_old_request_replay_never_reopens_or_rolls_back(visual):
         assert profile.deleted_at and not profile.enabled and profile.desired_version_id is None
 
 
-def test_quota_and_conflicting_key(visual):
+def test_conflicting_key_and_cleanup_backpressure(visual):
     factory, _, source_id = visual
     with factory() as db:
         request = command(source_id)
@@ -197,7 +197,8 @@ def test_quota_and_conflicting_key(visual):
             VisualCompanionService().admit(db, 1, 1, command(source_id, profile.revision)); db.commit()
         with pytest.raises(HTTPException) as exc:
             VisualCompanionService().admit(db, 1, 1, command(source_id, profile.revision))
-        assert exc.value.status_code == 429
+        assert exc.value.status_code == 409
+        assert exc.value.detail["code"] == "visual_cleanup_pending"
 
 
 @pytest.mark.parametrize("actor", [2, 3])

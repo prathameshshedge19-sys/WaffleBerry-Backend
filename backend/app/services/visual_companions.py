@@ -1,7 +1,7 @@
 """L19 presentation aggregate. Commands participate in the caller's transaction.
 
 No storage/provider calls or canonical writes are permitted inside these locks.
-Every write follows owner quota (admission only), Legacy, sources, profile,
+Every write follows Legacy, sources, profile,
 versions, jobs, assets. Legacy serialization also fences source deletion.
 """
 
@@ -11,11 +11,10 @@ import json
 from uuid import uuid4
 
 from fastapi import HTTPException
-from sqlalchemy import func, select
+from sqlalchemy import select
 
 from app.models.legacy import Legacy
 from app.models.media_source import MediaArtifact, MediaSource
-from app.models.user import User
 from app.models.visual_companion import (
     VisualCompanion, VisualCompanionVersion, VisualCompanionAsset, VisualGenerationJob,
 )
@@ -144,12 +143,7 @@ class VisualCompanionService:
         self.model_digest = model_digest or hashlib.sha256(b"l19-fake-test-only").hexdigest()
 
     def admit(self, db, owner_id, legacy_id, payload):
-        # Serialize quota decisions without conflicting with the KEY SHARE
-        # lock acquired by activation's approved_by_user_id foreign key. A
-        # FOR UPDATE here produces User -> Legacy / Legacy -> User deadlocks.
         db.flush()
-        db.scalar(select(User).where(User.id == owner_id)
-            .execution_options(populate_existing=True).with_for_update(key_share=True))
         legacy, profile, versions, sources = lock_scope(db, legacy_id, owner_id, allow_pending=True)
         request = payload.model_dump(mode="json")
         # Expected revision is a concurrency precondition, not immutable intent.
@@ -173,12 +167,8 @@ class VisualCompanionService:
         if artifact is None:
             conflict("visual_source_unavailable")
         now = utcnow()
-        since = now.replace(hour=0, minute=0, second=0, microsecond=0)
-        per_owner = db.scalar(select(func.count()).select_from(VisualCompanionVersion).where(
-            VisualCompanionVersion.confirmed_by_user_id == owner_id, VisualCompanionVersion.created_at >= since))
-        per_legacy = sum(aware(v.created_at) >= since for v in versions.values())
-        if per_owner >= 10 or per_legacy >= 3:
-            raise HTTPException(429, detail={"code": "visual_quota", "message": "Today's preparation limit has been reached."})
+        # No daily/lifetime preparation quota. Serial execution and physical
+        # cleanup backpressure remain independent resource/privacy safeguards.
         # Physical cleanup backlog cannot grow unbounded under repeated replacements.
         backlog = sum(v.state == "purge_pending" for v in versions.values())
         if backlog >= 2:
