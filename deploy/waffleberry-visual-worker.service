@@ -1,0 +1,36 @@
+[Unit]
+Description=LegaRya private visual preparation and erasure worker
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=waffleberry
+Group=waffleberry
+WorkingDirectory=/home/waffleberry/WaffleBerry-Backend/backend
+EnvironmentFile=/home/waffleberry/WaffleBerry-Backend/backend/.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/legarya-visual/venv/bin/python -m app.services.visual_worker --poll-seconds 5
+Restart=always
+RestartSec=5
+TimeoutStopSec=140
+KillMode=control-group
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+UMask=0077
+MemoryMax=768M
+MemorySwapMax=0
+CPUQuota=50%
+TasksMax=64
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

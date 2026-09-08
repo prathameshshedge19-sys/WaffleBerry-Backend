@@ -1,0 +1,21 @@
+[Unit]
+Description=LegaRya restricted visual erasure health check
+After=waffleberry-visual-worker.service
+
+[Service]
+Type=oneshot
+User=waffleberry
+Group=waffleberry
+WorkingDirectory=/home/waffleberry/WaffleBerry-Backend/backend
+EnvironmentFile=/home/waffleberry/WaffleBerry-Backend/backend/.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/legarya-visual/venv/bin/python -m scripts.l19_visual_health_check
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+UMask=0077
+MemoryMax=256M
+TimeoutStartSec=30
+StandardOutput=journal
+StandardError=journal

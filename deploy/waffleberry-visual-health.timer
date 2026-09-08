@@ -1,0 +1,11 @@
+[Unit]
+Description=Check LegaRya visual erasure health every minute
+
+[Timer]
+OnBootSec=60
+OnUnitActiveSec=60
+AccuracySec=5
+Unit=waffleberry-visual-health.service
+
+[Install]
+WantedBy=timers.target

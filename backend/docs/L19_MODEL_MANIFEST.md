@@ -303,3 +303,40 @@ Phase C must separately provision an isolated visual-worker runtime using the ve
 The backend feature defaults remain false. Runtime/model provisioning, worker service deployment, operational alerts and feature enablement belong to the separately authorized Phase C release. Fake provider cannot satisfy capability or preparation availability and is never a production fallback.
 
 The user explicitly resolved the earlier source-archive transfer rejection and authorized private dependencies/test execution. Final server cleanup verified both registered synthetic S3 namespaces contained zero objects/versions and removed the exact QA runtime, including model, wheels, venv, sysroot, code and synthetic files. Credential-free evidence and source/model pins remain locally outside Git. Production application checkout/services/configuration/database were not modified. No deployment, final L19 tag or Phase C work occurred.
+
+## 11. Phase C pre-release revalidation (not a production installation)
+
+The accepted model, wheel, recipe and confinement design are unchanged. The
+Phase C release worktree adds `deploy/visual-native-linux.lock`, containing exact
+versions and SHA-256 wheel hashes from the accepted Linux installation report.
+The private runtime was recreated in the same explicitly authorized disposable
+QA directory; native packages were installed with `--require-hashes`, and OS
+libraries were downloaded at the accepted versions and extracted privately.
+`pip check` passed. No native import or portrait inference ran outside the
+non-root, no-network test unit and the existing confined child boundary.
+
+All **199** native/provider/reference tests passed together, including the three
+real lifecycle cases, network/private-file denial, cancellation/failure and
+cleanup. Five fictional portraits prepared successfully in **1.968–2.292 s**,
+peak RSS **223112–223464 KiB**. Ambiguous-group and unusable-crop fixtures safely
+returned `visual_needs_recrop`. The 768 MiB cap was not raised.
+
+The actual bundles were rendered in local Chromium software WebGL. Five
+synthetic portrait types were inspected across neutral, low/medium/high mouth,
+blink, idle, listening, thinking, speaking, interrupted and static states.
+Source likeness remains recognizable with restrained deformation; this is not
+phoneme-perfect lip sync or full photorealistic blink closure. Measured renderer
+main-thread p95 was **0.1–0.3 ms**, with canvas at most 768px/DPR 1.5. One hundred
+load/disposal cycles left zero canvases/RAF and no growth in the browser's coarse
+reported JS heap metric. This is not a measurement of physical mobile GPU RAM.
+The real browser AudioContext integration also verified internal silence and
+synchronous neutral reset before cancellation, with a single drain receipt.
+
+The entire disposable server runtime was removed after confirming zero active
+native QA processes. Models, packages, sysroot and synthetic files are retained
+only as reproducible local provenance/QA artifacts outside Git. No new S3
+objects were created during this Phase C pre-release QA run. Production worker
+provisioning and release acceptance remain pending the required protected
+database-backup authorization and subsequent deployment/production gates; see
+`L19_PHASE_C_RELEASE_REPORT.md`. No production model installation or release tag
+is claimed here.
