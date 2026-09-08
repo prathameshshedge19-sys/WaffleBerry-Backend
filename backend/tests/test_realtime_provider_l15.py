@@ -119,3 +119,40 @@ def test_cancel_race_ignores_only_its_own_benign_provider_error():
         assert await provider.receive() is None
         assert (await provider.receive()).kind=="error"
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("mode", ["rya", "legacy"])
+@pytest.mark.parametrize("phase", ["audio", "tools"])
+def test_pronunciation_is_explicit_in_spoken_requests_without_changing_identity(mode, phase):
+    from types import SimpleNamespace
+    from app.services.rya import ChatTurn, RYA_SYSTEM_PROMPT
+
+    class Socket:
+        sent = []
+        async def send(self, value):
+            self.sent.append(json.loads(value))
+
+    async def run():
+        provider = RealOpenAIRealtimeProvider()
+        provider.socket = Socket()
+        prepared = SimpleNamespace(actor=SimpleNamespace(mode=mode), turns=[
+            ChatTurn("system", "Keep the authorized speaker identity."),
+            ChatTurn("user", "Rya, what is your name? My aunt is named Raya."),
+        ])
+        await provider._response(prepared, "pronunciation-test", 1, None, phase=phase)
+        response = provider.socket.sent[-1]["response"]
+        assert response["input"][0]["content"][0]["text"] == prepared.turns[1].content
+        assert (RYA_SYSTEM_PROMPT in response["instructions"]) == (mode == "rya")
+        assert "Keep the authorized speaker identity." in response["instructions"]
+        if phase == "audio":
+            assert response["output_modalities"] == ["audio"]
+            assert "Reeyah: REE-yah, exactly two syllables" in response["instructions"]
+            assert "long ee as in see" in response["instructions"]
+            assert "audible consonant y glide" in response["instructions"]
+            assert "Never pronounce the companion name Raya" in response["instructions"]
+            assert "written/transcribed spelling Rya" in response["instructions"]
+            assert "does not rename any person" in response["instructions"]
+        else:
+            assert response["output_modalities"] == ["text"]
+            assert "Reeyah" not in response["instructions"]
+    asyncio.run(run())

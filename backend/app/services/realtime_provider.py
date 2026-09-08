@@ -16,6 +16,16 @@ from app.services import turn_observability as obs
 from app.services.realtime_sessions import RealtimeError
 
 
+RYA_AUDIO_PRONUNCIATION = """Spoken pronunciation of the companion name:
+The written name Rya is pronounced Reeyah: REE-yah, exactly two syllables.
+Use a long ee as in see, followed by an audible consonant y glide into ah.
+Never pronounce the companion name Raya, RAY-ah, RYE-ah, Rhea, or as one syllable.
+Use this pronunciation whenever saying the companion name, including introductions.
+Keep the written/transcribed spelling Rya; Reeyah is a pronunciation cue only.
+Apply this silently without explaining or spelling out the cue to the listener.
+This rule does not rename any person or change the current speaker's identity."""
+
+
 @dataclass(frozen=True)
 class ProviderEvent:
     kind: str
@@ -247,8 +257,9 @@ class RealOpenAIRealtimeProvider:
             "conversation": "none", "metadata": {"generation_id": generation_id, **({"phase": "tools"} if phase == "tools" else {})},
             "input": items + list(continuation),
             "instructions": "\n\n".join(policy)
-                            + ' Use concise spoken phrasing and a natural conversational rhythm; tolerate interruptions. Pronounce visible "Rya" as "Riya" (ree-yah, two syllables), while retaining the spelling "Rya" in the transcript. Apply this pronunciation silently; do not explain it to the user. '
-                            + extra,
+                            + ' Use concise spoken phrasing and a natural conversational rhythm; tolerate interruptions. '
+                            + extra
+                            + ("\n\n" + RYA_AUDIO_PRONUNCIATION if phase == "audio" else ""),
             "output_modalities": ["text"] if phase == "tools" else ["audio"],
             "reasoning": {"effort": "medium" if phase == "tools" else "high"},
             "parallel_tool_calls": True if phase == "tools" else False,
