@@ -16,14 +16,20 @@ from app.services import turn_observability as obs
 from app.services.realtime_sessions import RealtimeError
 
 
-RYA_AUDIO_PRONUNCIATION = """Spoken pronunciation of the companion name:
-The written name Rya is pronounced Reeyah: REE-yah, exactly two syllables.
-Use a long ee as in see, followed by an audible consonant y glide into ah.
-Never pronounce the companion name Raya, RAY-ah, RYE-ah, Rhea, or as one syllable.
-Use this pronunciation whenever saying the companion name, including introductions.
-Keep the written/transcribed spelling Rya; Reeyah is a pronunciation cue only.
-Apply this silently without explaining or spelling out the cue to the listener.
+RYA_AUDIO_PRONUNCIATION = """Silent voice-delivery guidance:
+When referring to the AI companion, say Ree-yah: REE-yah, exactly two syllables,
+with a long ee as in see and an audible consonant y glide into ah.
+Say the name directly. Do not volunteer pronunciation or spelling explanations,
+alternative names, or a correction after saying the name. Apply this silently.
 This rule does not rename any person or change the current speaker's identity."""
+
+RYA_AUDIO_INTRODUCTION = """When asked your name, answer naturally: "My name is Ree-yah."
+For a self-introduction, use "I'm Ree-yah."
+Answer in the user's conversational language; these English examples illustrate
+the name's sound, not a required response language.
+A question about your name is not a request for a pronunciation lesson:
+do not add "pronounced", "you can call me", or an explanation of the written name.
+Use the same REE-yah sound from the start, including after an earlier mispronunciation."""
 
 
 @dataclass(frozen=True)
@@ -241,7 +247,13 @@ class RealOpenAIRealtimeProvider:
         self._contexts[generation_id] = obs.TurnObservation(session_id=session_id,
             conversation_turn_id=turn_id, generation_attempt_id=generation_id)
         items = []
-        policy = [RYA_SYSTEM_PROMPT] if prepared.actor.mode == "rya" else []
+        # The audio model speaks from this identity text. Use the phonetic name
+        # in our own companion template, not a competing spelling instruction.
+        # Never rewrite shared context, conversation history, or human names.
+        # Match the phonetic input used by the static homepage introduction.
+        companion_policy = (RYA_SYSTEM_PROMPT.replace("Rya", "Ree-yah")
+                            if phase == "audio" else RYA_SYSTEM_PROMPT)
+        policy = [companion_policy] if prepared.actor.mode == "rya" else []
         for turn in prepared.turns:
             if turn.role not in {"system", "user", "assistant"}:
                 raise RealtimeError("realtime_provider_failed", 502)
@@ -259,7 +271,9 @@ class RealOpenAIRealtimeProvider:
             "instructions": "\n\n".join(policy)
                             + ' Use concise spoken phrasing and a natural conversational rhythm; tolerate interruptions. '
                             + extra
-                            + ("\n\n" + RYA_AUDIO_PRONUNCIATION if phase == "audio" else ""),
+                            + ("\n\n" + RYA_AUDIO_PRONUNCIATION if phase == "audio" else "")
+                            + ("\n\n" + RYA_AUDIO_INTRODUCTION
+                               if phase == "audio" and prepared.actor.mode == "rya" else ""),
             "output_modalities": ["text"] if phase == "tools" else ["audio"],
             "reasoning": {"effort": "medium" if phase == "tools" else "high"},
             "parallel_tool_calls": True if phase == "tools" else False,

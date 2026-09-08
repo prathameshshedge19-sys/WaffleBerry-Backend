@@ -86,7 +86,7 @@ def test_l14_context_generation_dedup_and_cancel_usage_correlation(monkeypatch):
         await provider.create_response(prepared,claim,turn_id=7,session_id=sid)
         response=socket.sent[0]["response"]
         assert response["conversation"]=="none" and response["metadata"]=={"generation_id":claim}
-        assert response["instructions"].startswith(RYA_SYSTEM_PROMPT)
+        assert response["instructions"].startswith(RYA_SYSTEM_PROMPT.replace("Rya", "Ree-yah"))
         assert response["tools"]==[] and response["tool_choice"]=="none"
         assert "Grounded scope" in response["instructions"]
         assert response["input"][0]["content"][0]=={"type":"output_text","text":"Previously heard"}
@@ -126,6 +126,7 @@ def test_cancel_race_ignores_only_its_own_benign_provider_error():
 def test_pronunciation_is_explicit_in_spoken_requests_without_changing_identity(mode, phase):
     from types import SimpleNamespace
     from app.services.rya import ChatTurn, RYA_SYSTEM_PROMPT
+    from app.services.realtime_provider import RYA_AUDIO_INTRODUCTION
 
     class Socket:
         sent = []
@@ -136,23 +137,40 @@ def test_pronunciation_is_explicit_in_spoken_requests_without_changing_identity(
         provider = RealOpenAIRealtimeProvider()
         provider.socket = Socket()
         prepared = SimpleNamespace(actor=SimpleNamespace(mode=mode), turns=[
-            ChatTurn("system", "Keep the authorized speaker identity."),
+            ChatTurn("system", "Keep the authorized speaker identity. Canonical human names: Rya and Raya."),
             ChatTurn("user", "Rya, what is your name? My aunt is named Raya."),
+            ChatTurn("assistant", "My name is Raya pronounced Riya."),
         ])
-        await provider._response(prepared, "pronunciation-test", 1, None, phase=phase)
+        original_turns = list(prepared.turns)
+        continuation = [{"type": "function_call_output", "call_id": "synthetic", "output": "Human name: Rya"}]
+        await provider._response(prepared, "pronunciation-test", 1, None, phase=phase, continuation=continuation)
         response = provider.socket.sent[-1]["response"]
         assert response["input"][0]["content"][0]["text"] == prepared.turns[1].content
-        assert (RYA_SYSTEM_PROMPT in response["instructions"]) == (mode == "rya")
-        assert "Keep the authorized speaker identity." in response["instructions"]
+        assert response["input"][1]["content"][0]["text"] == prepared.turns[2].content
+        assert response["input"][2] == continuation[0]
+        assert prepared.turns == original_turns
+        assert prepared.turns[0].content in response["instructions"]
+        expected_policy = RYA_SYSTEM_PROMPT.replace("Rya", "Ree-yah") if phase == "audio" else RYA_SYSTEM_PROMPT
+        assert (expected_policy in response["instructions"]) == (mode == "rya")
+        assert (RYA_AUDIO_INTRODUCTION in response["instructions"]) == (mode == "rya" and phase == "audio")
         if phase == "audio":
             assert response["output_modalities"] == ["audio"]
-            assert "Reeyah: REE-yah, exactly two syllables" in response["instructions"]
+            assert "Ree-yah: REE-yah, exactly two syllables" in response["instructions"]
             assert "long ee as in see" in response["instructions"]
             assert "audible consonant y glide" in response["instructions"]
-            assert "Never pronounce the companion name Raya" in response["instructions"]
-            assert "written/transcribed spelling Rya" in response["instructions"]
+            assert "Do not volunteer pronunciation or spelling explanations" in response["instructions"]
             assert "does not rename any person" in response["instructions"]
+            if mode == "rya":
+                assert response["instructions"].startswith("You are Ree-yah,")
+                assert '"My name is Ree-yah."' in response["instructions"]
+                assert 'do not add "pronounced"' in response["instructions"]
+                assert "Answer in the user's conversational language" in response["instructions"]
+            else:
+                assert "My name is Ree-yah" not in response["instructions"]
         else:
             assert response["output_modalities"] == ["text"]
-            assert "Reeyah" not in response["instructions"]
+            assert "REE-yah" not in response["instructions"]
+            if mode == "rya":
+                assert response["instructions"].startswith("You are Rya,")
+        assert RYA_SYSTEM_PROMPT.startswith("You are Rya,")
     asyncio.run(run())
