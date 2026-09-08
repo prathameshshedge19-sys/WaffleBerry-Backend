@@ -17,7 +17,7 @@ from app.config import Settings, get_settings
 from app.models.conversation import Conversation, Message
 from app.models.legacy import Legacy
 from app.models.memory import Memory, MemoryEntity, MemoryEntityLink, MemoryOperation, MemoryRevision, MemoryStatus
-from app.services.legacy_intelligence import analyze_legacy_query, followup_policy, rerank_memories
+from app.services.legacy_intelligence import analyze_legacy_query, followup_policy, life_story_memories, rerank_memories
 from app.services.builder_interview import plan_builder_followup
 
 
@@ -297,12 +297,14 @@ class LivingMemoryService:
         memories = self.active_memories(db, legacy_id)
         if not memories:
             return ()
+        route = route or analyze_legacy_query(query, memories=memories)
+        if route.asks_life_story:
+            return life_story_memories(memories)
         vectors = await self.provider.embed([query])
         if len(vectors) != 1:
             raise MemoryProviderError("memory_embedding_count_mismatch")
         query_vector = vectors[0]
         semantic_scores = {memory.id: (_cosine(query_vector, memory.embedding or []) if self._embedding_compatible(memory) else 0.0) for memory in memories}
-        route = route or analyze_legacy_query(query, memories=memories)
         return rerank_memories(memories, query, semantic_scores, route, self.settings.memory_retrieval_top_k, self.settings.memory_retrieval_threshold)
 
     async def store(self, db: Session, legacy: Legacy, conversation: Conversation, source_message: Message, source_text: str, analysis: MemoryAnalysis | None, changed_by_user_id: int | None = None, *, commit: bool = True) -> list[Memory]:

@@ -26,6 +26,7 @@ class QueryRoute(BaseModel):
     needs_fresh_data: bool
     asks_personal_opinion: bool = False
     identity_challenge: bool = False
+    asks_life_story: bool = False
 
 
 FRESH_PATTERNS = (
@@ -99,7 +100,17 @@ def analyze_legacy_query(query: str, subject_name: str | None = None, memories: 
     catalog = _entity_catalog(memories)
     entities = list(dict.fromkeys(name for alias, name in catalog.items() if alias in text))
     subject_mentioned = bool(subject_name and normalize(subject_name) in text)
+    life_story = bool(re.search(
+        r"\b(?:your|his|her|their)\s+(?:(?:whole|full|complete)\s+)?(?:life(?:\s+story)?|biography)\b"
+        r"|\b(?:tell|share|narrate|recount)\b.{0,35}\b(?:your|his|her|their)\s+(?:(?:whole|full|complete)\s+)?story\b"
+        r"|\btell me about yourself\b"
+        r"|\b(?:aapki|aapka|tumhari|tumchi|tujhi)\s+(?:(?:poori|puri|sampurna)\s+)?(?:kahani|kahaani|goshta|jindagi|zindagi)\b"
+        r"|\bdeine\s+(?:ganze\s+)?(?:lebensgeschichte|biografie)\b"
+        r"|(?:आपकी|तुम्हारी|तुमची|तुझी)\s+(?:(?:पूरी|संपूर्ण)\s+)?(?:कहानी|जीवनकथा|गोष्ट)", text))
+    life_story = life_story or bool(subject_mentioned and re.search(r"\b(?:life story|biography|whole story|full story|complete story)\b", text))
     topics = [topic for topic, terms in TOPIC_TERMS.items() if any(_contains_term(text, term) for term in terms)]
+    if life_story and "story" not in topics:
+        topics.append("story")
     time_refs = list(dict.fromkeys(re.findall(r"\b(?:18|19|20)\d{2}\b|\b\d{1,3}\s+years?\s+(?:old|later|earlier|before|after)\b", text)))
     for marker in ("childhood", "school", "college", "before", "after", "later", "marriage", "first job", "बालपण", "बचपन"):
         if marker in text and marker not in time_refs:
@@ -113,7 +124,7 @@ def analyze_legacy_query(query: str, subject_name: str | None = None, memories: 
     relationship_query = relationship_shape and bool(entities or subject_mentioned or "relationship" in topics)
     if relationship_query and "relationship" not in topics:
         topics.append("relationship")
-    personal = personal or opinion or identity or relationship_query
+    personal = personal or opinion or identity or relationship_query or life_story
     general = _matches(GENERAL_PATTERNS, text)
     if (entities or subject_mentioned) and any(topic in topics for topic in ("relationship", "story", "education", "career", "place", "preference", "opinion")):
         personal = True
@@ -139,7 +150,23 @@ def analyze_legacy_query(query: str, subject_name: str | None = None, memories: 
         needs_fresh_data=fresh,
         asks_personal_opinion=opinion,
         identity_challenge=identity,
+        asks_life_story=life_story,
     )
+
+
+def life_story_memories(memories: Sequence[Any], limit: int = 20) -> tuple[Any, ...]:
+    """Bounded coverage of active input records, without chronology guesses or writes."""
+    groups: dict[str, list[Any]] = {}
+    for memory in sorted(memories, key=lambda item: item.id):
+        groups.setdefault(memory.category, []).append(memory)
+    selected = []
+    for index in range(max((len(group) for group in groups.values()), default=0)):
+        for group in groups.values():
+            if index < len(group):
+                selected.append(group[index])
+                if len(selected) >= min(max(limit, 1), 20):
+                    return tuple(selected)
+    return tuple(selected)
 
 
 def relevance_components(memory: Any, query: str, semantic: float, route: QueryRoute) -> dict[str, float]:
