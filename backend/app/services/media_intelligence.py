@@ -249,6 +249,8 @@ class MediaIntelligenceService:
             source = db.scalar(select(MediaSource).where(MediaSource.id == job.source_id, MediaSource.legacy_id == job.legacy_id)) if job else None
             if job is None or source is None or job.lease_token != token or job.generation != source.generation or source.state in {SourceState.DELETING.value, SourceState.DELETED.value}:
                 return "stale"
+            if source.processing_purpose != "source_review":
+                return "purpose_rejected"
             legacy = db.get(Legacy, source.legacy_id)
             if legacy is None:
                 return await self._fail(sessions, job_id, token, "legacy_missing")
@@ -273,6 +275,8 @@ class MediaIntelligenceService:
             return await self._fail(sessions, job_id, token, exc.code)
 
     async def _extract(self, source: MediaSource, data: bytes) -> list[ExtractedChunk]:
+        if source.processing_purpose != "source_review":
+            raise SourceProviderError("source_processing_purpose_rejected")
         if source.kind == "document":
             return extract_document(data, source.detected_mime_type or source.declared_mime_type)
         if source.kind in {"audio", "video"}:
@@ -301,6 +305,8 @@ class MediaIntelligenceService:
             job = db.scalar(select(MediaProcessingJob).where(MediaProcessingJob.id == job_id, MediaProcessingJob.lease_token == token).with_for_update())
             if job is None or current is None or current.generation != job.generation or current.state in {SourceState.DELETING.value, SourceState.DELETED.value}:
                 return "stale"
+            if current.processing_purpose != "source_review":
+                return "purpose_rejected"
             evidence_rows = []
             for index, item in enumerate(inputs):
                 key = _stable(current.sha256, PIPELINE_VERSION, item.kind, item.locator, item.text or "")

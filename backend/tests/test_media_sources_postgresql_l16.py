@@ -43,7 +43,7 @@ def pg(tmp_path_factory):
     with engine.begin() as db:
         assert db.execute(text("SELECT current_database()")).scalar_one() == parsed.database
         assert db.execute(text("SELECT version()")).scalar_one().startswith("PostgreSQL ")
-        assert db.execute(text("SELECT version_num FROM public.alembic_version")).scalar_one() == "0018_media_intelligence"
+        assert db.execute(text("SELECT version_num FROM public.alembic_version")).scalar_one() == "0021_visual_companions"
         tables = set(db.execute(text("SELECT table_name FROM information_schema.tables WHERE table_schema='public' AND table_name LIKE 'media_%'")).scalars())
         assert tables == {"media_sources", "media_artifacts", "media_processing_jobs"}
         constraints = set(db.execute(text("SELECT constraint_name FROM information_schema.table_constraints WHERE table_schema='public' AND table_name LIKE 'media_%'")).scalars())

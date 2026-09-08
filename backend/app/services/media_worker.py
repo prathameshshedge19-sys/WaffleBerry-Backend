@@ -5,14 +5,15 @@ deterministic parsers and intelligence. No worker path imports canonical memory.
 """
 
 import asyncio
+import hashlib
 from datetime import timedelta
 from uuid import uuid4
 
 from sqlalchemy import exists, or_, select, update
 
 from app.database import SessionLocal
-from app.models.media_source import ArtifactState, MediaArtifact, MediaProcessingJob, MediaSource, ProcessingJobKind, ProcessingJobState, SourceState
-from app.services.media_sources import utcnow
+from app.models.media_source import ArtifactKind, ArtifactState, MediaArtifact, MediaProcessingJob, MediaSource, ProcessingJobKind, ProcessingJobState, SourceState
+from app.services.media_sources import _aware, utcnow
 from app.services.media_storage import SourceStorage, StorageError, get_source_storage
 
 
@@ -71,7 +72,78 @@ class MediaWorker:
                 return "stale"
         if job.kind == ProcessingJobKind.PURGE.value:
             return self._purge(job_id, token)
+        with self.sessions() as db:
+            source = db.get(MediaSource, job.source_id)
+            visual_reference = source is not None and source.processing_purpose == "visual_reference"
+        if visual_reference:
+            return self._validate_visual_reference(job_id, token)
         return self._deferred_extract(job_id, token)
+
+    def _validate_visual_reference(self, job_id, token):
+        from app.services.visual_reference import MAX_BYTES, VisualReferenceError, validate_visual_reference
+        with self.sessions() as db:
+            job = db.get(MediaProcessingJob, job_id)
+            source = db.scalar(select(MediaSource).where(MediaSource.id == job.source_id, MediaSource.legacy_id == job.legacy_id)) if job else None
+            if not self._visual_claim_current(source, job, token):
+                return "stale"
+            artifact = db.scalar(select(MediaArtifact).where(
+                MediaArtifact.source_id == source.id, MediaArtifact.legacy_id == source.legacy_id,
+                MediaArtifact.generation == job.generation, MediaArtifact.kind == ArtifactKind.ORIGINAL.value,
+                MediaArtifact.state == ArtifactState.AVAILABLE.value,
+            ))
+            if source.state == "uploading":
+                # Reservation creates the durable job before any bytes arrive.
+                db.rollback()
+                with self.sessions.begin() as pending:
+                    pending.execute(update(MediaProcessingJob).where(MediaProcessingJob.id == job_id, MediaProcessingJob.lease_token == token).values(
+                        state="retry_wait", lease_token=None, lease_expires_at=None,
+                        next_attempt_at=utcnow() + timedelta(seconds=30)))
+                return "awaiting_upload"
+        metadata = None
+        code = None
+        try:
+            if source.kind != "image" or artifact is None:
+                raise VisualReferenceError("visual_original_unavailable")
+            from app.services.visual_storage import VisualStorage
+            data = VisualStorage(self.storage).read_original(artifact.object_key, artifact.object_version)
+            if len(data) > MAX_BYTES:
+                raise VisualReferenceError("visual_image_too_large")
+            digest = hashlib.sha256(data).hexdigest()
+            if len(data) != source.size_bytes or len(data) != artifact.byte_size or digest != source.sha256 or digest != artifact.sha256:
+                raise VisualReferenceError("visual_original_mismatch")
+            metadata = validate_visual_reference(data, expected_mime_type=source.detected_mime_type or source.declared_mime_type)
+        except VisualReferenceError as exc:
+            code = exc.code
+        except (StorageError, OSError):
+            code = "source_storage_read_failed"
+        with self.sessions.begin() as db:
+            # Never publish validation after deletion, lease loss, retry or expiry.
+            current = db.scalar(select(MediaSource).where(MediaSource.id == source.id, MediaSource.legacy_id == source.legacy_id).with_for_update())
+            job = db.scalar(select(MediaProcessingJob).where(MediaProcessingJob.id == job_id).with_for_update())
+            if not self._visual_claim_current(current, job, token):
+                return "stale"
+            now = utcnow()
+            job.state = "failed" if code else "succeeded"
+            job.stage = "visual_validation_failed" if code else "visual_reference_validated"
+            job.finished_at = now
+            job.last_error_code = code
+            job.lease_token = job.lease_expires_at = None
+            current.state = "failed" if code else "ready"
+            current.last_error_code = code
+            current.processing_finished_at = now
+            current.updated_at = now
+            # Original admission's signature check is not full decoder safety.
+            current.safety_state = "rejected" if code else "clean"
+            if metadata:
+                current.metadata_json = {"visual_reference": metadata}
+            return "failed" if code else "visual_reference_validated"
+
+    @staticmethod
+    def _visual_claim_current(source, job, token):
+        return (source is not None and job is not None and source.processing_purpose == "visual_reference"
+                and job.kind == "extract" and job.state == "running" and job.lease_token == token
+                and job.lease_expires_at is not None and _aware(job.lease_expires_at) > utcnow()
+                and source.generation == job.generation and source.state not in {"deleting", "deleted"})
 
     def _deferred_extract(self, job_id, token):
         now = utcnow()
@@ -117,14 +189,23 @@ class MediaIntelligenceWorker(MediaWorker):
 
     def __init__(self, sessions=SessionLocal, storage: SourceStorage | None = None, *, provider=None, transcriber=None, lease_seconds: int = 120):
         super().__init__(sessions=sessions, storage=storage, lease_seconds=lease_seconds)
+        self._provider = provider
+        self._transcriber = transcriber
+        self.intelligence = None
+        self._runner = asyncio.Runner()
+
+    def _normal_intelligence(self):
+        if self.intelligence is not None:
+            return self.intelligence
+        provider = self._provider
         if provider is None:
             from app.services.media_intelligence import get_source_analysis_provider
             provider = get_source_analysis_provider()
         from app.services.media_intelligence import MediaIntelligenceService
-        self.intelligence = MediaIntelligenceService(provider, storage=self.storage, transcriber=transcriber)
+        self.intelligence = MediaIntelligenceService(provider, storage=self.storage, transcriber=self._transcriber)
         # The provider owns pooled async connections. Keep their event loop
         # alive across jobs instead of closing it after every claim.
-        self._runner = asyncio.Runner()
+        return self.intelligence
 
     def run_once(self):
         claim = self.claim()
@@ -136,13 +217,20 @@ class MediaIntelligenceWorker(MediaWorker):
             if job is None or job.lease_token != token:
                 return "stale"
             kind = job.kind
+            source = db.scalar(select(MediaSource).where(MediaSource.id == job.source_id, MediaSource.legacy_id == job.legacy_id))
+            purpose = source.processing_purpose if source else None
         if kind == ProcessingJobKind.PURGE.value:
             return self._purge(job_id, token)
-        return self._runner.run(self.intelligence.process_claim(self.sessions, job_id, token))
+        if purpose == "visual_reference":
+            return self._validate_visual_reference(job_id, token)
+        if purpose != "source_review":
+            return "purpose_rejected"
+        return self._runner.run(self._normal_intelligence().process_claim(self.sessions, job_id, token))
 
     def close(self):
         try:
-            client = getattr(self.intelligence.provider, "client", None)
+            provider = self.intelligence.provider if self.intelligence is not None else self._provider
+            client = getattr(provider, "client", None)
             if client is not None:
                 self._runner.run(client.close())
         finally:

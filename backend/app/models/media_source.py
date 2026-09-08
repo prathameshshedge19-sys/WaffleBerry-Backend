@@ -19,6 +19,9 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    event,
+    inspect,
+    select,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -30,6 +33,11 @@ class SourceKind(str, enum.Enum):
     AUDIO = "audio"
     VIDEO = "video"
     DOCUMENT = "document"
+
+
+class ProcessingPurpose(str, enum.Enum):
+    SOURCE_REVIEW = "source_review"
+    VISUAL_REFERENCE = "visual_reference"
 
 
 class SourceState(str, enum.Enum):
@@ -88,6 +96,8 @@ class MediaSource(Base):
         CheckConstraint("declared_size_bytes >= 0", name="ck_media_sources_declared_size"),
         CheckConstraint("size_bytes IS NULL OR size_bytes >= 0", name="ck_media_sources_size"),
         CheckConstraint("generation >= 1", name="ck_media_sources_generation"),
+        CheckConstraint("processing_purpose IN ('source_review','visual_reference')", name="ck_media_sources_purpose"),
+        CheckConstraint("processing_purpose != 'visual_reference' OR kind = 'image'", name="ck_media_sources_visual_image"),
         CheckConstraint("state IN ('uploading','queued','processing','ready','partially_ready','failed','deleting','deleted')", name="ck_media_sources_state"),
         CheckConstraint("safety_state IN ('pending','clean','rejected')", name="ck_media_sources_safety"),
         Index("ix_media_sources_legacy_created", "legacy_id", "created_at", "id"),
@@ -100,6 +110,7 @@ class MediaSource(Base):
     legacy_id: Mapped[int] = mapped_column(ForeignKey("legacies.id", ondelete="RESTRICT"), nullable=False)
     uploader_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), index=True)
     kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    processing_purpose: Mapped[str] = mapped_column(String(24), nullable=False, default="source_review", server_default="source_review")
     original_filename: Mapped[str] = mapped_column(String(255), nullable=False)
     declared_mime_type: Mapped[str] = mapped_column(String(127), nullable=False)
     detected_mime_type: Mapped[str | None] = mapped_column(String(127))
@@ -125,6 +136,26 @@ class MediaSource(Base):
 
     artifacts = relationship("MediaArtifact", back_populates="source", cascade="all, delete-orphan")
     jobs = relationship("MediaProcessingJob", back_populates="source", cascade="all, delete-orphan")
+
+
+@event.listens_for(MediaSource, "before_update")
+def _immutable_processing_purpose(mapper, connection, source):
+    if inspect(source).attrs.processing_purpose.history.has_changes():
+        raise ValueError("processing_purpose_immutable")
+
+
+@event.listens_for(Base, "before_insert", propagate=True)
+@event.listens_for(Base, "before_update", propagate=True)
+def _reject_visual_factual_support(mapper, connection, row):
+    # ORM defense also covers human annotation and direct provenance admission.
+    # The migration owner must mirror these guards for Core/raw SQL writes.
+    if mapper.local_table.name not in {"source_evidence", "source_memory_candidates", "source_candidate_evidence", "memory_source_links"}:
+        return
+    purpose = connection.scalar(select(MediaSource.processing_purpose).where(
+        MediaSource.id == row.source_id, MediaSource.legacy_id == row.legacy_id,
+    ))
+    if purpose == ProcessingPurpose.VISUAL_REFERENCE.value:
+        raise ValueError("visual_reference_has_no_factual_support")
 
 
 class MediaArtifact(Base):

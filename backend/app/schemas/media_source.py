@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field
 class SourceCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
     kind: Literal["image", "audio", "video", "document"]
+    processing_purpose: Literal["source_review", "visual_reference"] = "source_review"
     filename: str = Field(min_length=1, max_length=255)
     mime_type: str = Field(min_length=3, max_length=127)
     size_bytes: int = Field(ge=1)
@@ -32,6 +33,7 @@ class SourceResponse(BaseModel):
     uploader_name: str | None = None
     kind: str
     original_filename: str
+    processing_purpose: Literal["source_review", "visual_reference"] = "source_review"
     mime_type: str
     declared_mime_type: str
     size_bytes: int | None

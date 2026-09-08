@@ -20,7 +20,7 @@ from app.models.legacy import Legacy, LegacySetupStatus
 from app.models.media_source import (
     ArtifactKind, ArtifactState, MediaArtifact, MediaProcessingJob, MediaSource,
     ProcessingJobKind, ProcessingJobState, SourceKind, SourceSafetyState,
-    SourceState,
+    SourceState, ProcessingPurpose,
 )
 from app.models.user import User
 from app.services.authorization import legacy_role, require_legacy
@@ -59,8 +59,13 @@ def sanitize_filename(value: str) -> str:
     return value[:255] or "unnamed-source"
 
 
-def request_digest(kind: str, filename: str, mime_type: str, declared_size: int) -> str:
-    return hashlib.sha256(f"{kind}\n{filename}\n{mime_type}\n{declared_size}".encode()).hexdigest()
+def request_digest(kind: str, filename: str, mime_type: str, declared_size: int, processing_purpose: str = "source_review") -> str:
+    payload = f"{kind}\n{filename}\n{mime_type}\n{declared_size}"
+    # Preserve historical normal-upload receipts byte for byte. The explicit
+    # purpose comparison on replay binds those historical digests too.
+    if processing_purpose != ProcessingPurpose.SOURCE_REVIEW.value:
+        payload += f"\nprocessing_purpose={processing_purpose}"
+    return hashlib.sha256(payload.encode()).hexdigest()
 
 
 def _signature_ok(mime_type: str, data: bytes) -> bool:
@@ -121,6 +126,8 @@ def _can_read(db: Session, source: MediaSource, user_id: int) -> bool:
 def _authorize(db: Session, source: MediaSource, user_id: int, *, owner_only=False, uploader_only=False) -> None:
     legacy = _require_builder(db, user_id, source.legacy_id)
     role = legacy_role(db, user_id, legacy)
+    if source.processing_purpose == ProcessingPurpose.VISUAL_REFERENCE.value and role != "owner":
+        raise HTTPException(404, detail="Source not found.")
     if owner_only and role != "owner": raise HTTPException(403, detail="Only the Legacy owner can manage this source.")
     if uploader_only and source.uploader_user_id != user_id and role != "owner": raise HTTPException(403, detail="You cannot access this source.")
     if not owner_only and not _can_read(db, source, user_id): raise HTTPException(404, detail="Source not found.")
@@ -129,6 +136,7 @@ def _authorize(db: Session, source: MediaSource, user_id: int, *, owner_only=Fal
 def serialize_source(source: MediaSource, job: MediaProcessingJob | None = None) -> dict:
     return {"id": source.id, "legacy_id": source.legacy_id, "uploader_user_id": source.uploader_user_id,
             "kind": source.kind, "original_filename": source.original_filename,
+            "processing_purpose": source.processing_purpose,
             "mime_type": source.detected_mime_type or source.declared_mime_type,
             "declared_mime_type": source.declared_mime_type, "size_bytes": source.size_bytes,
             "declared_size_bytes": source.declared_size_bytes, "sha256": source.sha256,
@@ -146,22 +154,32 @@ class MediaSourceService:
     def __init__(self, storage: SourceStorage | None = None, settings: Settings | None = None):
         self.settings = settings or get_settings(); self.storage = storage or get_source_storage(self.settings)
 
-    def create(self, db: Session, user: User, legacy_id: int, *, kind: str, filename: str, mime_type: str, size_bytes: int, upload_request_key: str) -> MediaSource:
+    def create(self, db: Session, user: User, legacy_id: int, *, kind: str, filename: str, mime_type: str, size_bytes: int, upload_request_key: str, processing_purpose: str = "source_review") -> MediaSource:
         legacy = _require_builder(db, user.id, legacy_id)
         if legacy_role(db, user.id, legacy) not in {"owner", "collaborator"}: raise HTTPException(403, detail="You cannot add sources to this Legacy.")
         try: request_key = str(UUID(upload_request_key))
         except (ValueError, AttributeError): raise HTTPException(422, detail={"code": "invalid_upload_request_key", "message": "Upload request key is invalid."}) from None
         kind = kind.value if isinstance(kind, SourceKind) else kind
+        processing_purpose = processing_purpose.value if isinstance(processing_purpose, ProcessingPurpose) else processing_purpose
+        if processing_purpose not in {item.value for item in ProcessingPurpose}:
+            raise HTTPException(422, detail={"code": "unsupported_processing_purpose"})
+        if processing_purpose == ProcessingPurpose.VISUAL_REFERENCE.value:
+            if legacy_role(db, user.id, legacy) != "owner":
+                raise HTTPException(403, detail="Only the Legacy owner can add visual references.")
+            if kind != "image":
+                raise HTTPException(422, detail={"code": "visual_reference_image_required"})
+            if size_bytes > 20 * 1024 * 1024:
+                raise HTTPException(413, detail={"code": "source_too_large"})
         mime_type = _MIME_CANONICAL.get(mime_type.lower().split(";", 1)[0].strip(), mime_type.lower().split(";", 1)[0].strip())
         if kind not in _MIME_BY_KIND or mime_type not in _MIME_BY_KIND[kind]: validate_source_bytes(kind, mime_type, b"x", self.settings)
         if size_bytes < 1 or size_bytes > max_bytes(kind, self.settings): raise HTTPException(413, detail={"code": "source_too_large", "message": "That source file is too large."})
-        safe_name = sanitize_filename(filename); digest = request_digest(kind, safe_name, mime_type, size_bytes)
+        safe_name = sanitize_filename(filename); digest = request_digest(kind, safe_name, mime_type, size_bytes, processing_purpose)
         existing = db.scalar(select(MediaSource).where(MediaSource.legacy_id == legacy.id, MediaSource.uploader_user_id == user.id, MediaSource.upload_request_key == request_key))
         if existing:
-            if existing.upload_request_digest != digest: raise HTTPException(409, detail={"code": "upload_request_conflict", "message": "That upload request key was already used."})
+            if existing.processing_purpose != processing_purpose or existing.upload_request_digest != digest: raise HTTPException(409, detail={"code": "upload_request_conflict", "message": "That upload request key was already used."})
             return existing
         source_id, artifact_id = str(uuid4()), str(uuid4()); now = utcnow()
-        source = MediaSource(id=source_id, legacy_id=legacy.id, uploader_user_id=user.id, kind=kind, original_filename=safe_name,
+        source = MediaSource(id=source_id, legacy_id=legacy.id, uploader_user_id=user.id, kind=kind, processing_purpose=processing_purpose, original_filename=safe_name,
             declared_mime_type=mime_type, declared_size_bytes=size_bytes, state=SourceState.UPLOADING.value,
             safety_state=SourceSafetyState.PENDING.value, generation=1, metadata_json={}, upload_request_key=request_key,
             upload_request_digest=digest, upload_expires_at=now + timedelta(seconds=self.settings.media_upload_expire_seconds))
@@ -175,7 +193,7 @@ class MediaSourceService:
         try: db.commit()
         except IntegrityError:
             db.rollback(); existing = db.scalar(select(MediaSource).where(MediaSource.legacy_id == legacy.id, MediaSource.uploader_user_id == user.id, MediaSource.upload_request_key == request_key))
-            if existing and existing.upload_request_digest == digest: return existing
+            if existing and existing.processing_purpose == processing_purpose and existing.upload_request_digest == digest: return existing
             raise HTTPException(409, detail={"code": "upload_request_conflict", "message": "That upload request key was already used."}) from None
         db.refresh(source); return source
 
@@ -195,6 +213,8 @@ class MediaSourceService:
         except StorageError as exc: raise HTTPException(503, detail={"code": exc.code, "message": "The source could not be stored. Try again."}) from None
         now = utcnow(); source.detected_mime_type = detected; source.size_bytes = stored.byte_size; source.sha256 = hashlib.sha256(data).hexdigest()
         source.state = SourceState.QUEUED.value; source.safety_state = SourceSafetyState.CLEAN.value; source.uploaded_at = now; source.updated_at = now
+        if source.processing_purpose == ProcessingPurpose.VISUAL_REFERENCE.value:
+            source.safety_state = SourceSafetyState.PENDING.value
         artifact.state = ArtifactState.AVAILABLE.value; artifact.byte_size = stored.byte_size; artifact.sha256 = source.sha256; artifact.mime_type = detected; artifact.object_version = stored.version
         job = db.scalar(select(MediaProcessingJob).where(MediaProcessingJob.source_id == source.id, MediaProcessingJob.generation == source.generation, MediaProcessingJob.kind == ProcessingJobKind.EXTRACT.value))
         if job: job.stage = "admitted"; job.next_attempt_at = now
@@ -209,7 +229,7 @@ class MediaSourceService:
     def list(self, db: Session, user: User, legacy_id: int) -> list[MediaSource]:
         legacy = _require_builder(db, user.id, legacy_id); role = legacy_role(db, user.id, legacy)
         query = select(MediaSource).where(MediaSource.legacy_id == legacy_id)
-        if role != "owner": query = query.where(MediaSource.uploader_user_id == user.id)
+        if role != "owner": query = query.where(MediaSource.uploader_user_id == user.id, MediaSource.processing_purpose == ProcessingPurpose.SOURCE_REVIEW.value)
         return list(db.scalars(query.order_by(MediaSource.created_at.desc(), MediaSource.id.desc())).all())
 
     def get(self, db: Session, user: User, legacy_id: int, source_id: str) -> MediaSource:
@@ -228,9 +248,12 @@ class MediaSourceService:
         db.execute(update(SourceMemoryCandidate).where(SourceMemoryCandidate.legacy_id == source.legacy_id, SourceMemoryCandidate.source_id == source.id).values(removed_at=now, proposal_json={}, review_draft_json=None))
         db.execute(update(SourceEvidence).where(SourceEvidence.legacy_id == source.legacy_id, SourceEvidence.source_id == source.id, SourceEvidence.removed_at.is_(None)).values(text=None, locator_json={"kind": "removed"}, origin_json={}, removed_at=now))
         db.execute(update(MemorySourceLink).where(MemorySourceLink.legacy_id == source.legacy_id, MemorySourceLink.source_id == source.id, MemorySourceLink.support_state == SupportState.APPROVED.value).values(support_state=SupportState.UNAVAILABLE.value, removed_at=now))
-        from app.services.personality_invalidation import invalidate_in_transaction
-        invalidate_in_transaction(db.connection(), [source.legacy_id])
+        if source.processing_purpose == ProcessingPurpose.SOURCE_REVIEW.value:
+            from app.services.personality_invalidation import invalidate_in_transaction
+            invalidate_in_transaction(db.connection(), [source.legacy_id])
         db.add(MediaProcessingJob(id=str(uuid4()), legacy_id=legacy_id, source_id=source.id, generation=source.generation, kind=ProcessingJobKind.PURGE.value, pipeline_version=PIPELINE_VERSION, state=ProcessingJobState.QUEUED.value, stage="awaiting_purge", checkpoint_json={}))
+        from app.services.visual_companions import source_deleted_in_transaction
+        source_deleted_in_transaction(db, source)
         db.commit(); db.refresh(source); return source
 
     def retry(self, db: Session, user: User, legacy_id: int, source_id: str) -> MediaSource:

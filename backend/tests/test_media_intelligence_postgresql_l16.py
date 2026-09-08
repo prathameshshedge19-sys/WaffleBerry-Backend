@@ -56,7 +56,7 @@ def pg(tmp_path_factory):
     subprocess.run([sys.executable, "-m", "alembic", "upgrade", "head"], cwd=Path(__file__).parents[1], check=True)
     engine = build_engine(url)
     with engine.begin() as db:
-        assert db.execute(text("SELECT version_num FROM public.alembic_version")).scalar_one() == "0018_media_intelligence"
+        assert db.execute(text("SELECT version_num FROM public.alembic_version")).scalar_one() == "0021_visual_companions"
         tables = set(db.execute(text("SELECT table_name FROM information_schema.tables WHERE table_schema='public' AND table_name LIKE 'source_%' OR table_name='memory_source_links'")).scalars())
         assert {"source_evidence", "source_memory_candidates", "source_candidate_evidence", "memory_source_links"} <= tables
         db.execute(text("TRUNCATE memory_source_links, source_candidate_evidence, source_memory_candidates, source_evidence, media_processing_jobs, media_artifacts, media_sources, memories, memory_revisions, memory_entity_links, memory_entities, builder_activities, legacy_personality_profiles, legacies, users RESTART IDENTITY CASCADE"))

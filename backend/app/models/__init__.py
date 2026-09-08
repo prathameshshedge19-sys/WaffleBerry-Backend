@@ -10,8 +10,13 @@ from app.models.web_source import MessageWebSource
 from app.models.viewer import LegacyViewerAccess, ViewerAccessStatus
 from app.models.visitor import LegacyVisitorProfile, VisitorRelationshipStatus
 from app.models.story import Story, StoryChapter, StorySupportLink, StoryVersion
+from app.models.visual_companion import (
+    VisualCompanion, VisualCompanionVersion, VisualCompanionAsset, VisualGenerationJob,
+)
 
 __all__ = ["AccessRole", "ArtifactKind", "ArtifactState", "AuthChallenge", "BuilderActivity", "CollaboratorStatus", "Conversation", "DailyPrompt", "InviteStatus", "Legacy", "LegacyAccessEvent", "LegacyAccessInvite", "LegacyCollaborator", "LegacySetupStatus", "LegacyViewerAccess", "LegacyVisitorProfile", "LifeEvent", "LifeEventEntity", "LifeEventEvidence", "LifeEventMemory", "MediaArtifact", "MediaProcessingJob", "MediaSource", "Memory", "MemoryEntity", "MemoryEntityLink", "MemoryOperation", "MemoryRevision", "MemoryStatus", "Message", "MessageRole", "MessageWebSource", "ProcessingJobKind", "ProcessingJobState", "PromptStatus", "SourceKind", "SourceSafetyState", "SourceState", "TimelineEvidenceState", "TimelineLifecycleState", "TimelineLinkState", "TimelineOrigin", "TimelinePrecision", "TimelineReviewState", "User", "ViewerAccessStatus", "VisitorRelationshipStatus"]
+
+__all__ += ["VisualCompanion", "VisualCompanionVersion", "VisualCompanionAsset", "VisualGenerationJob"]
 
 # L13 isolated derived projection and transactional canonical-memory invalidation.
 from app.models.personality import LegacyPersonalityProfile  # noqa: F401

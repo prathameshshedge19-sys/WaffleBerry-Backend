@@ -56,7 +56,7 @@ def create_source(legacy_id: int, payload: SourceCreate, user: User = Depends(ge
     _enabled()
     source = MediaSourceService().create(db, user, legacy_id, kind=payload.kind, filename=payload.filename,
                                          mime_type=payload.mime_type, size_bytes=payload.size_bytes,
-                                         upload_request_key=str(payload.upload_request_key))
+                                         upload_request_key=str(payload.upload_request_key), processing_purpose=payload.processing_purpose)
     return _with_job(db, source)
 
 

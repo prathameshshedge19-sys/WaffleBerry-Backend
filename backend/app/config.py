@@ -67,6 +67,13 @@ class Settings(BaseSettings):
     media_upload_expire_seconds: int = Field(default=3600, ge=300, le=86400)
     media_intelligence_model: str = "gpt-5.5"
 
+    # L19 presentation only. Purge must not depend on either enablement flag.
+    visual_presence_enabled: bool = False
+    visual_preparation_enabled: bool = False
+    visual_worker_python: str | None = None
+    visual_model_path: str | None = None
+    visual_native_library_dir: str | None = None
+
     # L15 Phase B is opt-in infrastructure, with no product audio endpoint.
     realtime_enabled: bool = False
     realtime_model: str = "gpt-realtime-2.1"
