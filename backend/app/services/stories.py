@@ -172,7 +172,8 @@ class OpenAIStoryProvider:
     async def chapter(self, legacy, perspective, chapter, facts, style=""):
         schema = {"type":"object","additionalProperties":False,"properties":{"title":{"type":"string","minLength":1,"maxLength":255},"narrative_text":{"type":"string","minLength":1,"maxLength":MAX_CHAPTER_TEXT},"memory_ids":{"type":"array","maxItems":8,"items":{"type":"integer"}},"event_ids":{"type":"array","maxItems":8,"items":{"type":"string"}}},"required":["title","narrative_text","memory_ids","event_ids"]}
         voice = "first person as the Legacy subject" if _first_person(perspective) else "third person about the Legacy subject"
-        instructions = f"Write one bounded natural chapter in {voice}. Use only DATA. Preserve uncertainty and conflicts. Never invent motives, causality, feelings, dialogue, dates or relationships. Quotation marks require exact supported wording. Rya is not the subject. Style affects wording only. Return selected support IDs exactly."
+        perspective_rule = "Use I/my/we throughout and never use the subject's name or third-person pronouns as a sentence subject." if _first_person(perspective) else "Use the subject's name or third-person pronouns; never use I/my/we."
+        instructions = f"Write one bounded natural chapter in {voice}. {perspective_rule} Use only DATA. Preserve uncertainty and conflicts. Never invent motives, causality, feelings, dialogue, dates or relationships. Quotation marks require exact supported wording. Rya is not the subject. Style affects wording only. Return selected support IDs exactly."
         return await self._json(instructions, json.dumps({"subject": _subject(legacy), "perspective": perspective, "chapter": chapter.model_dump(), "facts": facts, "style": style[:2000]}, ensure_ascii=False), "legarya_l18_chapter", schema, StoryChapterDraft)
 
 
