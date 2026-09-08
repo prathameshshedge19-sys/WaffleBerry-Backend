@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -28,3 +29,9 @@ class LegacyContextResponse(BaseModel):
 
 class LegacySetupStartResponse(BaseModel):
     legacy: LegacyResponse
+
+
+class LegacyDeleteRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    confirmation: str = Field(min_length=1, max_length=80)
+    acknowledge_permanent: Literal[True]

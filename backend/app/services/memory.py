@@ -446,7 +446,9 @@ class LivingMemoryService:
     @staticmethod
     def lock_canonical_legacy(db: Session, legacy_id: int) -> None:
         """Serialize canonical writers with reviewed-source promotion."""
-        db.scalar(select(Legacy).where(Legacy.id == legacy_id).with_for_update())
+        current = db.scalar(select(Legacy).where(Legacy.id == legacy_id).execution_options(populate_existing=True).with_for_update())
+        if current is None or current.deletion_requested_at is not None:
+            raise ValueError("Legacy is no longer available")
 
     def preserve_reviewed_source(self, db: Session, legacy: Legacy, candidate: MemoryCandidate, *, source_language: str, user_id: int, vector: list[float]) -> tuple[Memory, str]:
         """Caller owns authorization, review receipt, provenance and transaction."""

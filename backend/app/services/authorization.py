@@ -8,7 +8,7 @@ from app.models.viewer import LegacyViewerAccess, ViewerAccessStatus
 
 
 def is_owner(user_id: int, legacy: Legacy) -> bool:
-    return legacy.owner_user_id == user_id
+    return legacy.deletion_requested_at is None and legacy.owner_user_id == user_id
 
 
 def collaborator_membership(db: Session, user_id: int, legacy_id: int) -> LegacyCollaborator | None:
@@ -21,6 +21,8 @@ def collaborator_membership(db: Session, user_id: int, legacy_id: int) -> Legacy
 
 
 def is_collaborator(db: Session, user_id: int, legacy: Legacy) -> bool:
+    if legacy.deletion_requested_at is not None:
+        return False
     membership = collaborator_membership(db, user_id, legacy.id)
     return bool(membership and membership.status == CollaboratorStatus.ACTIVE.value)
 
@@ -50,6 +52,8 @@ def viewer_access(db: Session, user_id: int, legacy_id: int) -> LegacyViewerAcce
 
 
 def can_view_legacy_as_persona(db: Session, user_id: int, legacy: Legacy) -> bool:
+    if legacy.deletion_requested_at is not None:
+        return False
     access = viewer_access(db, user_id, legacy.id)
     return bool(access and access.status == ViewerAccessStatus.ACTIVE.value)
 
@@ -69,7 +73,7 @@ def can_manage_access(user_id: int, legacy: Legacy) -> bool:
 def persona_legacy(db: Session, user_id: int, legacy_id: int | None) -> Legacy | None:
     if legacy_id is None:
         return None
-    legacy = db.get(Legacy, legacy_id)
+    legacy = db.get(Legacy, legacy_id, populate_existing=True)
     return legacy if legacy and can_view_legacy_as_persona(db, user_id, legacy) else None
 
 
@@ -83,7 +87,7 @@ def require_persona_legacy(db: Session, user_id: int, legacy_id: int) -> Legacy:
 def accessible_legacy(db: Session, user_id: int, legacy_id: int | None, *, owner_only: bool = False) -> Legacy | None:
     if legacy_id is None:
         return None
-    legacy = db.get(Legacy, legacy_id)
+    legacy = db.get(Legacy, legacy_id, populate_existing=True)
     if legacy is None:
         return None
     if owner_only:

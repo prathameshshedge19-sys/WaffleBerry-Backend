@@ -257,6 +257,10 @@ def main():
             started = time.monotonic()
             try:
                 outcome = worker.run_once()
+                from app.services.legacy_deletion import finalize_one
+                cleanup = finalize_one(worker.sessions, worker.storage)
+                if cleanup == "legacy_erased":
+                    outcome = cleanup
             except Exception:
                 # Never emit parser/provider/storage exception bodies or contents.
                 outcome = "worker_unavailable"

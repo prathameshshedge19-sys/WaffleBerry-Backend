@@ -32,9 +32,9 @@ def test_disposable_fresh_and_existing_0013_upgrade(tmp_path, from_0013):
             connection.exec_driver_sql("INSERT INTO users (full_name, email, password_hash, is_verified) VALUES ('Migration sentinel', 'l13-migration@example.com', 'not-a-real-password', 0)")
         engine.dispose()
     alembic(path, "upgrade", "head")
-    assert "0021_visual_companions (head)" in alembic(path, "current")
+    assert "0022_legacy_deletion (head)" in alembic(path, "current")
     heads = alembic(path, "heads")
-    assert heads.count("(head)") == 1 and "0021_visual_companions" in heads
+    assert heads.count("(head)") == 1 and "0022_legacy_deletion" in heads
     engine = sa.create_engine("sqlite:///" + path.as_posix())
     with engine.connect() as connection:
         inspector = sa.inspect(connection)

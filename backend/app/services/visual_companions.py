@@ -54,7 +54,7 @@ def locked(db, model, *conditions):
 def lock_scope(db, legacy_id, owner_id=None, *, require_active=True):
     rows = locked(db, Legacy, Legacy.id == legacy_id)
     legacy = rows[0] if rows else None
-    if legacy is None or (owner_id is not None and legacy.owner_user_id != owner_id):
+    if legacy is None or (owner_id is not None and (legacy.owner_user_id != owner_id or legacy.deletion_requested_at is not None)):
         raise HTTPException(404, detail="Legacy not found.")
     if require_active and owner_id is not None and legacy.setup_status != "active":
         conflict("legacy_not_active")

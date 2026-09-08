@@ -155,6 +155,7 @@ class MediaSourceService:
         self.settings = settings or get_settings(); self.storage = storage or get_source_storage(self.settings)
 
     def create(self, db: Session, user: User, legacy_id: int, *, kind: str, filename: str, mime_type: str, size_bytes: int, upload_request_key: str, processing_purpose: str = "source_review") -> MediaSource:
+        db.scalar(select(Legacy).where(Legacy.id == legacy_id).execution_options(populate_existing=True).with_for_update())
         legacy = _require_builder(db, user.id, legacy_id)
         if legacy_role(db, user.id, legacy) not in {"owner", "collaborator"}: raise HTTPException(403, detail="You cannot add sources to this Legacy.")
         try: request_key = str(UUID(upload_request_key))
@@ -235,7 +236,7 @@ class MediaSourceService:
     def get(self, db: Session, user: User, legacy_id: int, source_id: str) -> MediaSource:
         source = _load_source(db, source_id, legacy_id); _authorize(db, source, user.id); return source
 
-    def delete(self, db: Session, user: User, legacy_id: int, source_id: str) -> MediaSource:
+    def delete(self, db: Session, user: User, legacy_id: int, source_id: str, *, commit: bool = True) -> MediaSource:
         from app.models.media_intelligence import CandidateReviewState, MemorySourceLink, SourceEvidence, SourceMemoryCandidate, SupportState
         db.scalar(select(Legacy).where(Legacy.id == legacy_id).with_for_update())
         source = _load_source(db, source_id, legacy_id, lock=True); _authorize(db, source, user.id, owner_only=True)
@@ -254,7 +255,11 @@ class MediaSourceService:
         db.add(MediaProcessingJob(id=str(uuid4()), legacy_id=legacy_id, source_id=source.id, generation=source.generation, kind=ProcessingJobKind.PURGE.value, pipeline_version=PIPELINE_VERSION, state=ProcessingJobState.QUEUED.value, stage="awaiting_purge", checkpoint_json={}))
         from app.services.visual_companions import source_deleted_in_transaction
         source_deleted_in_transaction(db, source)
-        db.commit(); db.refresh(source); return source
+        if commit:
+            db.commit(); db.refresh(source)
+        else:
+            db.flush()
+        return source
 
     def retry(self, db: Session, user: User, legacy_id: int, source_id: str) -> MediaSource:
         db.scalar(select(Legacy).where(Legacy.id == legacy_id).with_for_update())

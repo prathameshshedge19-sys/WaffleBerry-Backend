@@ -29,6 +29,7 @@ class Legacy(Base):
     relationship_to_owner: Mapped[str | None] = mapped_column(String(80))
     is_self: Mapped[bool | None] = mapped_column(Boolean)
     setup_status: Mapped[str] = mapped_column(String(32), default=LegacySetupStatus.COLLECTING_IDENTITY.value)
+    deletion_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     collaborator_code_digest: Mapped[str | None] = mapped_column(String(64), unique=True, index=True)
     collaborator_code_ciphertext: Mapped[str | None] = mapped_column(Text)
     collaborator_code_hint: Mapped[str | None] = mapped_column(String(20))

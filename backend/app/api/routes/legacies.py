@@ -10,13 +10,25 @@ from app.database import get_db
 from app.models.legacy import Legacy
 from app.models.collaboration import CollaboratorStatus, LegacyCollaborator
 from app.models.user import User
-from app.schemas.legacy import LegacyContextResponse, LegacyResponse, LegacySetupStartResponse
+from app.schemas.legacy import LegacyContextResponse, LegacyResponse, LegacySetupStartResponse, LegacyDeleteRequest
 from app.services.authorization import legacy_role, require_legacy
 from app.services.legacy_setup import create_collecting_legacy, missing_setup_fields, pending_or_new_legacy
 
 
 router = APIRouter(prefix="/legacies", tags=["Legacies"])
 logger = logging.getLogger(__name__)
+
+
+@router.get("/{legacy_id}/deletion-preview")
+def deletion_preview(legacy_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    from app.services.legacy_deletion import preview
+    return preview(db, user.id, legacy_id)
+
+
+@router.delete("/{legacy_id}", status_code=status.HTTP_202_ACCEPTED)
+def delete_legacy(legacy_id: int, payload: LegacyDeleteRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    from app.services.legacy_deletion import request_deletion
+    return request_deletion(db, user, legacy_id, payload.confirmation)
 
 
 def _response(legacy: Legacy, role: str = "owner") -> dict:
@@ -38,12 +50,13 @@ def _response(legacy: Legacy, role: str = "owner") -> dict:
 @router.get("", response_model=LegacyContextResponse)
 def list_legacies(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     owned = list(db.scalars(
-        select(Legacy).where(Legacy.owner_user_id == user.id).order_by(Legacy.updated_at.desc(), Legacy.id.desc())
+        select(Legacy).where(Legacy.owner_user_id == user.id, Legacy.deletion_requested_at.is_(None)).order_by(Legacy.updated_at.desc(), Legacy.id.desc())
     ).all())
     collaborations = list(db.scalars(
         select(Legacy).join(LegacyCollaborator).where(
             LegacyCollaborator.user_id == user.id,
             LegacyCollaborator.status == CollaboratorStatus.ACTIVE.value,
+            Legacy.deletion_requested_at.is_(None),
         ).order_by(LegacyCollaborator.updated_at.desc(), Legacy.id.desc())
     ).all())
     legacies = [*owned, *collaborations]

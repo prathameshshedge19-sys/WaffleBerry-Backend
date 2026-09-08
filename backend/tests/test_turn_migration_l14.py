@@ -29,7 +29,8 @@ def test_fresh_and_0014_preserve_all_existing_rows(tmp_path, existing):
         with sessionmaker(bind=engine).begin() as db:
             db.add(User(id=1, full_name="Historical owner", email="old@example.com", password_hash="test"))
             db.flush()
-            db.add(Legacy(id=1, owner_user_id=1, subject_name="Historical subject", setup_status="active"))
+            # Seed the historical schema without newer model columns.
+            db.execute(sa.text("INSERT INTO legacies (id, owner_user_id, subject_name, setup_status) VALUES (1, 1, 'Historical subject', 'active')"))
             db.flush()
             db.add(Conversation(id=1, user_id=1, legacy_id=1, mode="rya", title="Historical conversation"))
             db.flush()
