@@ -28,6 +28,19 @@ from tests.visual_l19_helpers import admission, approval, command, factual_snaps
 BASE = "/api/v1/legacies/1/visual-companion"
 
 
+def test_pending_owner_can_choose_and_upload_photo_but_cannot_prepare_or_serve_portrait(api):
+    with api.factory.begin() as db:
+        db.get(Legacy, 1).setup_status = "collecting_identity"
+        db.get(Legacy, 1).subject_name = None
+    response = api.request("GET", BASE + "/capabilities")
+    private(response, 200)
+    assert response.json()["enabled"] is True
+    assert response.json()["can_manage"] is True
+    assert response.json()["can_prepare"] is False
+    private(api.request("GET", BASE), 200)
+    private(api.request("GET", BASE + "/active-manifest"), 404)
+
+
 def private(response, status):
     assert response.status_code == status, response.text
     assert response.headers["cache-control"] == "private, no-store"

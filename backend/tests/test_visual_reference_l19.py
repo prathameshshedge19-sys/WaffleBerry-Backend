@@ -100,8 +100,14 @@ def forbidden_provider(*args, **kwargs):
     pytest.fail("visual operation initialized an intelligence provider")
 
 
-def test_visual_lifecycle_zero_effects_and_lazy_provider(visual_db, deterministic_decoder, monkeypatch):
+@pytest.mark.parametrize("setup_status", ["active", "collecting_identity"])
+def test_visual_lifecycle_zero_effects_and_lazy_provider(visual_db, deterministic_decoder, monkeypatch, setup_status):
     factory, storage = visual_db
+    with factory.begin() as db:
+        legacy = db.get(Legacy, 1)
+        legacy.setup_status = setup_status
+        if setup_status == "collecting_identity":
+            legacy.subject_name = None
     monkeypatch.setattr("app.services.media_intelligence.get_source_analysis_provider", forbidden_provider)
     before = snapshot(factory)
     data = picture()

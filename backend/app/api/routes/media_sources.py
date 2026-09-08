@@ -43,7 +43,8 @@ def source_capabilities(legacy_id: int, user: User = Depends(get_current_user), 
     legacy = require_legacy(db, user.id, legacy_id)
     settings = get_settings()
     active = legacy.setup_status == "active"
-    return {"enabled": settings.media_enabled and active, "can_review": legacy_role(db, user.id, legacy) == "owner",
+    available = legacy.setup_status in {"active", "collecting_identity"}
+    return {"enabled": settings.media_enabled and available, "can_review": active and legacy_role(db, user.id, legacy) == "owner",
             "formats": [{"kind": kind, "mime_type": mime, "extensions": extensions, "max_bytes": max_bytes(kind, settings)}
                         for kind, mime, extensions in [("document", "text/plain", [".txt"]), ("document", "application/pdf", [".pdf"]),
                             ("image", "image/jpeg", [".jpg", ".jpeg"]), ("image", "image/png", [".png"]), ("image", "image/webp", [".webp"])]],

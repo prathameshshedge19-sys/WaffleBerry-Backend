@@ -65,6 +65,56 @@ def test_owner_upload_is_scoped_and_creates_no_memory(media_db):
         assert source.original_filename == "note.txt"
 
 
+@pytest.mark.parametrize("kind,mime,data,filename", [
+    ("document", "text/plain", b"Synthetic QA document.", "qa.txt"),
+    ("document", "application/pdf", b"%PDF-1.7\n%%EOF", "qa.pdf"),
+    ("image", "image/png", b"\x89PNG\r\n\x1a\nsynthetic", "qa.png"),
+])
+def test_upload_api_before_identity_setup_preserves_scope_and_canonical_authority(media_db, monkeypatch, kind, mime, data, filename):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from app.api.routes import media_sources as routes
+    from app.api.dependencies import get_current_user
+    from app.database import get_db
+    from app.services.media_review import _owner_legacy
+    from fastapi import HTTPException
+    factory, storage, _ = media_db
+    with factory.begin() as db:
+        legacy = db.get(Legacy, 1)
+        legacy.setup_status = "collecting_identity"
+        legacy.subject_name = None
+    app = FastAPI(); app.include_router(routes.router, prefix="/api/v1")
+    def database():
+        with factory() as db: yield db
+    def owner():
+        with factory() as db: return db.get(User, 1)
+    app.dependency_overrides[get_db] = database
+    app.dependency_overrides[get_current_user] = owner
+    monkeypatch.setattr(routes, "MediaSourceService", lambda: MediaSourceService(storage=storage))
+    base = "/api/v1/legacies/1/sources"
+    with TestClient(app) as client:
+        caps = client.get(base + "/capabilities").json()
+        assert caps["enabled"] is True and caps["can_review"] is False
+        reserved = client.post(base, json={"kind":kind,"filename":filename,"mime_type":mime,"size_bytes":len(data),"upload_request_key":str(uuid4())})
+        assert reserved.status_code == 201, reserved.text
+        source_id = reserved.json()["id"]
+        uploaded = client.put(base + "/" + source_id + "/content", content=data)
+        assert uploaded.status_code == 202, uploaded.text
+        assert uploaded.json()["legacy_id"] == 1
+        assert client.get(base).json()[0]["id"] == source_id
+        assert client.get(base + "/" + source_id + "/content").content == data
+        assert client.get("/api/v1/legacies/2/sources/" + source_id).status_code in (403,404)
+        assert client.delete(base + "/" + source_id).status_code == 202
+    with factory() as db:
+        assert db.get(Legacy, 1).setup_status == "collecting_identity"
+        assert db.get(Legacy, 1).subject_name is None
+        assert db.scalar(select(func.count()).select_from(Memory)) == 0
+        with pytest.raises(HTTPException): _owner_legacy(db, 1, 1)
+        db.rollback()
+        db.get(Legacy, 1).setup_status = "archived"; db.commit()
+        with pytest.raises(HTTPException): MediaSourceService(storage=storage).list(db, db.get(User, 1), 1)
+
+
 def test_collaborator_can_submit_but_cannot_read_other_source_or_delete(media_db):
     factory, storage, _ = media_db
     owner_source = _reserve(factory, storage, user_id=1)

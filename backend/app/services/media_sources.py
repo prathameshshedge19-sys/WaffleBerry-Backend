@@ -101,8 +101,8 @@ def validate_source_bytes(kind: str, mime_type: str, data: bytes, settings: Sett
 
 def _require_builder(db: Session, user_id: int, legacy_id: int) -> Legacy:
     legacy = require_legacy(db, user_id, legacy_id)
-    if legacy.setup_status != LegacySetupStatus.ACTIVE.value:
-        raise HTTPException(409, detail={"code": "legacy_not_active", "message": "Finish setting up this Legacy before adding sources."})
+    if legacy.setup_status not in {LegacySetupStatus.ACTIVE.value, LegacySetupStatus.COLLECTING_IDENTITY.value}:
+        raise HTTPException(409, detail={"code": "legacy_not_active", "message": "Sources are unavailable for this Legacy."})
     return legacy
 
 

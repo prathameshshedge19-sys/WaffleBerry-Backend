@@ -93,7 +93,7 @@ def capabilities(legacy_id: int, user=Depends(get_current_user), db=Depends(get_
             can_prepare = True
         except HTTPException:
             pass
-    return {"enabled": get_settings().visual_presence_enabled and legacy.setup_status == "active",
+    return {"enabled": get_settings().visual_presence_enabled and legacy.setup_status in {"active", "collecting_identity"},
         "owner_managed": True, "can_manage": role == "owner", "can_prepare": can_prepare,
         "recipe": "portrait_2d_v1", "max_photo_bytes": 20 * 1024 * 1024,
         "max_pixels": 24_000_000, "min_crop_edge": 128, "confirmation_copy_version": "l19-likeness-v1"}
