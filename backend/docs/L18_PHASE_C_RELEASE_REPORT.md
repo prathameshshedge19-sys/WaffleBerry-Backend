@@ -1,6 +1,6 @@
 # L18 Phase C — Stories / Biography Release Report
 
-Status: deployed and migrated, but final L18 acceptance/tagging is blocked because authenticated disposable production Story smoke data/session was unavailable. Report date: 2026-09-08.
+Status: deployed and migrated, but final L18 acceptance/tagging is blocked by a production first-person generation audit failure. Report date: 2026-09-08.
 
 ## Scope
 
@@ -48,4 +48,10 @@ Manual visual/browser/microphone acceptance is intentionally not a release block
 
 ## Known limitations
 
+Authenticated QA acceptance: login and `/auth/me` verification passed using the authorized QA account. The first run reproduced a real defect: first-person output containing subject-named third-person drift (`Asha moved`) was accepted. The narrow shared-audit fix and regression test were deployed, followed by a prompt constraint. The rerun correctly rejected unsafe provider output with HTTP 422 instead of persisting or publishing it. This is an acceptance failure, so no L18 tag was created. The temporary harness was removed. Clearly labelled synthetic fixtures remain in the authorized QA account because no normal Legacy-delete flow was available; no customer data was accessed.
+
+Post-fix local results: Story-focused tests **5 passed**; compileall and `git diff --check` passed. The full backend invocation stopped at collection because the environment lacks the pre-existing `boto3` dependency required by `tests/test_media_sse_l16.py`; it did not execute the full suite. The prior clean isolated result remains **888 collected, 832 passed, 56 skipped, 0 failed** before this correction. A full regression rerun with the media dependency is still required.
+
 No PDF/book export, claim-level provenance spans, dedicated Story worker, collaborator drafting, or visitor Story conversation integration was added. The existing unrelated active-worktree edits remain excluded: `backend/app/services/realtime_provider.py`, `backend/tests/test_realtime_l15.py`, and `backend/docs/L16_PHASE_A_ARCHITECTURE.md`.
+
+Correction to the deployment paragraph above: the final deployed backend revision is `ee15828b2e131bbcdb33989566c4f630c86fd415`; the earlier `a9f2104d8d870a06b94ffd0c7d2b4488b9ec011c` reference describes the pre-fix deployment checkpoint.
