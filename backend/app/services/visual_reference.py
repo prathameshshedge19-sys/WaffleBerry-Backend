@@ -111,9 +111,11 @@ def _decode_image(data: bytes, crop=None):
                             # center crop. Preserve aspect ratio/background and
                             # strip metadata inside the confined decoder.
                             with rotated.convert("RGB") as rgb:
-                                rgb.thumbnail((1024, 1024), Image.Resampling.LANCZOS)
+                                scale=1024/max(rgb.size)
+                                fitted=rgb.resize((max(1,round(rgb.width*scale)),max(1,round(rgb.height*scale))),Image.Resampling.LANCZOS)
                                 with Image.new("RGB", (1024, 1024), (238, 238, 238)) as clean:
-                                    clean.paste(rgb, ((1024-rgb.width)//2, (1024-rgb.height)//2))
+                                    try: clean.paste(fitted, ((1024-fitted.width)//2, (1024-fitted.height)//2))
+                                    finally: fitted.close()
                                     output = io.BytesIO()
                                     clean.save(output, format="PNG")
                                     if len(output.getvalue()) > 1400 * 1024:

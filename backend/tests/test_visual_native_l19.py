@@ -91,15 +91,21 @@ def test_real_provider_repeat_is_deterministic(native):
     assert first.assets==second.assets
 
 
-@pytest.mark.parametrize('layout',['center','off_center','tall','ambiguous'])
+@pytest.mark.parametrize('layout',['center','off_center','tall','small','distant','manual_distant','ambiguous'])
 def test_real_automatic_framing_uses_entire_photo_and_rejects_multiple_faces(native,layout):
     data,_=portrait('group_ambiguous' if layout=='ambiguous' else 'frontal')
+    if layout=='small':data,_=portrait('low_resolution')
+    if layout in {'distant','manual_distant'}:
+        with Image.open(io.BytesIO(data)) as face:
+            scene=Image.new('RGB',(1600,1600),(220,225,230));scene.paste(face.resize((256,256)),(1150,700))
+            output=io.BytesIO();scene.save(output,format='PNG');data=output.getvalue()
     if layout in {'off_center','tall'}:
         with Image.open(io.BytesIO(data)) as face:
             scene=Image.new('RGB',(1024,1024) if layout=='off_center' else (700,1400),(230,237,225))
             scene.paste(face.resize((384,384)),(600,25) if layout=='off_center' else (140,30))
             encoded=io.BytesIO();scene.save(encoded,format='PNG');data=encoded.getvalue()
     crop=dict(x=0,y=0,width=1,height=1,rotation=0,auto_fit=True)
+    if layout=='manual_distant':crop['auto_fit']=False
     if layout=='ambiguous':
         with pytest.raises(VisualBundleError,match='visual_needs_recrop'):native.prepare(data,crop,{})
         return

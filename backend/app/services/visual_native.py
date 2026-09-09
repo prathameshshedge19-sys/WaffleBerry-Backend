@@ -105,7 +105,7 @@ def confine(extra_read=()):
         sec.seccomp_release(ctx)
 
 
-def build_rig(png, landmarks, request_digest):
+def build_rig(png, landmarks, request_digest, *, landmark_grid=False):
     """Landmark-positioned restrained deformation; no recognition/expressions.
 
     A fixed image grid preserves the full approved crop. Source-measured eye/lip
@@ -144,13 +144,25 @@ def build_rig(png, landmarks, request_digest):
             raise ValueError('visual_needs_recrop')
         centers[name] = (cx, cy, rx, ry)
         patches[name] = [cx-rx, cy-ry, 2*rx, 2*ry]
-    # 22x22 = 484 vertices, 882 triangles, full square coverage.
-    vertices = [[x/21, y/21] for y in range(22) for x in range(22)]
+    # Keep the old grid where usable. If it misses eye/lip controls, place rows
+    # through measured features instead of asking the owner to shift the photo.
+    def axis(index):
+        anchors=sorted({round(c[index]+delta*c[index+2]/3,9)
+                        for c in centers.values() for delta in (-1,0,1)})
+        # Minimum spacing preserves triangle area under bounded deformation.
+        fixed=[]
+        for value in anchors:
+            if not fixed or value-fixed[-1]>=.012: fixed.append(value)
+        return sorted(fixed+[i/12 for i in range(13)
+                             if all(abs(i/12-a)>=.012 for a in fixed)])
+    xs,ys=(axis(0),axis(1)) if landmark_grid else ([i/21 for i in range(22)],)*2
+    vertices = [[x,y] for y in ys for x in xs]
     triangles = []
-    for y in range(21):
-        for x in range(21):
-            a = y*22+x
-            triangles.extend(([a,a+1,a+23], [a,a+23,a+22]))
+    columns=len(xs)
+    for y in range(len(ys)-1):
+        for x in range(columns-1):
+            a = y*columns+x
+            triangles.extend(([a,a+1,a+columns+1], [a,a+columns+1,a+columns]))
     movements = {name: [0.] * len(vertices) for name in centers}
     for i, (vx,vy) in enumerate(vertices):
         active = []
@@ -170,6 +182,8 @@ def build_rig(png, landmarks, request_digest):
                 amplitude *= (centers[name][1]-vy)/centers[name][3]
             movements[name][i] = round(amplitude*weight, 9)
     if any(max(map(abs, values)) < .0002 for values in movements.values()):
+        if not landmark_grid:
+            return build_rig(png,landmarks,request_digest,landmark_grid=True)
         raise ValueError('visual_needs_recrop')
     with Image.open(io.BytesIO(png)) as image:
         image.load()
@@ -214,6 +228,33 @@ def auto_frame(png, landmarks, padding=2.0):
     return output.getvalue(), [[(px-x)/edge,(py-y)/edge] for px,py in landmarks]
 
 
+def detect_points(detector, image, mp, np, *, auto_fit):
+    """Whole-photo detection, then bounded overlapping views for a distant face.
+
+    Views are used only when the whole image found none. Distinct detections
+    remain ambiguous; never silently select a person from a group.
+    """
+    result=detector.detect(mp.Image(image_format=mp.ImageFormat.SRGB,data=np.array(image.convert('RGB'))))
+    faces=[[[p.x,p.y] for p in face] for face in result.face_landmarks]
+    if faces or not auto_fit: return faces
+    from PIL import Image
+    unique=[]
+    for x,y in ((0,0),(.4,0),(0,.4),(.4,.4)):
+        with image.resize((1024,1024),Image.Resampling.LANCZOS,
+                          box=(x*image.width,y*image.height,(x+.6)*image.width,(y+.6)*image.height)) as view:
+            result=detector.detect(mp.Image(image_format=mp.ImageFormat.SRGB,data=np.array(view.convert('RGB'))))
+        for face in result.face_landmarks:
+            points=[[x+p.x*.6,y+p.y*.6] for p in face]
+            bounds=(min(p[0] for p in points),min(p[1] for p in points),max(p[0] for p in points),max(p[1] for p in points))
+            def same(previous):
+                a=previous[0];intersection=max(0,min(a[2],bounds[2])-max(a[0],bounds[0]))*max(0,min(a[3],bounds[3])-max(a[1],bounds[1]))
+                union=(a[2]-a[0])*(a[3]-a[1])+(bounds[2]-bounds[0])*(bounds[3]-bounds[1])-intersection
+                return union>0 and intersection/union>.4
+            if not any(same(previous) for previous in unique): unique.append((bounds,points))
+            if len(unique)>1: return [item[1] for item in unique]
+    return [item[1] for item in unique]
+
+
 def main():
     import resource
     libc = ctypes.CDLL(None, use_errno=True)
@@ -246,10 +287,22 @@ def main():
         with Image.open(io.BytesIO(png)) as image:
             if image.size != ((1024,1024) if auto_fit else (512,512)):
                 raise ValueError('visual_image_dimensions')
-            result = detector.detect(mp.Image(image_format=mp.ImageFormat.SRGB, data=np.array(image.convert('RGB'))))
-    if len(result.face_landmarks) != 1:
+            faces = detect_points(detector,image,mp,np,auto_fit=True)
+    if len(faces) != 1:
         raise ValueError('visual_needs_recrop')
-    points = [[p.x,p.y] for p in result.face_landmarks[0]]
+    points = faces[0]
+    if not auto_fit:
+        try:
+            bundle=build_rig(png,points,payload['request_digest'])
+        except ValueError as error:
+            if str(error)!='visual_needs_recrop': raise
+            # A detected single face inside the owner's frame can still be too
+            # distant for the rig. Frame it automatically inside that selected
+            # region; never reset to, or select a person outside, the original.
+            with Image.open(io.BytesIO(png)) as selected:
+                with selected.resize((1024,1024),Image.Resampling.LANCZOS) as enlarged:
+                    output=io.BytesIO();enlarged.save(output,format='PNG');png=output.getvalue()
+            auto_fit=True
     if auto_fit:
         # Fixed-grid alignment can make a usable face miss an eye/lip control.
         # Try bounded deterministic framing alternatives, retaining full geometry
@@ -264,8 +317,6 @@ def main():
                     raise
         else:
             raise ValueError('visual_needs_recrop')
-    else:
-        bundle = build_rig(png, points, payload['request_digest'])
     print(json.dumps({'assets':{k:base64.b64encode(v).decode() for k,v in bundle.assets.items()},
         'seconds':time.monotonic()-before,'peak_rss_kib':resource.getrusage(resource.RUSAGE_SELF).ru_maxrss}))
 
