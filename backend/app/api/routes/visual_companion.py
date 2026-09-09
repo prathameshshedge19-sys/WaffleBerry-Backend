@@ -1,6 +1,7 @@
 """Separate owner preview and active-viewer delivery. Never disclose storage URLs."""
 
 import hashlib
+from pydantic import BaseModel, ConfigDict, UUID4
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
@@ -48,6 +49,61 @@ class PrivateRoute(APIRoute):
 
 
 router = APIRouter(prefix="/legacies/{legacy_id}/visual-companion", tags=["Visual Presence"], route_class=PrivateRoute)
+
+
+class PictureSelection(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    source_id: UUID4
+
+
+def picture_json(db, user_id, legacy_id):
+    from app.services.display_picture import scope
+    selected = scope(db, user_id, legacy_id)
+    if not selected:
+        return {"available": False, "revision": None, "content_path": None}
+    _, revision, _ = selected
+    return {"available": True, "revision": revision,
+        "content_path": f"/legacies/{legacy_id}/visual-companion/display-picture/content?revision={revision}"}
+
+
+@router.get("/display-picture")
+def get_picture(legacy_id: int, user=Depends(get_current_user), db=Depends(get_db)):
+    return picture_json(db, user.id, legacy_id)
+
+
+@router.put("/display-picture")
+def set_picture(legacy_id: int, payload: PictureSelection, user=Depends(get_current_user), db=Depends(get_db)):
+    from app.services.display_picture import select_picture
+    select_picture(db, user.id, legacy_id, str(payload.source_id))
+    db.commit()
+    return picture_json(db, user.id, legacy_id)
+
+
+@router.get("/display-picture/content")
+def picture_content(legacy_id: int, revision: str = Query(max_length=80), user=Depends(get_current_user), db=Depends(get_db)):
+    from app.services.display_picture import scope
+    from app.services.visual_reference import normalize_crop
+    selected = scope(db, user.id, legacy_id)
+    if not selected or selected[1] != revision:
+        raise HTTPException(404, detail="Display picture unavailable.")
+    source, _, artifact = selected
+    identity = (source.id, source.generation, source.sha256, artifact.id, artifact.object_key,
+        artifact.object_version, artifact.byte_size, artifact.storage_backend, artifact.encryption_key_id)
+    db.rollback()
+    storage = VisualStorage(get_source_storage())
+    if storage.backend_name != identity[7] or storage.encryption_key_id != identity[8]:
+        raise HTTPException(503, detail="Picture storage unavailable.")
+    data = storage.read_original(identity[4], identity[5])
+    if len(data) != identity[6] or hashlib.sha256(data).hexdigest() != identity[2]:
+        raise HTTPException(503, detail="Picture unavailable.")
+    data = normalize_crop(data, {"display_picture": True})
+    fresh = scope(db, user.id, legacy_id)
+    if not fresh or fresh[1] != revision:
+        raise HTTPException(404, detail="Display picture changed.")
+    s, _, a = fresh
+    if (s.id, s.generation, s.sha256, a.id, a.object_key, a.object_version, a.byte_size, a.storage_backend, a.encryption_key_id) != identity:
+        raise HTTPException(404, detail="Display picture changed.")
+    return Response(data, media_type="image/jpeg", headers={**PRIVATE_HEADERS, "Content-Disposition": "inline; filename=legacy-picture.jpg"})
 
 
 def enabled():

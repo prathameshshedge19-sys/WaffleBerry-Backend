@@ -45,6 +45,8 @@ def _check_bytes(data):
 
 
 def _crop_values(crop):
+    if crop == {"display_picture": True}:
+        return crop
     if hasattr(crop, "model_dump"):
         crop = crop.model_dump()
     if not isinstance(crop, dict) or set(crop) - {"x", "y", "width", "height", "rotation", "auto_fit"}:
@@ -102,6 +104,14 @@ def _decode_image(data: bytes, crop=None):
                     if crop is None:
                         return result
                     crop = _crop_values(crop)
+                    if crop.get("display_picture"):
+                        with oriented.convert("RGB") as rgb:
+                            rgb.thumbnail((1024, 1024))
+                            with Image.new("RGB", rgb.size) as clean:
+                                clean.paste(rgb)
+                                output = io.BytesIO()
+                                clean.save(output, format="JPEG", quality=90)
+                                return output.getvalue()
                     # Positive selected rotation is clockwise, matching image UI.
                     rotated = oriented.rotate(-crop["rotation"], expand=True)
                     try:
@@ -230,7 +240,8 @@ def _run_decoder(data: bytes, crop=None):
             raise ValueError()
         if crop is not None:
             png = base64.b64decode(result["png"], validate=True)
-            if not png.startswith(b"\x89PNG\r\n\x1a\n") or len(png) > MAX_RESULT_BYTES:
+            signature = b"\xff\xd8" if crop.get("display_picture") else b"\x89PNG\r\n\x1a\n"
+            if not png.startswith(signature) or len(png) > MAX_RESULT_BYTES:
                 raise ValueError()
             return png
         if set(result) != {"width", "height", "mime"} or result["mime"] not in _MIMES.values():
