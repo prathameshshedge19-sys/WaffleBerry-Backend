@@ -22,7 +22,7 @@ ACTIVE = ("authorized", "connecting", "connected", "reconnecting")
 TERMINAL = ("ended", "revoked", "failed")
 REASONS = {"client_end", "browser_disconnect", "provider_disconnect", "access_changed", "logout",
            "session_expired", "ticket_expired", "lease_expired", "reconnect_expired", "protocol_error",
-           "queue_overrun", "rate_limit", "provider_failed", "idle_timeout", "backend_error"}
+           "queue_overrun", "rate_limit", "provider_failed", "idle_timeout", "backend_error", "plan_limit_reached"}
 
 
 class RealtimeError(Exception):
@@ -163,6 +163,8 @@ def authorize(db, actor_id, payload, origin, claims, settings):
     if recent >= settings.realtime_creations_per_minute:
         raise RealtimeError("realtime_rate_limit", 429)
     legacy_id, mode, role, _voice = resolve_scope(db, actor_id, **payload.model_dump())
+    from app.services.plan_enforcement import check_voice
+    check_voice(db, actor_id, mode, timestamp)
     row = Live(id=str(uuid4()), actor_user_id=actor_id, legacy_id=legacy_id,
                conversation_id=payload.conversation_id, active_actor_id=actor_id, mode=mode, role=role,
                state="authorized", origin=origin, created_at=timestamp,
@@ -190,6 +192,8 @@ def reconnect(db, session_id, actor_id, origin, settings):
     release_unanswered(db, row.id)
     reauthorize(db, row, settings, timestamp=timestamp)
     # Every replacement ticket fences all previous tickets/connections.
+    from app.services.plan_enforcement import check_voice
+    check_voice(db, actor_id, row.mode, timestamp)
     row.connection_generation += 1
     ticket = _ticket(row, settings, timestamp)
     db.commit()
@@ -215,6 +219,8 @@ def consume(db, ticket, origin, owner, settings):
     if row.state == "reconnecting" and timestamp >= utc(row.reconnect_until):
         raise RealtimeError("realtime_session_expired", 409)
     voice = reauthorize(db, row, settings, timestamp=timestamp)
+    from app.services.plan_enforcement import check_voice
+    check_voice(db, row.actor_user_id, row.mode, timestamp)
     row.ticket_used_at = timestamp
     row.connection_generation += 1
     row.state, row.lease_owner = "connecting", owner
@@ -240,7 +246,12 @@ def owned(db, session_id, owner, generation, settings, *, ready=False):
         row.connected_at = row.connected_at or timestamp
     if row.state == "connected":
         track_voice(db, row, timestamp, ready=ready)
+    from app.services.plan_enforcement import voice_remaining
+    remaining = voice_remaining(db, row.actor_user_id, row.mode, timestamp)
     db.commit()
+    if remaining is not None and remaining <= 0:
+        raise RealtimeError("plan_limit_reached", 429)
+    db.info["plan_voice_remaining_ms"] = remaining
     return row
 
 

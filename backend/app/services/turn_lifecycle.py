@@ -88,6 +88,17 @@ def accept_turn(db, conversation, payload, *, streaming=False, timezone_name="UT
         existing = db.scalar(select(ConversationTurn).where(*scope))
         if existing is not None:
             return existing_result(existing)
+    admission_time = None
+    if payload.input_mode != "realtime_voice":
+        from app.services.plan_enforcement import admission, check_text
+        with admission(db, conversation.user_id, conversation.mode+"_text") as enforce:
+            if enforce:
+                # Another conversation/request may have committed while waiting.
+                existing = db.scalar(select(ConversationTurn).where(*scope)) if payload.client_turn_id else None
+                if existing is not None:
+                    return existing_result(existing)
+                admission_time = _now()
+                check_text(db, conversation.user_id, conversation.mode, admission_time)
     active = select(ConversationTurn.id).where(ConversationTurn.conversation_id == conversation.id,
                                                ConversationTurn.state.in_(["pending", "streaming"]))
     if not atomic_admission:
@@ -98,8 +109,15 @@ def accept_turn(db, conversation, payload, *, streaming=False, timezone_name="UT
                             actor_user_id=conversation.user_id, mode=conversation.mode,
                             client_turn_id=payload.client_turn_id, request_digest=digest,
                             input_mode=payload.input_mode, state="pending")
+    if admission_time is not None:
+        turn.accepted_at = admission_time
     db.add(turn)
     try:
+        from app.services.plan_enforcement import enabled
+        if enabled() and payload.input_mode != "realtime_voice":
+            db.flush()
+            from app.services.plan_usage import track_turn
+            track_turn(db, turn)
         db.flush() if atomic_admission else control_commit(db)
     except IntegrityError:
         db.rollback()
@@ -107,6 +125,12 @@ def accept_turn(db, conversation, payload, *, streaming=False, timezone_name="UT
         if existing is None:
             raise
         return existing_result(existing)
+    except SQLAlchemyError:
+        db.rollback()
+        if enabled():
+            from app.services.plan_enforcement import unavailable
+            raise unavailable() from None
+        raise
     obs.accepted(turn.id, conversation.mode, payload.input_mode)
     db.info["active_turn_id"] = turn.id
     token = str(uuid4())

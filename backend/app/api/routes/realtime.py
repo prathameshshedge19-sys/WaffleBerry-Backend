@@ -38,6 +38,8 @@ def available(settings):
 
 
 def public_error(error):
+    if error.code == "plan_limit_reached":
+        return {"code": error.code, "message": "Your daily call allowance is used. It resets at midnight UTC."}
     return {"code": error.code, "message": "Live connection unavailable." if error.code != "realtime_setup_incomplete" else "Complete Legacy setup before starting live voice."}
 
 
@@ -231,6 +233,10 @@ async def bridge(websocket, provider, db, session_id, owner, generation, setting
             if time.monotonic() - checked_at >= 1:
                 await database_call(sessions.owned, db, session_id, owner, generation, settings)
                 checked_at = time.monotonic()
+                remaining = db.info.get("plan_voice_remaining_ms")
+                if remaining is not None and remaining <= 20_000:
+                    await send(websocket, settings, {"type": "quota_warning", "remaining_ms": remaining,
+                        "message": "Your daily call allowance is almost used. This call will end when it runs out."})
             try:
                 source, event = await asyncio.wait_for(inbox.get(), 1)
             except TimeoutError:
@@ -421,11 +427,19 @@ async def connect(websocket: WebSocket, db: Session = Depends(get_db), provider=
             reason = await bridge(websocket, provider, db, session_id, owner, generation, settings, memory_provider, web_provider)
     except WebSocketDisconnect:
         reason = "browser_disconnect"
+    except HTTPException as error:
+        db.rollback()
+        detail = error.detail if isinstance(error.detail, dict) else {}
+        reason = "plan_limit_reached" if detail.get("code") == "plan_limit_reached" else "backend_error"
+        if accepted:
+            with suppress(Exception):
+                await send(websocket, settings, {"type": "error", "code": detail.get("code", "realtime_not_available"),
+                    "message": detail.get("message", "Live connection unavailable.")})
     except sessions.RealtimeError as error:
         reason = {"realtime_provider_connection": "provider_disconnect", "realtime_provider_failed": "provider_failed",
                   "realtime_access_changed": "access_changed", "realtime_session_expired": "session_expired",
                   "realtime_rate_limit": "rate_limit", "realtime_queue_overrun": "queue_overrun",
-                  "realtime_idle_timeout": "idle_timeout"}.get(error.code, "protocol_error")
+                  "realtime_idle_timeout": "idle_timeout", "plan_limit_reached": "plan_limit_reached"}.get(error.code, "protocol_error")
         db.rollback()
         if error.code == "realtime_ticket_used":
             obs.emit("realtime_ticket_replay")

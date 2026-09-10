@@ -187,6 +187,13 @@ def apply_setup_message(legacy: Legacy, content: str, default_self_name: str | N
 
 
 def create_collecting_legacy(db: Session, user: User) -> Legacy:
+    from app.services.plan_enforcement import admission, check_capacity, enabled
+    if enabled():
+        # Match bootstrap's existing user-first lock order before changing selection.
+        db.scalar(select(User.id).where(User.id == user.id).with_for_update())
+    with admission(db, user.id, "owned_legacies") as enforce:
+        if enforce:
+            check_capacity(db, user.id, "owned_legacies")
     legacy = Legacy(owner_user_id=user.id, setup_status=LegacySetupStatus.COLLECTING_IDENTITY.value)
     db.add(legacy)
     db.flush()

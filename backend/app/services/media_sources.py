@@ -155,6 +155,11 @@ class MediaSourceService:
         self.settings = settings or get_settings(); self.storage = storage or get_source_storage(self.settings)
 
     def create(self, db: Session, user: User, legacy_id: int, *, kind: str, filename: str, mime_type: str, size_bytes: int, upload_request_key: str, processing_purpose: str = "source_review") -> MediaSource:
+        from app.services.plan_enforcement import admission, check_capacity
+        # Scope first, then owner quota lock, then existing Legacy/source locks.
+        scoped = _require_builder(db, user.id, legacy_id)
+        with admission(db, scoped.owner_user_id, "storage_bytes"):
+            pass  # Transaction retains the owner lock through reservation commit.
         db.scalar(select(Legacy).where(Legacy.id == legacy_id).execution_options(populate_existing=True).with_for_update())
         legacy = _require_builder(db, user.id, legacy_id)
         if legacy_role(db, user.id, legacy) not in {"owner", "collaborator"}: raise HTTPException(403, detail="You cannot add sources to this Legacy.")
@@ -179,6 +184,9 @@ class MediaSourceService:
         if existing:
             if existing.processing_purpose != processing_purpose or existing.upload_request_digest != digest: raise HTTPException(409, detail={"code": "upload_request_conflict", "message": "That upload request key was already used."})
             return existing
+        from app.services.plan_enforcement import enabled
+        if enabled():
+            check_capacity(db, legacy.owner_user_id, "storage_bytes", size_bytes)
         source_id, artifact_id = str(uuid4()), str(uuid4()); now = utcnow()
         source = MediaSource(id=source_id, legacy_id=legacy.id, uploader_user_id=user.id, kind=kind, processing_purpose=processing_purpose, original_filename=safe_name,
             declared_mime_type=mime_type, declared_size_bytes=size_bytes, state=SourceState.UPLOADING.value,
@@ -199,6 +207,11 @@ class MediaSourceService:
         db.refresh(source); return source
 
     def receive(self, db: Session, user: User, legacy_id: int, source_id: str, data: bytes) -> MediaSource:
+        from app.services.plan_enforcement import enabled, admission
+        if enabled():
+            scoped = _require_builder(db, user.id, legacy_id)
+            with admission(db, scoped.owner_user_id, "storage_bytes"):
+                pass  # Serialize reservation-to-stored transitions, including expiry.
         source = _load_source(db, source_id, legacy_id, lock=True); _authorize(db, source, user.id, uploader_only=True)
         if source.state != SourceState.UPLOADING.value:
             if source.state in {SourceState.QUEUED.value, SourceState.PROCESSING.value, SourceState.READY.value, SourceState.PARTIALLY_READY.value} and source.sha256 == hashlib.sha256(data).hexdigest(): return source

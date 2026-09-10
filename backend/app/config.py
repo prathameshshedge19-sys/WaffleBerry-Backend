@@ -32,6 +32,7 @@ class Settings(BaseSettings):
 
     # Phase 2 cannot enforce quotas. Enable only after the additive migration.
     plans_tracking_enabled: bool = False
+    plans_enforcement_enabled: bool = False
 
     openai_api_key: str | None = None
     ai_model: str = "gpt-5.6-luna"

@@ -97,10 +97,20 @@ def _turn(db, turn):
     _put(db, key="turn:" + identity, user_id=turn.actor_user_id, feature=turn.mode + "_text",
          day=utc(turn.accepted_at).date(), amount=int(state == "completed"),
          reserved=int(state == "pending"), released=int(state in {"failed", "interrupted"}), state=state)
+    from app.services.plan_enforcement import cutover
+    start = cutover(db)
+    if start and utc(turn.accepted_at) >= start:
+        _put(db, key="quota:turn:"+identity, user_id=turn.actor_user_id, feature="quota_"+turn.mode+"_text",
+             day=utc(turn.accepted_at).date(), amount=int(state == "completed"),
+             reserved=int(state == "pending"), released=int(state in {"failed", "interrupted"}), state=state)
 
 
 def track_turn(db, turn):
-    _safe(db, _turn, turn)
+    from app.services.plan_enforcement import enabled
+    if enabled():
+        _turn(db, turn)  # Receipt and saved reply must agree atomically.
+    else:
+        _safe(db, _turn, turn)
 
 
 def _segments(start, end):
@@ -121,6 +131,8 @@ def _voice_receipts(db, interval):
         _put(db, key=f"voice:{interval.session_id}:{interval.generation}:{day}",
              user_id=interval.user_id, feature=interval.feature, day=day,
              amount=micros, state="completed" if interval.ended_at else "pending")
+    from app.services.plan_enforcement import voice_receipts
+    voice_receipts(db, interval)
 
 
 def _voice(db, live, timestamp, *, ready=False, ending=False, recovered=False):
@@ -146,7 +158,11 @@ def _voice(db, live, timestamp, *, ready=False, ending=False, recovered=False):
 
 
 def track_voice(db, live, timestamp, **kwargs):
-    _safe(db, _voice, live, timestamp, **kwargs)
+    from app.services.plan_enforcement import enabled
+    if enabled():
+        _voice(db, live, timestamp, **kwargs)
+    else:
+        _safe(db, _voice, live, timestamp, **kwargs)
 
 
 def reconcile(db, *, batch_size=500):
@@ -228,10 +244,12 @@ def snapshot(db, user_id, *, timestamp=None):
     rows = db.execute(select(PlanUsage.feature, func.sum(PlanUsage.amount), func.sum(PlanUsage.reserved),
                             func.sum(PlanUsage.released)).where(PlanUsage.user_id == user_id,
                             PlanUsage.usage_day == timestamp.date()).group_by(PlanUsage.feature)).all()
+    from app.services.plan_enforcement import enabled, cutover
+    enforcing = enabled()
     totals = {feature: (int(amount), int(reserved), int(released)) for feature, amount, reserved, released in rows}
     daily = {}
     for feature in ("rya_text", "legacy_text", "rya_voice_ms", "legacy_voice_ms"):
-        stored_feature = feature.replace("_ms", "_us")
+        stored_feature = ("quota_" if enforcing else "")+feature.replace("_ms", "_us")
         used, reserved, released = totals.get(stored_feature, (0, 0, 0))
         divisor = 1000 if feature.endswith("_ms") else 1
         used = used / divisor if divisor != 1 else used
@@ -255,7 +273,8 @@ def snapshot(db, user_id, *, timestamp=None):
             RealtimeSession.actor_user_id == user_id,
             RealtimeSession.connected_at >= tracking.started_at,
             ~select(PlanVoiceInterval.session_id).where(PlanVoiceInterval.session_id == RealtimeSession.id).exists())) or 0
-    return {"mode": "shadow" if get_settings().plans_tracking_enabled else "off", "enforcement_enabled": False,
+    return {"mode": "enforced" if enforcing else "shadow" if get_settings().plans_tracking_enabled else "off", "enforcement_enabled": enforcing,
+        "enforcement_since": cutover(db).isoformat() if cutover(db) else None,
         "plan": plan, "quota_exempt": exempt, "plan_version": VERSION,
         "resets_at": datetime.combine(timestamp.date() + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc).isoformat(),
         "tracking_since": utc(tracking.started_at).isoformat() if tracking else None,
