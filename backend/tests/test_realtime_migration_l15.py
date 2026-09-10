@@ -22,8 +22,8 @@ def test_0016_fresh_upgrade_downgrade_reupgrade_preserves_history(tmp_path, exis
             c.exec_driver_sql("INSERT INTO messages(conversation_id,role,content) VALUES(1,'user','Preserve this message')")
         with engine.connect() as c:
             before = snapshot(c)
-    alembic(path, "upgrade", "head")
-    assert "0022_legacy_deletion (head)" in alembic(path, "current")
+    alembic(path, "upgrade", "0022_legacy_deletion")
+    assert "0022_legacy_deletion" in alembic(path, "current")
     with engine.connect() as c:
         assert c.exec_driver_sql("PRAGMA foreign_key_check").fetchall() == []
         assert c.exec_driver_sql("SELECT count(*) FROM realtime_sessions").scalar() == 0
@@ -33,7 +33,7 @@ def test_0016_fresh_upgrade_downgrade_reupgrade_preserves_history(tmp_path, exis
     with engine.connect() as c:
         assert "realtime_sessions" not in sa.inspect(c).get_table_names()
         if existing: assert snapshot(c) == before
-    alembic(path,"upgrade","head")
+    alembic(path,"upgrade","0022_legacy_deletion")
     engine.dispose()
 
 

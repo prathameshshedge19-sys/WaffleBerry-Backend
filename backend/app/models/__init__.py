@@ -6,6 +6,7 @@ from app.models.legacy import Legacy, LegacySetupStatus
 from app.models.memory import Memory, MemoryEntity, MemoryEntityLink, MemoryOperation, MemoryRevision, MemoryStatus
 from app.models.progress import BuilderActivity, DailyPrompt, PromptStatus
 from app.models.user import User
+from app.models.plan_usage import PlanEntitlement, PlanUsage, PlanVoiceInterval, PlanTrackingState  # noqa: F401
 from app.models.web_source import MessageWebSource
 from app.models.viewer import LegacyViewerAccess, ViewerAccessStatus
 from app.models.visitor import LegacyVisitorProfile, VisitorRelationshipStatus

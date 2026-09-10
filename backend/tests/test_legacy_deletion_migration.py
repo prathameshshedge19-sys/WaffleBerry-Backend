@@ -8,16 +8,16 @@ def test_deletion_marker_upgrade_downgrade_reupgrade_preserves_existing_legacy(t
     with engine.begin() as db:
         db.exec_driver_sql("INSERT INTO users(id,full_name,email,password_hash) VALUES(1,'Synthetic owner','qa@example.com','not-credentials')")
         db.exec_driver_sql("INSERT INTO legacies(id,owner_user_id,subject_name,setup_status) VALUES(1,1,'Synthetic Legacy','active')")
-    alembic(path,'upgrade','head')
+    alembic(path,'upgrade','0022_legacy_deletion')
     with engine.connect() as db:
         assert db.exec_driver_sql('SELECT subject_name,deletion_requested_at FROM legacies').one()==('Synthetic Legacy',None)
-    alembic(path,'downgrade','0021_visual_companions');alembic(path,'upgrade','head')
+    alembic(path,'downgrade','0021_visual_companions');alembic(path,'upgrade','0022_legacy_deletion')
     with engine.connect() as db:
         assert db.exec_driver_sql('SELECT subject_name,deletion_requested_at FROM legacies').one()==('Synthetic Legacy',None)
     engine.dispose()
 
 def test_downgrade_cannot_forget_pending_erasure(tmp_path):
-    path=tmp_path/'pending-delete.db';alembic(path,'upgrade','head')
+    path=tmp_path/'pending-delete.db';alembic(path,'upgrade','0022_legacy_deletion')
     engine=sa.create_engine('sqlite:///'+path.as_posix())
     with engine.begin() as db:
         db.exec_driver_sql("INSERT INTO users(id,full_name,email,password_hash) VALUES(1,'Synthetic owner','qa@example.com','not-credentials')")

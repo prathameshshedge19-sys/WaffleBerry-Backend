@@ -122,6 +122,9 @@ def claim_turn(db, turn_id, token, *, commit=True):
         ConversationTurn.id == turn_id, ConversationTurn.state == "pending",
         ConversationTurn.claim_token.is_(None),
     ).values(state="streaming", claim_token=token, started_at=_now(), updated_at=_now())).rowcount
+    if changed:
+        from app.services.plan_usage import track_turn
+        track_turn(db, db.get(ConversationTurn, turn_id))
     if commit:
         control_commit(db)
     return changed == 1
@@ -158,6 +161,8 @@ def finish_turn(db, assistant=None, *, state="completed", error_code=None):
              safe_error_code=error_code, finished_at=_now(), updated_at=_now())).rowcount
     if changed != 1:
         raise ValueError("Turn is already terminal or claim is not owned")
+    from app.services.plan_usage import track_turn
+    track_turn(db, db.get(ConversationTurn, turn_id))
 
 
 def fail_turn(db, *, interrupted=False, error_code="generation_failed"):
@@ -174,6 +179,8 @@ def fail_turn(db, *, interrupted=False, error_code="generation_failed"):
     ).values(state="interrupted" if interrupted else "failed", safe_error_code=error_code,
              finished_at=_now(), updated_at=_now())).rowcount
     if changed:
+        from app.services.plan_usage import track_turn
+        track_turn(db, db.get(ConversationTurn, turn_id))
         obs.failed("cancelled" if interrupted else "persistence_failed" if error_code == "persistence_failed" else "provider_failed")
         control_commit(db)
     else:

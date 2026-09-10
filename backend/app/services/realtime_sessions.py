@@ -16,6 +16,7 @@ from app.models.realtime_session import RealtimeSession as Live
 from app.models.user import User
 from app.services.authorization import can_talk_to_legacy, legacy_role
 from app.services import turn_observability as obs
+from app.services.plan_usage import track_voice
 
 ACTIVE = ("authorized", "connecting", "connected", "reconnecting")
 TERMINAL = ("ended", "revoked", "failed")
@@ -90,9 +91,12 @@ def _finish(row, state, reason, timestamp):
         row.revoked_at = timestamp
 
 
-def _recover(row, timestamp, settings):
+def _recover(row, timestamp, settings, db=None):
     if row.state in TERMINAL:
         return
+    if (db is not None and row.state == "connected" and
+            timestamp >= min(utc(row.expires_at), utc(row.auth_expires_at), utc(row.lease_expires_at))):
+        track_voice(db, row, timestamp, ending=True, recovered=True)
     reason = None
     if timestamp >= min(utc(row.expires_at), utc(row.auth_expires_at)):
         reason = "session_expired"
@@ -147,7 +151,7 @@ def authorize(db, actor_id, payload, origin, claims, settings):
     if cutoff and issued <= utc(cutoff):
         raise RealtimeError("realtime_access_changed")
     for old in db.scalars(select(Live).where(Live.active_actor_id == actor_id)).all():
-        _recover(old, timestamp, settings)
+        _recover(old, timestamp, settings, db)
         if old.state not in {"connecting", "connected"}:
             from app.services.realtime_transcripts import release_unanswered
             release_unanswered(db, old.id)
@@ -177,7 +181,7 @@ def reconnect(db, session_id, actor_id, origin, settings):
     if row.actor_user_id != actor_id or row.origin != origin:
         raise RealtimeError("realtime_not_authorized")
     timestamp = now()
-    _recover(row, timestamp, settings)
+    _recover(row, timestamp, settings, db)
     db.flush()
     if row.state != "reconnecting":
         db.commit()
@@ -234,6 +238,8 @@ def owned(db, session_id, owner, generation, settings, *, ready=False):
     if ready:
         row.state = "connected"
         row.connected_at = row.connected_at or timestamp
+    if row.state == "connected":
+        track_voice(db, row, timestamp, ready=ready)
     db.commit()
     return row
 
@@ -254,6 +260,7 @@ def close_owned(db, session_id, owner, generation, reason, settings):
         reason = "session_expired" if timestamp >= min(utc(row.expires_at), utc(row.auth_expires_at)) else "access_changed"
     if reason not in REASONS:
         reason = "backend_error"
+    track_voice(db, row, timestamp, ending=True)
     if reason in {"browser_disconnect", "provider_disconnect"}:
         row.state = "reconnecting"
         row.reconnect_until = min(timestamp + timedelta(seconds=settings.realtime_reconnect_seconds), utc(row.expires_at), utc(row.auth_expires_at))
@@ -275,6 +282,7 @@ def revoke(db, actor_id, *, legacy_id=None, reason="access_changed"):
     timestamp = now()
     for row in db.scalars(query).all():
         if row.state in ACTIVE:
+            track_voice(db, row, timestamp, ending=True)
             _finish(row, "revoked", reason, timestamp)
             from app.services.realtime_transcripts import release_unanswered
             release_unanswered(db, row.id)
@@ -296,7 +304,7 @@ def sweep(db, settings):
         lock_actor(db, actor)
         row = db.scalar(select(Live).where(Live.active_actor_id == actor).execution_options(populate_existing=True))
         if row:
-            _recover(row, now(), settings)
+            _recover(row, now(), settings, db)
             if row.state not in {"connecting", "connected"}:
                 from app.services.realtime_transcripts import release_unanswered
                 release_unanswered(db, row.id)

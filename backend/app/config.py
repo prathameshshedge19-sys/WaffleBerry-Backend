@@ -30,6 +30,9 @@ class Settings(BaseSettings):
     access_invite_expire_days: int = Field(default=7, ge=1, le=30)
     frontend_base_url: str = "http://localhost:5600"
 
+    # Phase 2 cannot enforce quotas. Enable only after the additive migration.
+    plans_tracking_enabled: bool = False
+
     openai_api_key: str | None = None
     ai_model: str = "gpt-5.6-luna"
     ai_reasoning_effort: Literal["none", "low", "medium", "high", "xhigh", "max"] = "low"
