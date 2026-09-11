@@ -20,6 +20,9 @@ class Settings(BaseSettings):
     legarya_debug: bool = True
     database_url: str = "sqlite:///./legarya.db"
     cors_origins: str = "http://127.0.0.1:5600,http://localhost:5600"
+    # Optional release-time switch for the bundled Capacitor client. Keeping it
+    # unset means Phase B code does not change the deployed production allowlist.
+    android_app_origin: Literal["https://localhost"] | None = None
 
     jwt_secret_key: str
     jwt_algorithm: str = "HS256"
@@ -110,6 +113,8 @@ class Settings(BaseSettings):
         origins = [value.strip().rstrip("/") for value in self.cors_origins.split(",") if value.strip()]
         if "*" in origins:
             raise ValueError("CORS_ORIGINS must use explicit origins.")
+        if self.android_app_origin and self.android_app_origin not in origins:
+            origins.append(self.android_app_origin)
         return origins
 
     @model_validator(mode="after")
