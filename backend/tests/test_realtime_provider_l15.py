@@ -152,6 +152,10 @@ def test_pronunciation_is_explicit_in_spoken_requests_without_changing_identity(
         assert prepared.turns[0].content in response["instructions"]
         expected_policy = RYA_SYSTEM_PROMPT.replace("Rya", "Ree-yah") if phase == "audio" else RYA_SYSTEM_PROMPT
         assert (expected_policy in response["instructions"]) == (mode == "rya")
+        assert ("BUILDER / LEGACY CHAT CONFUSION:" in response["instructions"]) == (mode == "rya")
+        if mode == "rya":
+            assert "choose Talk with a Legacy, paste the code" in response["instructions"]
+            assert "not the COL- collaborator code" in response["instructions"]
         assert (RYA_AUDIO_INTRODUCTION in response["instructions"]) == (mode == "rya" and phase == "audio")
         if phase == "audio":
             assert response["output_modalities"] == ["audio"]
