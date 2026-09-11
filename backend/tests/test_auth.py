@@ -92,6 +92,7 @@ def test_refresh_preserves_remembered_session_and_logout_clears_it(test_context)
     refreshed = client.post("/api/v1/auth/refresh")
     assert refreshed.status_code == 200
     refreshed_cookie = assert_refresh_cookie_policy(refreshed, samesite="lax", secure=False)
+    assert refreshed_cookie.value != refresh_cookie(login).value
     refreshed_payload = decode_token(refreshed_cookie.value, "refresh")
     assert refreshed_payload["remember_me"] is True
     assert refreshed_cookie["max-age"] == str(settings.remembered_refresh_token_expire_days * 86400)

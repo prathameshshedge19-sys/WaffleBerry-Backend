@@ -58,6 +58,9 @@ def create_refresh_token(user_id: int, password_hash: str, *, remember_me: bool 
             "purpose": "refresh",
             "fingerprint": _fingerprint(user_id, password_hash),
             "remember_me": remember_me,
+            # Ensure every successful refresh rotates the cookie even when two
+            # tokens are issued within the same one-second JWT timestamp tick.
+            "jti": secrets.token_urlsafe(24),
             "iat": now,
             "exp": now + timedelta(days=expire_days),
         },
