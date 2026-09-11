@@ -27,6 +27,8 @@ def test_android_origin_is_exact_and_additive():
         validate_origin("https://evil.example", configured)
     with pytest.raises(RealtimeError):
         validate_origin("capacitor://localhost", configured)
+    with pytest.raises(RealtimeError):
+        validate_origin("file://", configured)
 
 
 def test_android_origin_setting_rejects_wildcards_and_alternates():
