@@ -20,9 +20,11 @@ from app.models.story import Story, StorySupportLink
 from app.models.media_source import MediaSource, MediaArtifact, MediaProcessingJob
 from app.models.media_intelligence import MemorySourceLink, SourceCandidateEvidence, SourceMemoryCandidate, SourceEvidence
 from app.models.visual_companion import VisualCompanion, VisualCompanionVersion, VisualCompanionAsset, VisualGenerationJob
+from app.models.voice_profile import VoiceAsset, VoiceConsentReceipt, VoiceJob, VoiceProfile, VoiceProfileVersion
 from app.services.media_sources import MediaSourceService, PIPELINE_VERSION
 from app.services.visual_companions import VisualCompanionService
 from app.services.visual_storage import VisualStorage
+from app.services.voice_profiles import VoiceProfileService
 from app.services.media_storage import StorageError
 
 
@@ -68,6 +70,9 @@ def request_deletion(db, user, legacy_id, confirmation, *, source_service=None):
     profile = db.scalar(select(VisualCompanion).where(VisualCompanion.legacy_id == legacy_id))
     if profile is not None:
         VisualCompanionService().delete(db, user.id, legacy_id, profile.revision)
+    # The Legacy row is already locked. Selection is cleared and every active
+    # prepare/synthesis generation is fenced in this same deletion transaction.
+    VoiceProfileService().request_legacy_purge(db, legacy)
     legacy.deletion_requested_at = datetime.now(timezone.utc)
     legacy.setup_status = "archived"
     legacy.collaborator_code_enabled = legacy.viewer_code_enabled = False
@@ -83,6 +88,8 @@ def _ready(db, legacy_id):
         (MediaArtifact, MediaArtifact.state != "purged"),
         (VisualCompanionVersion, VisualCompanionVersion.state != "purged"),
         (VisualCompanionAsset, VisualCompanionAsset.state != "purged"),
+        (VoiceProfileVersion, VoiceProfileVersion.status != "purged"),
+        (VoiceAsset, VoiceAsset.state != "purged"),
     ):
         if db.scalar(select(model.id).where(model.legacy_id == legacy_id, clause).limit(1)) is not None:
             return False
@@ -145,10 +152,13 @@ absence alone cannot prove that a previously accepted remote PUT won't arrive.
             user.active_legacy_id = None
         db.execute(update(VisualCompanion).where(VisualCompanion.legacy_id == legacy_id)
                    .values(current_version_id=None, desired_version_id=None))
+        db.execute(update(VoiceProfile).where(VoiceProfile.legacy_id == legacy_id)
+                   .values(current_version_id=None, desired_version_id=None))
         db.flush()
         # Explicit child-first order for RESTRICT FKs. Remaining same-Legacy
         # facts, messages, memberships and derived rows use existing cascades.
-        for model in (VisualGenerationJob, VisualCompanionAsset, VisualCompanionVersion, VisualCompanion,
+        for model in (VoiceAsset, VoiceJob, VoiceProfileVersion, VoiceConsentReceipt, VoiceProfile,
+                      VisualGenerationJob, VisualCompanionAsset, VisualCompanionVersion, VisualCompanion,
                       StorySupportLink, LifeEventEvidence, MemorySourceLink, SourceCandidateEvidence,
                       SourceMemoryCandidate, SourceEvidence, MediaProcessingJob, MediaArtifact, MediaSource,
                       Conversation):

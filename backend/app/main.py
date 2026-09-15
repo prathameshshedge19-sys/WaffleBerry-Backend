@@ -18,6 +18,7 @@ from app.api.routes.timeline import router as timeline_router
 from app.api.routes.stories import router as stories_router
 from app.api.routes.visual_companion import router as visual_companion_router
 from app.api.routes.plans import router as plans_router
+from app.api.routes.voice_profile import router as voice_profile_router
 from app.config import get_settings
 from app.services.realtime_runtime import lifespan
 from app.services.plan_auxiliary import AuxiliaryUsageMiddleware
@@ -55,6 +56,7 @@ app.include_router(timeline_router, prefix="/api/v1")
 app.include_router(stories_router, prefix="/api/v1")
 app.include_router(visual_companion_router, prefix="/api/v1")
 app.include_router(plans_router, prefix="/api/v1")
+app.include_router(voice_profile_router, prefix="/api/v1")
 
 
 @app.get("/health")

@@ -55,6 +55,13 @@ class Settings(BaseSettings):
     voice_max_recording_seconds: int = Field(default=300, ge=10, le=600)
     voice_max_tts_characters: int = Field(default=4096, ge=100, le=4096)
 
+    # L21 preserved-voice surfaces are independently gated. All remain off
+    # until their later media, model, quality, policy, and realtime gates pass.
+    voice_cloning_enabled: bool = False
+    voice_enrollment_enabled: bool = False
+    voice_message_playback_enabled: bool = False
+    voice_live_enabled: bool = False
+
     # L16 Media & Sources. Production must explicitly select an encrypted
     # S3-compatible backend; local storage is only the debug/test adapter.
     media_enabled: bool = False
