@@ -384,7 +384,9 @@ class VisualStorage:
         receiver, sender = context.Pipe(duplex=False)
         # Transfer large inputs/results in shared memory, keeping spawn's input
         # pipe and recv() control messages small even for a 2 MiB object.
-        capacity = MAX_ORIGINAL_BYTES if operation == "read_original" else MAX_ASSET_BYTES if operation in ("read", "put") else 0
+        capacity = (MAX_ORIGINAL_BYTES if operation == "read_original"
+            else max(MAX_ASSET_BYTES, len(args[1])) if operation == "put"
+            else MAX_ASSET_BYTES if operation == "read" else 0)
         output = context.RawArray("B", capacity)
         if operation == "put":
             key, data, mime = args
@@ -432,6 +434,15 @@ class VisualStorage:
             raise StorageError("storage_mime_invalid")
         return self._run("put", key, data, mime)
 
+    def put_original(self, key: str, data: bytes, mime: str) -> StoredObject:
+        """Bounded private original write for worker-owned media pipelines."""
+        _key(key)
+        if not isinstance(data, bytes) or not 0 < len(data) <= MAX_ORIGINAL_BYTES:
+            raise StorageError("storage_size_invalid")
+        if not isinstance(mime, str) or not mime or len(mime) > 255 or any(ord(c) < 32 for c in mime):
+            raise StorageError("storage_mime_invalid")
+        return self._run("put", key, data, mime)
+
     def read(self, key: str, version: str | None = None) -> bytes:
         _key(key)
         _version(version)
@@ -457,6 +468,23 @@ class VisualStorage:
                 return False
             raise
         return len(data) == byte_size and hmac.compare_digest(hashlib.sha256(data).hexdigest(), sha256.lower())
+
+    def verify_original(self, key: str, sha256: str, byte_size: int,
+                        version: str | None = None) -> bool:
+        _key(key)
+        _version(version)
+        if (not isinstance(sha256, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", sha256)
+                or type(byte_size) is not int or not 0 < byte_size <= MAX_ORIGINAL_BYTES):
+            raise StorageError("storage_verification_invalid")
+        try:
+            data = self.read_original(key, version)
+        except StorageError as exc:
+            if (exc.code in ("storage_not_found", "storage_size_exceeded", "storage_version_mismatch")
+                    and exc.__cause__ is None):
+                return False
+            raise
+        return len(data) == byte_size and hmac.compare_digest(
+            hashlib.sha256(data).hexdigest(), sha256.lower())
 
     def erase(self, key: str) -> None:
         _key(key)

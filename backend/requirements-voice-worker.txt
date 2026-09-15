@@ -1,0 +1,6 @@
+# Install backend/requirements.txt first. For CPU hosts, install the matching
+# torch wheel from https://download.pytorch.org/whl/cpu before this file.
+torch==2.8.0
+transformers==4.56.2
+safetensors==0.6.2
+sentencepiece==0.2.1

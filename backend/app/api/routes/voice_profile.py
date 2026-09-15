@@ -1,17 +1,30 @@
-"""Owner-only L21 metadata/status API. No media content is accepted or served."""
+"""Owner-only private preserved-voice enrollment and status API."""
+
+import hashlib
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute
+from starlette.concurrency import run_in_threadpool
 
 from app.api.dependencies import get_current_user
 from app.config import get_settings
 from app.database import get_db
 from app.schemas.voice_profile import VoiceActivation, VoiceEnrollmentIntent, VoiceRevisionCommand
-from app.services.voice_profiles import VoiceEnrollmentService, VoiceProfileService
+from app.services.media_storage import StorageError
+from app.services.voice_profiles import (
+    CONSENT_COPY, CONSENT_POLICY, CONSENT_TEXT, CONSENT_TEXT_DIGEST,
+    StaleVoiceClaim, VoiceEnrollmentService, VoiceJobService, VoiceProfileService,
+)
+from app.services.voice_storage import VoiceStorage
 
 PRIVATE_HEADERS = {"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"}
+VOICE_UPLOAD_MIMES = frozenset({
+    "audio/wav", "audio/mpeg", "audio/mp4", "audio/x-m4a", "audio/webm",
+    "audio/ogg", "video/mp4", "video/webm",
+})
 
 
 class VoicePrivateRoute(APIRoute):
@@ -57,7 +70,8 @@ def _profile_json(status):
         "can_enroll": settings.voice_cloning_enabled and settings.voice_enrollment_enabled,
         "message_playback": settings.voice_cloning_enabled and settings.voice_message_playback_enabled,
         "live": settings.voice_cloning_enabled and settings.voice_live_enabled,
-    }}
+    }, "consent": {"copy": CONSENT_TEXT, "copy_version": CONSENT_COPY,
+        "policy_version": CONSENT_POLICY, "copy_digest": CONSENT_TEXT_DIGEST}}
 
 
 def _version_json(version):
@@ -77,6 +91,77 @@ def reserve_enrollment(legacy_id: int, payload: VoiceEnrollmentIntent,
     version = VoiceEnrollmentService().reserve_intent(db, user.id, legacy_id, payload)
     db.commit()
     return _version_json(version)
+
+
+async def _bounded_body(request: Request, maximum: int) -> bytes:
+    if request.headers.get("content-encoding"):
+        raise HTTPException(415, detail={"code": "voice_media_encoding_unsupported",
+            "message": "Compressed transfer encoding is not supported."})
+    declared = request.headers.get("content-length")
+    if declared:
+        try:
+            length = int(declared)
+        except ValueError:
+            length = -1
+        if length < 1 or length > maximum:
+            raise HTTPException(413, detail={"code": "voice_media_too_large",
+                "message": "The recording is empty or exceeds the upload limit."})
+    body = bytearray()
+    async for chunk in request.stream():
+        if not isinstance(chunk, bytes) or len(body) + len(chunk) > maximum:
+            raise HTTPException(413, detail={"code": "voice_media_too_large",
+                "message": "The recording is empty or exceeds the upload limit."})
+        body.extend(chunk)
+    if not body:
+        raise HTTPException(422, detail={"code": "voice_media_empty",
+            "message": "Choose a recording with audio."})
+    return bytes(body)
+
+
+@router.put("/enrollments/{version_id}/content", status_code=202,
+    dependencies=[Depends(enrollment_enabled)])
+async def upload_enrollment(legacy_id: int, version_id: UUID, request: Request,
+                            user=Depends(get_current_user), db=Depends(get_db)):
+    settings = get_settings()
+    mime = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+    if mime not in VOICE_UPLOAD_MIMES:
+        raise HTTPException(415, detail={"code": "voice_media_type_unsupported",
+            "message": "Choose a supported audio or video recording."})
+    source = await _bounded_body(request, settings.voice_enrollment_max_bytes)
+    digest = hashlib.sha256(source).hexdigest()
+    storage = VoiceStorage()
+    service = VoiceEnrollmentService()
+    version_key = str(version_id)
+    asset, created = service.reserve_upload(db, user.id, legacy_id, version_key,
+        sha256=digest, byte_count=len(source), mime_type=mime, storage=storage,
+        retention_seconds=settings.voice_original_retention_seconds)
+    db.commit()
+    if not created and asset.state == "available":
+        return {"version_id": version_key, "lifecycle": "queued"}
+    try:
+        stored = await run_in_threadpool(storage.put_original,
+            asset.object_key, source, mime)
+        asset.object_version = stored.version
+        if not await run_in_threadpool(storage.verify, asset):
+            raise StorageError("storage_verification_failed")
+        version, _job = service.publish_upload(db, user.id, legacy_id,
+            version_key, asset.id, stored)
+        db.commit()
+        return _version_json(version)
+    except StaleVoiceClaim:
+        db.rollback()
+        VoiceJobService().schedule_asset_purge(db, legacy_id=legacy_id,
+            asset_id=asset.id, not_before=asset.writer_deadline)
+        db.commit()
+        raise HTTPException(409, detail={"code": "voice_upload_changed",
+            "message": "This enrollment changed before the upload completed."})
+    except StorageError:
+        db.rollback()
+        service.fail_upload(db, user.id, legacy_id, version_key, asset.id,
+            "voice_storage_unavailable")
+        db.commit()
+        raise HTTPException(503, detail={"code": "voice_storage_unavailable",
+            "message": "The recording could not be stored securely. Please try again."})
 
 
 @router.post("/activate", dependencies=[Depends(enrollment_enabled)])

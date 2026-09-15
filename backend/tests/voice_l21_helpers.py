@@ -10,7 +10,10 @@ from app.models.legacy import Legacy
 from app.models.user import User
 from app.models.voice_profile import VoiceAsset, VoiceProfile
 from app.schemas.voice_profile import VoiceActivation, VoiceEnrollmentIntent
-from app.services.voice_profiles import VoiceEnrollmentService, VoiceJobService, VoiceProfileService, canonical_digest, utcnow
+from app.services.voice_profiles import (
+    CONSENT_TEXT_DIGEST, VoiceEnrollmentService, VoiceJobService,
+    VoiceProfileService, canonical_digest, utcnow,
+)
 from app.services.voice_providers import FakeReferencePreparationProvider
 
 
@@ -28,7 +31,7 @@ def intent(revision=0, key=None, **changes):
         "language": "mr", "consented": True,
         "consent_copy_version": "l21-voice-consent-v1",
         "policy_version": "l21-voice-policy-v1", "authority_basis": "self",
-        "source_category": "self_recording", "presented_copy_digest": "a" * 64}
+        "source_category": "self_recording", "presented_copy_digest": CONSENT_TEXT_DIGEST}
     values.update(changes)
     return VoiceEnrollmentIntent.model_validate(values)
 

@@ -21,12 +21,16 @@ from app.models.voice_profile import (
     VoiceAsset, VoiceConsentReceipt, VoiceJob, VoiceProfile, VoiceProfileVersion,
 )
 from app.services.voice_providers import (
-    ClonedSpeech, PreparedReference, validate_prepared, validate_speech,
+    REFERENCE_RECIPE, ClonedSpeech, PreparedReference, validate_prepared,
+    validate_speech,
 )
 
 CONSENT_COPY = "l21-voice-consent-v1"
 CONSENT_POLICY = "l21-voice-policy-v1"
-PREPARATION_RECIPE = "l21-reference-contract-v1"
+CONSENT_TEXT = ("I confirm that I have the authority to provide and preserve this voice "
+    "for this Legacy, and I consent to LegaRya processing this recording to create synthetic speech.")
+CONSENT_TEXT_DIGEST = hashlib.sha256(CONSENT_TEXT.encode("utf-8")).hexdigest()
+PREPARATION_RECIPE = REFERENCE_RECIPE
 LEASE_SECONDS = 30
 WRITER_SECONDS = 120
 HEX64 = re.compile(r"^[a-f0-9]{64}$")
@@ -126,11 +130,44 @@ def _schedule_purge(db, scope: VoiceScope, version: VoiceProfileVersion, now) ->
     return job
 
 
+def _schedule_asset_purge(db, scope: VoiceScope, asset: VoiceAsset, now,
+                          *, not_before=None) -> VoiceJob | None:
+    """Queue exact-object erasure without purging an otherwise usable version."""
+    if asset.state == "purged":
+        return None
+    asset.state = "purge_pending"
+    asset.purge_requested_at = asset.purge_requested_at or now
+    key = f"asset-purge:{asset.id}:{scope.versions[asset.version_id].operation_generation}"
+    existing = next((job for job in scope.jobs.values()
+        if job.kind == "purge" and job.request_key == key), None)
+    if existing:
+        return existing
+    version = scope.versions[asset.version_id]
+    request_digest = canonical_digest({"legacy_id": asset.legacy_id,
+        "profile_id": asset.voice_profile_id, "version_id": asset.version_id,
+        "asset_id": asset.id, "generation": version.operation_generation,
+        "kind": "asset_purge"})
+    job = VoiceJob(id=str(uuid4()), legacy_id=asset.legacy_id,
+        voice_profile_id=asset.voice_profile_id, version_id=asset.version_id,
+        kind="purge", state="queued", priority=100, attempts=0,
+        operation_generation=version.operation_generation,
+        next_attempt_at=not_before or now, request_key=key,
+        request_digest=request_digest, created_at=now)
+    db.add(job)
+    scope.jobs[job.id] = job
+    return job
+
+
 class VoiceEnrollmentService:
     """Reserve one enrollment attempt and one new human consent receipt."""
 
     def reserve_intent(self, db, owner_id: int, legacy_id: int, payload):
         scope = lock_scope(db, legacy_id, owner_id)
+        if (payload.consent_copy_version != CONSENT_COPY
+                or payload.policy_version != CONSENT_POLICY
+                or payload.presented_copy_digest != CONSENT_TEXT_DIGEST):
+            raise HTTPException(422, detail={"code": "voice_consent_invalid",
+                "message": "Voice authorization must be reviewed and accepted again."})
         request = payload.model_dump(mode="json")
         request.pop("expected_revision")
         request_digest = canonical_digest(request)
@@ -181,6 +218,96 @@ class VoiceEnrollmentService:
         db.flush()
         profile.desired_version_id = version.id
         return version
+
+    def reserve_upload(self, db, owner_id: int, legacy_id: int, version_id: str,
+                       *, sha256: str, byte_count: int, mime_type: str, storage,
+                       retention_seconds: int, writer_seconds: int = WRITER_SECONDS):
+        if (not HEX64.fullmatch(sha256) or type(byte_count) is not int or byte_count <= 0
+                or not isinstance(mime_type, str) or len(mime_type) > 127):
+            raise ValueError("voice_upload_invalid")
+        scope = lock_scope(db, legacy_id, owner_id)
+        profile = scope.profile
+        version = scope.versions.get(version_id)
+        consent = scope.consents.get(version.consent_receipt_id) if version else None
+        if (profile is None or version is None or version.voice_profile_id != profile.id
+                or profile.desired_version_id != version.id or version.status != "uploading"
+                or consent is None or consent.revoked_at is not None
+                or consent.actor_user_id != owner_id):
+            conflict("voice_upload_changed")
+        originals = [asset for asset in scope.assets.values()
+            if asset.version_id == version.id and asset.kind == "original"]
+        if originals:
+            asset = originals[0]
+            if (asset.sha256 != sha256 or asset.byte_count != byte_count
+                    or asset.mime_type != mime_type):
+                conflict("voice_upload_changed")
+            if asset.state == "available":
+                return asset, False
+            conflict("voice_upload_in_progress")
+        now = utcnow()
+        asset_id = str(uuid4())
+        key = (f"legarya/legacies/{legacy_id}/voice/{profile.id}/"
+            f"{version.id}/original/{asset_id}")
+        asset = VoiceAsset(id=asset_id, legacy_id=legacy_id,
+            voice_profile_id=profile.id, version_id=version.id, kind="original",
+            state="dispatching", storage_backend=storage.backend_name,
+            object_key=key, storage_bucket=storage.bucket_name,
+            encryption_key_id=storage.encryption_key_id, sha256=sha256,
+            byte_count=byte_count, mime_type=mime_type,
+            writer_deadline=now + timedelta(seconds=writer_seconds),
+            expires_at=now + timedelta(seconds=retention_seconds), created_at=now)
+        db.add(asset)
+        db.flush()
+        scope.assets[asset.id] = asset
+        return asset, True
+
+    def publish_upload(self, db, owner_id: int, legacy_id: int, version_id: str,
+                       asset_id: str, stored):
+        scope = lock_scope(db, legacy_id, owner_id)
+        profile = scope.profile
+        version = scope.versions.get(version_id)
+        asset = scope.assets.get(asset_id)
+        consent = scope.consents.get(version.consent_receipt_id) if version else None
+        now = utcnow()
+        if (profile is None or version is None or asset is None
+                or profile.desired_version_id != version.id or version.status != "uploading"
+                or asset.version_id != version.id or asset.kind != "original"
+                or asset.state != "dispatching" or asset.writer_deadline is None
+                or aware(asset.writer_deadline) <= now
+                or stored.byte_size != asset.byte_count
+                or consent is None or consent.revoked_at is not None
+                or consent.actor_user_id != owner_id):
+            raise StaleVoiceClaim()
+        asset.object_version = stored.version
+        asset.state = "available"
+        asset.writer_deadline = None
+        version.status = "queued"
+        version.updated_at = now
+        request_digest = canonical_digest({"legacy_id": legacy_id,
+            "profile_id": profile.id, "version_id": version.id,
+            "generation": version.operation_generation,
+            "original_sha256": asset.sha256, "kind": "prepare"})
+        job = VoiceJobService().enqueue(db, legacy_id=legacy_id,
+            profile_id=profile.id, version_id=version.id, kind="prepare",
+            request_key=f"prepare:{version.id}:{version.operation_generation}",
+            request_digest=request_digest, priority=40,
+            operation_generation=version.operation_generation)
+        return version, job
+
+    def fail_upload(self, db, owner_id: int, legacy_id: int, version_id: str,
+                    asset_id: str, safe_code: str):
+        scope = lock_scope(db, legacy_id, owner_id)
+        version = scope.versions.get(version_id)
+        asset = scope.assets.get(asset_id)
+        if version is None or asset is None or asset.version_id != version.id:
+            return None
+        now = utcnow()
+        if version.status == "uploading":
+            version.status = "failed"
+            version.safe_failure_code = safe_code
+            version.updated_at = now
+        not_before = asset.writer_deadline
+        return _schedule_asset_purge(db, scope, asset, now, not_before=not_before)
 
 
 class VoiceJobService:
@@ -251,10 +378,24 @@ class VoiceJobService:
             job.state = "cancelled"
             job.finished_at = now
             return None
-        if kind == "purge" and version.status != "purge_pending":
-            job.state = "cancelled"
-            job.finished_at = now
-            return None
+        if kind == "purge":
+            asset_id = job.request_key.split(":", 2)[1] if job.request_key.startswith("asset-purge:") else None
+            asset = scope.assets.get(asset_id) if asset_id else None
+            if ((asset_id and (asset is None or asset.version_id != version.id
+                    or asset.state != "purge_pending"))
+                    or (not asset_id and version.status != "purge_pending")):
+                job.state = "cancelled"
+                job.finished_at = now
+                return None
+            pending_deadlines = [aware(item.writer_deadline) for item in scope.assets.values()
+                if item.version_id == version.id and item.state == "purge_pending"
+                and item.writer_deadline is not None and aware(item.writer_deadline) > now
+                and (asset_id is None or item.id == asset_id)]
+            if pending_deadlines:
+                job.state = "retry_wait"
+                job.next_attempt_at = max(pending_deadlines)
+                job.lease_token = job.lease_expires_at = job.writer_deadline = None
+                return None
         job.state = "running"
         job.attempts += 1
         job.lease_token = str(uuid4())
@@ -265,6 +406,32 @@ class VoiceJobService:
         if kind == "prepare":
             version.status = "preparing"
         return job
+
+    def reconcile_expired_original_writes(self, db, *, now=None):
+        """Fence web-process crashes after an original reservation commit."""
+        now = now or utcnow()
+        legacy_ids = list(db.scalars(select(VoiceAsset.legacy_id).where(
+            VoiceAsset.kind == "original", VoiceAsset.state == "dispatching",
+            VoiceAsset.writer_deadline <= now).distinct().order_by(
+                VoiceAsset.legacy_id)))
+        reconciled = 0
+        for legacy_id in legacy_ids:
+            scope = lock_scope(db, legacy_id)
+            for asset in scope.assets.values():
+                if (asset.kind != "original" or asset.state != "dispatching"
+                        or asset.writer_deadline is None
+                        or aware(asset.writer_deadline) > now):
+                    continue
+                version = scope.versions.get(asset.version_id)
+                if version is None:
+                    continue
+                _schedule_asset_purge(db, scope, asset, now)
+                if version.status == "uploading":
+                    version.status = "failed"
+                    version.safe_failure_code = "voice_upload_interrupted"
+                    version.updated_at = now
+                reconciled += 1
+        return reconciled
 
     def _publication_scope(self, db, job_id, token, now):
         identity = db.execute(select(VoiceJob.legacy_id).where(VoiceJob.id == job_id)).scalar_one_or_none()
@@ -285,6 +452,61 @@ class VoiceJobService:
         job.finished_at = now
         job.lease_token = job.lease_expires_at = job.writer_deadline = None
 
+    def reserve_reference(self, db, job_id, token, result: PreparedReference, storage):
+        now = utcnow()
+        scope, version, job = self._publication_scope(db, job_id, token, now)
+        validate_prepared(result, version.operation_generation)
+        if (job.kind != "prepare" or scope.profile is None
+                or scope.profile.desired_version_id != version.id
+                or version.status != "preparing" or not result.reference_audio):
+            raise StaleVoiceClaim()
+        existing = next((asset for asset in scope.assets.values()
+            if asset.version_id == version.id and asset.kind == "reference"
+            and asset.state != "purged"), None)
+        if existing:
+            if (existing.sha256 == result.audio_digest
+                    and existing.byte_count == len(result.reference_audio)):
+                return existing
+            raise StaleVoiceClaim()
+        asset_id = str(uuid4())
+        key = (f"legarya/legacies/{version.legacy_id}/voice/{version.voice_profile_id}/"
+            f"{version.id}/reference/{asset_id}.wav")
+        asset = VoiceAsset(id=asset_id, legacy_id=version.legacy_id,
+            voice_profile_id=version.voice_profile_id, version_id=version.id,
+            job_id=job.id, kind="reference", state="dispatching",
+            storage_backend=storage.backend_name, storage_bucket=storage.bucket_name,
+            encryption_key_id=storage.encryption_key_id, object_key=key,
+            sha256=result.audio_digest, byte_count=len(result.reference_audio),
+            mime_type="audio/wav", sample_rate=result.sample_rate,
+            channels=result.channels, duration_ms=result.duration_ms,
+            writer_deadline=now + timedelta(seconds=WRITER_SECONDS), created_at=now)
+        db.add(asset)
+        db.flush()
+        return asset
+
+    def publish_reference(self, db, job_id, token, result: PreparedReference,
+                          *, reference_asset_id, stored, model_manifest,
+                          asr_manifest, inference_config):
+        now = utcnow()
+        scope, version, job = self._publication_scope(db, job_id, token, now)
+        asset = scope.assets.get(reference_asset_id)
+        if (job.kind != "prepare" or asset is None or asset.job_id != job.id
+                or asset.kind != "reference" or asset.state != "dispatching"
+                or asset.writer_deadline is None or aware(asset.writer_deadline) <= now
+                or stored.byte_size != asset.byte_count
+                or asset.sha256 != result.audio_digest):
+            raise StaleVoiceClaim()
+        asset.object_version = stored.version
+        asset.state = "available"
+        asset.writer_deadline = None
+        return self.publish_prepared(db, job_id, token, result,
+            reference_asset_id=reference_asset_id, model_manifest=model_manifest,
+            asr_manifest=asr_manifest, inference_config=inference_config)
+
+    def abandon_reference(self, db, *, legacy_id, asset_id, not_before=None):
+        return self.schedule_asset_purge(db, legacy_id=legacy_id,
+            asset_id=asset_id, not_before=not_before)
+
     def publish_prepared(self, db, job_id, token, result: PreparedReference, *, reference_asset_id,
                          model_manifest, asr_manifest, inference_config):
         now = utcnow()
@@ -294,12 +516,27 @@ class VoiceJobService:
                 or scope.profile.desired_version_id != version.id or version.status != "preparing"):
             raise StaleVoiceClaim()
         validate_prepared(result, version.operation_generation)
+        consent = scope.consents.get(version.consent_receipt_id)
         asset = scope.assets.get(reference_asset_id)
-        if (asset is None or asset.version_id != version.id or asset.kind != "reference"
+        if (consent is None or consent.revoked_at is not None
+                or consent.actor_user_id != version.created_by_user_id
+                or asset is None or asset.version_id != version.id or asset.kind != "reference"
                 or asset.state != "available" or asset.sha256 != result.audio_digest
                 or asset.sample_rate != result.sample_rate or asset.channels != result.channels
                 or asset.duration_ms != result.duration_ms):
             raise StaleVoiceClaim()
+        asr_manifest = {**asr_manifest,
+            "model": result.asr_model, "revision": result.asr_revision,
+            "task": "transcribe", "requested_language": "mr",
+            "detected_language": result.detected_language,
+            "selected_audio_sha256": result.audio_digest,
+            "raw_transcript_sha256": result.raw_transcript_digest,
+            "normalized_transcript_sha256": result.transcript_digest,
+            "selected_start_ms": result.selected_start_ms,
+            "selected_duration_ms": result.duration_ms}
+        inference_config = {**inference_config,
+            "reference_recipe_revision": result.recipe_revision,
+            "sample_rate": result.sample_rate, "channels": result.channels}
         version.reference_asset_id = asset.id
         version.reference_transcript = result.transcript
         version.reference_transcript_digest = result.transcript_digest
@@ -315,7 +552,28 @@ class VoiceJobService:
         version.status = "ready"
         version.ready_at = version.updated_at = now
         self._finish(job, now)
+        for original in scope.assets.values():
+            if original.version_id == version.id and original.kind == "original" and original.state != "purged":
+                _schedule_asset_purge(db, scope, original, now)
         return version
+
+    def publish_asset_purge(self, db, job_id, token, asset_id):
+        now = utcnow()
+        scope, version, job = self._publication_scope(db, job_id, token, now)
+        asset = scope.assets.get(asset_id)
+        if (job.kind != "purge" or job.request_key.split(":", 2)[1:2] != [asset_id]
+                or asset is None or asset.version_id != version.id or asset.state != "purged"
+                or asset.absent_since is None or asset.absence_checks < 1):
+            raise StaleVoiceClaim()
+        self._finish(job, now)
+        return asset
+
+    def schedule_asset_purge(self, db, *, legacy_id, asset_id, not_before=None):
+        scope = lock_scope(db, legacy_id)
+        asset = scope.assets.get(asset_id)
+        if asset is None:
+            return None
+        return _schedule_asset_purge(db, scope, asset, utcnow(), not_before=not_before)
 
     def publish_synthesis(self, db, job_id, token, result: ClonedSpeech, authoritative_text: str):
         now = utcnow()
@@ -370,6 +628,10 @@ class VoiceJobService:
                 version.status = "failed"
                 version.safe_failure_code = safe_code
                 version.updated_at = now
+                for asset in scope.assets.values():
+                    if asset.version_id == version.id and asset.kind == "original" and asset.state != "purged":
+                        _schedule_asset_purge(db, scope, asset, now,
+                            not_before=asset.expires_at or now)
         return job
 
 
@@ -379,13 +641,18 @@ class VoiceProfileService:
         profile = scope.profile
         if profile is None:
             return {"exists": False, "lifecycle": None, "revision": 0, "language": "mr",
-                "current_available": False, "candidate_available": False, "failure_code": None}
+                "current_available": False, "candidate_available": False,
+                "candidate_lifecycle": None, "candidate_version_id": None,
+                "candidate_binding_digest": None, "failure_code": None}
         current = scope.versions.get(profile.current_version_id)
         candidate = scope.versions.get(profile.desired_version_id)
         return {"exists": True, "lifecycle": profile.status, "revision": profile.revision,
             "language": (current or candidate).language if current or candidate else "mr",
             "current_available": bool(profile.status == "active" and current and current.status == "ready"),
             "candidate_available": bool(candidate and candidate.status == "ready"),
+            "candidate_lifecycle": candidate.status if candidate else None,
+            "candidate_version_id": candidate.id if candidate else None,
+            "candidate_binding_digest": candidate.binding_digest if candidate and candidate.status == "ready" else None,
             "failure_code": candidate.safe_failure_code if candidate and candidate.status == "failed" else None}
 
     def activate(self, db, owner_id, legacy_id, payload):

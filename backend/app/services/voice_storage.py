@@ -16,6 +16,22 @@ def utcnow():
 class VoiceStorage:
     def __init__(self, storage=None):
         self.storage = storage if isinstance(storage, VisualStorage) else VisualStorage(storage or get_source_storage())
+        self.backend_name = self.storage.backend_name
+        self.bucket_name = self.storage.bucket_name
+        self.encryption_key_id = self.storage.encryption_key_id
+
+    def put_original(self, key: str, data: bytes, mime: str):
+        return self.storage.put_original(key, data, mime)
+
+    def put_reference(self, key: str, data: bytes):
+        return self.storage.put(key, data, "audio/wav")
+
+    def read_original(self, asset: VoiceAsset) -> bytes:
+        return self.storage.read_original(asset.object_key, asset.object_version)
+
+    def verify(self, asset: VoiceAsset) -> bool:
+        verify = self.storage.verify_original if asset.kind == "original" else self.storage.verify
+        return verify(asset.object_key, asset.sha256, asset.byte_count, asset.object_version)
 
     def erase_registered(self, sessions, asset_id: str) -> bool:
         """Erase one exact registered key, then persist positive absence proof.

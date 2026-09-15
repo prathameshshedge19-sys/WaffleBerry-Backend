@@ -61,6 +61,28 @@ class Settings(BaseSettings):
     voice_enrollment_enabled: bool = False
     voice_message_playback_enabled: bool = False
     voice_live_enabled: bool = False
+    # L21.3 enrollment limits are deliberately independent from the broader
+    # L16 source limits. The web process only accepts the bounded original;
+    # decoding and ASR live in the separately configured voice worker.
+    voice_enrollment_max_bytes: int = Field(default=20 * 1024 * 1024, ge=1024, le=25 * 1024 * 1024)
+    voice_enrollment_max_duration_seconds: int = Field(default=600, ge=15, le=900)
+    voice_enrollment_max_streams: int = Field(default=2, ge=1, le=4)
+    voice_enrollment_max_channels: int = Field(default=2, ge=1, le=8)
+    voice_enrollment_max_sample_rate: int = Field(default=96000, ge=24000, le=192000)
+    voice_enrollment_decode_max_bytes: int = Field(default=30 * 1024 * 1024, ge=1024 * 1024, le=50 * 1024 * 1024)
+    voice_enrollment_process_timeout_seconds: int = Field(default=45, ge=5, le=120)
+    voice_original_retention_seconds: int = Field(default=86400, ge=300, le=86400)
+    voice_reference_min_seconds: float = Field(default=5.0, ge=3.0, le=5.0)
+    voice_reference_preferred_seconds: float = Field(default=7.0, ge=5.0, le=8.0)
+    voice_reference_max_seconds: float = Field(default=15.0, ge=8.0, le=15.0)
+    voice_reference_provider: Literal["fake", "whisper"] = "fake"
+    voice_ffmpeg_path: str = "ffmpeg"
+    voice_ffprobe_path: str = "ffprobe"
+    voice_temp_path: str = "./voice-worker-tmp"
+    voice_worker_lease_seconds: int = Field(default=300, ge=30, le=600)
+    voice_whisper_model_repo: Literal["openai/whisper-large-v3-turbo"] = "openai/whisper-large-v3-turbo"
+    voice_whisper_model_revision: Literal["41f01f3fe87f28c78e2fbf8b568835947dd65ed9"] = "41f01f3fe87f28c78e2fbf8b568835947dd65ed9"
+    voice_whisper_local_files_only: bool = True
 
     # L16 Media & Sources. Production must explicitly select an encrypted
     # S3-compatible backend; local storage is only the debug/test adapter.
@@ -135,6 +157,11 @@ class Settings(BaseSettings):
                         self.media_s3_secret_access_key, self.media_s3_sse_customer_key,
                         self.media_s3_sse_customer_key_id)):
                 raise ValueError("Production media requires private S3 credentials and SSE-C configuration.")
+        if not self.legarya_debug and self.voice_enrollment_enabled:
+            if not self.voice_cloning_enabled or self.voice_reference_provider != "whisper":
+                raise ValueError("Production voice enrollment requires the explicit Whisper worker provider.")
+            if self.media_storage_backend != "s3":
+                raise ValueError("Production voice enrollment requires private S3-compatible storage.")
         return self
 
 

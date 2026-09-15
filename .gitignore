@@ -26,6 +26,8 @@ __pycache__/
 htmlcov/
 .local/
 tests/previews/
+backend/media-storage/
+backend/voice-worker-tmp/
 
 # Runtime and build output
 *.log

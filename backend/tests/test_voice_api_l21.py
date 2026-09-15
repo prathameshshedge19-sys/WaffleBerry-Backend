@@ -8,6 +8,7 @@ from app.models.legacy import Legacy
 from app.models.user import User
 from app.models.viewer import LegacyViewerAccess
 from app.services.security import create_access_token
+from app.services.voice_profiles import CONSENT_TEXT, CONSENT_TEXT_DIGEST
 
 BASE = "/api/v1/legacies/101/voice-profile"
 
@@ -55,7 +56,7 @@ def command(key=None, **changes):
         "language": "mr", "consented": True,
         "consent_copy_version": "l21-voice-consent-v1",
         "policy_version": "l21-voice-policy-v1", "authority_basis": "self",
-        "source_category": "self_recording", "presented_copy_digest": "a" * 64}
+        "source_category": "self_recording", "presented_copy_digest": CONSENT_TEXT_DIGEST}
     value.update(changes)
     return value
 
@@ -79,8 +80,14 @@ def test_owner_status_enrollment_idempotency_and_safe_serialization(api):
     private(response, 200)
     assert response.json() == {"exists": False, "lifecycle": None, "revision": 0,
         "language": "mr", "current_available": False, "candidate_available": False,
-        "failure_code": None, "capabilities": {"owner_managed": True,
-            "can_enroll": True, "message_playback": False, "live": False}}
+        "candidate_lifecycle": None, "candidate_version_id": None,
+        "candidate_binding_digest": None, "failure_code": None,
+        "capabilities": {"owner_managed": True, "can_enroll": True,
+            "message_playback": False, "live": False},
+        "consent": {"copy": CONSENT_TEXT,
+            "copy_version": "l21-voice-consent-v1",
+            "policy_version": "l21-voice-policy-v1",
+            "copy_digest": CONSENT_TEXT_DIGEST}}
     key = str(uuid4())
     first = client.post(BASE + "/enrollments", headers=headers(users[101]), json=command(key))
     private(first, 202)
