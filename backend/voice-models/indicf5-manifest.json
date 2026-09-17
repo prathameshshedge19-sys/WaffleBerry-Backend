@@ -1,0 +1,34 @@
+{
+  "schema": "l21-indicf5-manifest-v1",
+  "status": "complete",
+  "model": {
+    "repo": "ai4bharat/IndicF5",
+    "revision": "ba85abedf18dc479a447eaa0eccbd76ab78a47d5"
+  },
+  "source": {
+    "repo": "https://github.com/AI4Bharat/IndicF5.git",
+    "revision": "13f7c4d627cc10111aea8fe9c0039462cacacdc7"
+  },
+  "vocoder": {
+    "repo": "charactr/vocos-mel-24khz",
+    "revision": "0feb3fdd929bcd6649e0e7c5a688cf7dd012ef21"
+  },
+  "inference": {
+    "nfe_step": 48,
+    "cfg_strength": 1.65,
+    "sway_sampling_coef": -1.0,
+    "speed": 0.97,
+    "cross_fade_duration": 0.1,
+    "target_rms": 0.1,
+    "sample_rate": 24000,
+    "channels": 1
+  },
+  "files": [
+    {"path": "indicf5/model.py", "bytes": 5774, "sha256": "64ae04ffd86ba942de8342229a2883a915b54d74e21717b0cee2b13782df4c60", "git_blob_sha1": "c8431d492667a4d7b618e262b3d58a7b6964122f"},
+    {"path": "indicf5/model.safetensors", "bytes": 1402789408, "sha256": "ba7f3671180fb7784e24bd1dafc96e729a38ce02e7f6d3877cdef32525a1865c"},
+    {"path": "indicf5/config.json", "bytes": 350, "sha256": "9d2bc0d96078b6914e9d77d3b7236c473fa11220a12b7ac0e3fdd148d0533591", "git_blob_sha1": "bb1ebb0ad5e6b06a2f493887dce171b6e86640f0"},
+    {"path": "indicf5/checkpoints/vocab.txt", "bytes": 11283, "sha256": "d3a5ff6aac12ea4fb50628a66a97b20c1e83b9e5ca356e5afae17b511cda96df", "git_blob_sha1": "65db6313e8830d8a31b2ae46f15d8487456c1a8d"},
+    {"path": "vocos/config.yaml", "bytes": 461, "sha256": "da9033922f969a47f0c160010226919e59f27761fd5066f3828d46de6650b0fc"},
+    {"path": "vocos/pytorch_model.bin", "bytes": 54365991, "sha256": "97ec976ad1fd67a33ab2682d29c0ac7df85234fae875aefcc5fb215681a91b2a"}
+  ]
+}

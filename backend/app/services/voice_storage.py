@@ -26,8 +26,14 @@ class VoiceStorage:
     def put_reference(self, key: str, data: bytes):
         return self.storage.put(key, data, "audio/wav")
 
+    def put_generated(self, key: str, data: bytes):
+        return self.storage.put(key, data, "audio/wav")
+
     def read_original(self, asset: VoiceAsset) -> bytes:
         return self.storage.read_original(asset.object_key, asset.object_version)
+
+    def read_private(self, asset: VoiceAsset) -> bytes:
+        return self.storage.read(asset.object_key, asset.object_version)
 
     def verify(self, asset: VoiceAsset) -> bool:
         verify = self.storage.verify_original if asset.kind == "original" else self.storage.verify

@@ -36,8 +36,8 @@ def intent(revision=0, key=None, **changes):
     return VoiceEnrollmentIntent.model_validate(values)
 
 
-def reserve(db, revision=0, legacy_id=1, key=None):
-    version = VoiceEnrollmentService().reserve_intent(db, 1, legacy_id, intent(revision, key))
+def reserve(db, revision=0, legacy_id=1, key=None, owner_id=1):
+    version = VoiceEnrollmentService().reserve_intent(db, owner_id, legacy_id, intent(revision, key))
     db.commit()
     return version
 
@@ -71,9 +71,9 @@ def prepare(db, version, source=b"synthetic-reference-fixture"):
     db.commit()
     return result
 
-def activate(db, version):
+def activate(db, version, owner_id=1):
     profile = db.scalar(select(VoiceProfile).where(VoiceProfile.id == version.voice_profile_id))
-    result = VoiceProfileService().activate(db, 1, version.legacy_id,
+    result = VoiceProfileService().activate(db, owner_id, version.legacy_id,
         VoiceActivation(version_id=version.id, expected_revision=profile.revision,
             binding_digest=version.binding_digest, approved=True))
     db.commit()

@@ -25,6 +25,7 @@ def revision(name):
 
 
 migration = revision("0024_voice_profiles")
+synthesis_migration = revision("0025_voice_synthesis_jobs")
 tables = [item.__table__ for item in (VoiceProfile, VoiceConsentReceipt, VoiceProfileVersion, VoiceJob, VoiceAsset)]
 
 
@@ -74,6 +75,7 @@ def test_0023_upgrade_0024_downgrade_reupgrade_and_constraints():
         conn.exec_driver_sql("INSERT INTO legacies (id,owner_user_id,subject_name,setup_status) VALUES (1,1,'One','active'),(2,1,'Two','active')")
         with Operations.context(context):
             migration.upgrade()
+            synthesis_migration.upgrade()
         metadata = sa.MetaData()
         metadata.reflect(conn)
         for expected in tables:
@@ -141,12 +143,14 @@ def test_0023_upgrade_0024_downgrade_reupgrade_and_constraints():
         assert conn.exec_driver_sql("PRAGMA foreign_key_check").all() == []
 
         with Operations.context(context):
+            synthesis_migration.downgrade()
             migration.downgrade()
         assert not any(name.startswith("voice_") for name in sa.inspect(conn).get_table_names())
         assert conn.exec_driver_sql("SELECT count(*) FROM users").scalar_one() == 1
         assert conn.exec_driver_sql("SELECT count(*) FROM legacies").scalar_one() == 2
         with Operations.context(context):
             migration.upgrade()
+            synthesis_migration.upgrade()
         assert {item.name for item in tables} <= set(sa.inspect(conn).get_table_names())
         tx.rollback()
     engine.dispose()

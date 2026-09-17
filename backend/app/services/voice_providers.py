@@ -8,6 +8,7 @@ keep the ordinary suite independent of media tools, ML weights, and GPUs.
 from __future__ import annotations
 
 import asyncio
+from array import array
 from dataclasses import dataclass
 import hashlib
 import json
@@ -54,16 +55,30 @@ class ClonedSpeech:
     completion_generation: int
 
 
+@dataclass(frozen=True)
+class ClonedSpeechRequest:
+    legacy_id: int
+    profile_version_id: str
+    authoritative_text: str
+    authoritative_text_digest: str
+    reference_audio: bytes
+    reference_audio_digest: str
+    reference_transcript: str
+    reference_transcript_digest: str
+    reference_binding_digest: str
+    language: Literal["mr"]
+    model_manifest_digest: str
+    purpose: Literal["preview", "message"]
+    operation_generation: int
+
+
 class ReferencePreparationProvider(Protocol):
     async def prepare(self, *, source: bytes, language: str, operation_generation: int,
                       declared_mime: str = "audio/wav") -> PreparedReference: ...
 
 
 class ClonedSpeechProvider(Protocol):
-    async def synthesize(
-        self, *, authoritative_text: str, reference_audio: bytes,
-        reference_text: str, language: str, operation_generation: int,
-    ) -> ClonedSpeech: ...
+    async def synthesize(self, request: ClonedSpeechRequest) -> ClonedSpeech: ...
 
 
 Outcome = Literal["success", "failure", "timeout", "cancellation", "malformed", "stale_completion"]
@@ -131,20 +146,32 @@ class FakeClonedSpeechProvider:
         self.outcome = outcome
         self.calls: list[tuple[str, str, int]] = []
 
-    async def synthesize(
-        self, *, authoritative_text: str, reference_audio: bytes,
-        reference_text: str, language: str, operation_generation: int,
-    ) -> ClonedSpeech:
+    async def synthesize(self, request: ClonedSpeechRequest | None = None, **legacy) -> ClonedSpeech:
+        if request is None:
+            text = legacy["authoritative_text"]
+            reference = legacy["reference_audio"]
+            transcript = legacy["reference_text"]
+            request = ClonedSpeechRequest(legacy_id=1, profile_version_id="test-only",
+                authoritative_text=text,
+                authoritative_text_digest=hashlib.sha256(text.encode()).hexdigest(),
+                reference_audio=reference,
+                reference_audio_digest=hashlib.sha256(reference).hexdigest(),
+                reference_transcript=transcript,
+                reference_transcript_digest=hashlib.sha256(transcript.encode()).hexdigest(),
+                reference_binding_digest="0" * 64, language=legacy["language"],
+                model_manifest_digest="0" * 64, purpose="message",
+                operation_generation=legacy["operation_generation"])
         _fault(self.outcome)
-        text_digest = hashlib.sha256(authoritative_text.encode("utf-8")).hexdigest()
-        self.calls.append((text_digest, language, operation_generation))
+        text_digest = hashlib.sha256(request.authoritative_text.encode("utf-8")).hexdigest()
+        self.calls.append((text_digest, request.language, request.operation_generation))
         if self.outcome == "malformed":
-            return ClonedSpeech(b"odd", 0, 2, "bad", operation_generation)
+            return ClonedSpeech(b"odd", 0, 2, "bad", request.operation_generation)
         # 20 ms of deterministic 24 kHz mono signed-16-bit PCM. This is a test
         # fixture, not speech and never enters a production enrollment flow.
-        seed = hashlib.sha256(reference_audio + reference_text.encode() + authoritative_text.encode()).digest()
+        seed = hashlib.sha256(request.reference_audio + request.reference_transcript.encode()
+            + request.authoritative_text.encode()).digest()
         pcm = (seed * 30)[:960]
-        generation = operation_generation - 1 if self.outcome == "stale_completion" else operation_generation
+        generation = request.operation_generation - 1 if self.outcome == "stale_completion" else request.operation_generation
         return ClonedSpeech(pcm, 24000, 1, text_digest, generation)
 
 
@@ -178,3 +205,21 @@ def validate_speech(value: ClonedSpeech, text: str, generation: int) -> None:
             or len(value.pcm_s16le) > 24_000 * 2 * 120
             or value.text_digest != expected):
         raise VoiceProviderFailure("voice_provider_output_invalid")
+    samples = array("h")
+    samples.frombytes(value.pcm_s16le)
+    if not samples or max(abs(sample) for sample in samples) > 32767:
+        raise VoiceProviderFailure("voice_provider_output_invalid")
+
+
+def validate_synthesis_request(value: ClonedSpeechRequest) -> None:
+    if (not isinstance(value, ClonedSpeechRequest) or value.legacy_id < 1
+            or not value.profile_version_id or value.language != "mr"
+            or value.purpose not in {"preview", "message"}
+            or not value.authoritative_text.strip() or len(value.authoritative_text) > 4096
+            or value.operation_generation < 1
+            or hashlib.sha256(value.authoritative_text.encode("utf-8")).hexdigest() != value.authoritative_text_digest
+            or hashlib.sha256(value.reference_audio).hexdigest() != value.reference_audio_digest
+            or hashlib.sha256(value.reference_transcript.encode("utf-8")).hexdigest() != value.reference_transcript_digest
+            or any(len(item) != 64 for item in (value.reference_binding_digest,
+                value.model_manifest_digest))):
+        raise VoiceProviderFailure("voice_provider_input_invalid")

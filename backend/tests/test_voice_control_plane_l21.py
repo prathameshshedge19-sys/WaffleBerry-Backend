@@ -138,15 +138,20 @@ def test_orchestrator_uses_frozen_text_and_job_digest(voice_db):
         turn_id=42, authorization_generation=7)
     service = LegacySpeechOrchestrator()
     job = service.admit_synthesis(db, context, authoritative_text="The authoritative answer.",
-        purpose="message", request_key="message-42")
+        purpose="message", request_key="message-42", conversation_id=42, message_id=42)
     db.commit()
     assert job.kind == "synthesize" and job.priority == 50 and job.version_id == version.id
     again = service.admit_synthesis(db, context, authoritative_text="The authoritative answer.",
-        purpose="message", request_key="message-42")
+        purpose="message", request_key="message-42", conversation_id=42, message_id=42)
     assert again.id == job.id
-    with pytest.raises(HTTPException):
-        service.admit_synthesis(db, context, authoritative_text="Changed answer.",
-            purpose="message", request_key="message-42")
+    changed = service.admit_synthesis(db, context, authoritative_text="Changed answer.",
+        purpose="message", request_key="message-42", conversation_id=42, message_id=42)
+    assert changed.id != job.id and changed.request_digest != job.request_digest
+    new_manifest = service.admit_synthesis(db, context,
+        authoritative_text="The authoritative answer.", purpose="message",
+        request_key="message-42", model_manifest_digest="d" * 64,
+        conversation_id=42, message_id=42)
+    assert new_manifest.id not in {job.id, changed.id}
 
 
 def test_lease_expiry_and_stale_publication(voice_db):

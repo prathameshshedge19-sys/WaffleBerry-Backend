@@ -181,7 +181,19 @@ class VoiceJob(Base):
             "(lease_token IS NULL AND lease_expires_at IS NULL) OR (lease_token IS NOT NULL AND lease_expires_at IS NOT NULL)",
             name="ck_voice_jobs_lease_pair",
         ),
+        CheckConstraint(
+            "kind <> 'synthesize' OR (purpose IN ('preview','message') AND authoritative_text IS NOT NULL "
+            "AND length(authoritative_text) BETWEEN 1 AND 4096 AND length(authoritative_text_digest) = 64 "
+            "AND length(model_manifest_digest) = 64 AND length(inference_config_digest) = 64 "
+            "AND requested_by_user_id IS NOT NULL)",
+            name="ck_voice_jobs_synthesis_payload",
+        ),
+        CheckConstraint(
+            "kind <> 'synthesize' OR purpose <> 'message' OR (conversation_id IS NOT NULL AND message_id IS NOT NULL)",
+            name="ck_voice_jobs_message_context",
+        ),
         Index("ix_voice_jobs_claim", "kind", "state", "priority", "next_attempt_at", "lease_expires_at"),
+        Index("ix_voice_jobs_requester", "requested_by_user_id", "id"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
@@ -203,6 +215,14 @@ class VoiceJob(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    purpose: Mapped[str | None] = mapped_column(String(16))
+    authoritative_text: Mapped[str | None] = mapped_column(Text)
+    authoritative_text_digest: Mapped[str | None] = mapped_column(String(64))
+    model_manifest_digest: Mapped[str | None] = mapped_column(String(64))
+    inference_config_digest: Mapped[str | None] = mapped_column(String(64))
+    requested_by_user_id: Mapped[int | None] = mapped_column(Integer)
+    conversation_id: Mapped[int | None] = mapped_column(Integer)
+    message_id: Mapped[int | None] = mapped_column(Integer)
 
 
 class VoiceAsset(Base):

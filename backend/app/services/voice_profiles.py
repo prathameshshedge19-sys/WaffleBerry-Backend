@@ -312,11 +312,23 @@ class VoiceEnrollmentService:
 
 class VoiceJobService:
     def enqueue(self, db, *, legacy_id, profile_id, version_id, kind, request_key,
-                request_digest, priority=0, operation_generation=None):
+                request_digest, priority=0, operation_generation=None,
+                purpose=None, authoritative_text=None, authoritative_text_digest=None,
+                model_manifest_digest=None, inference_config_digest=None,
+                requested_by_user_id=None, conversation_id=None, message_id=None):
         if (kind not in {"prepare", "synthesize", "purge"}
                 or not isinstance(request_key, str) or not request_key.strip() or len(request_key) > 128
                 or not HEX64.fullmatch(request_digest)):
             raise ValueError("voice_job_request_invalid")
+        if kind == "synthesize" and (purpose not in {"preview", "message"}
+                or not isinstance(authoritative_text, str) or not authoritative_text.strip()
+                or len(authoritative_text) > 4096
+                or hashlib.sha256(authoritative_text.encode("utf-8")).hexdigest() != authoritative_text_digest
+                or not HEX64.fullmatch(model_manifest_digest or "")
+                or not HEX64.fullmatch(inference_config_digest or "")
+                or type(requested_by_user_id) is not int
+                or (purpose == "message" and (type(conversation_id) is not int or type(message_id) is not int))):
+            raise ValueError("voice_synthesis_request_invalid")
         scope = lock_scope(db, legacy_id)
         profile = scope.profile
         version = scope.versions.get(version_id)
@@ -327,12 +339,34 @@ class VoiceJobService:
         if existing:
             if existing.request_digest != request_digest:
                 conflict("voice_job_request_conflict")
-            return existing
+            if kind != "synthesize" or existing.state not in {"succeeded", "failed", "cancelled"}:
+                return existing
+            now = utcnow()
+            generated = [asset for asset in scope.assets.values()
+                if asset.job_id == existing.id and asset.kind == "generated"]
+            reusable = existing.state == "succeeded" and any(
+                asset.state == "available" and asset.expires_at is not None
+                and aware(asset.expires_at) > now for asset in generated)
+            if reusable:
+                return existing
+            # A terminal job without live audio is history, not a reusable
+            # cache hit. Archive its uniqueness key and fence every leftover
+            # object so the same full digest can be explicitly retried.
+            existing.request_key = f"archived:{kind}:{existing.id}"
+            for asset in generated:
+                if asset.state != "purged":
+                    _schedule_asset_purge(db, scope, asset, now)
         generation = operation_generation or version.operation_generation
         job = VoiceJob(id=str(uuid4()), legacy_id=legacy_id, voice_profile_id=profile_id,
             version_id=version_id, kind=kind, state="queued", priority=priority, attempts=0,
             operation_generation=generation, next_attempt_at=utcnow(), request_key=request_key,
-            request_digest=request_digest, created_at=utcnow())
+            request_digest=request_digest, created_at=utcnow(), purpose=purpose,
+            authoritative_text=authoritative_text,
+            authoritative_text_digest=authoritative_text_digest,
+            model_manifest_digest=model_manifest_digest,
+            inference_config_digest=inference_config_digest,
+            requested_by_user_id=requested_by_user_id,
+            conversation_id=conversation_id, message_id=message_id)
         db.add(job)
         return job
 
@@ -586,6 +620,76 @@ class VoiceJobService:
         self._finish(job, now)
         return job
 
+    def reserve_generated(self, db, job_id, token, result: ClonedSpeech, storage,
+                          *, retention_seconds=86400):
+        now = utcnow()
+        scope, version, job = self._publication_scope(db, job_id, token, now)
+        if (job.kind != "synthesize" or job.authoritative_text is None
+                or job.authoritative_text_digest is None
+                or scope.legacy.deletion_requested_at is not None
+                or scope.profile is None or scope.profile.status != "active"
+                or scope.profile.current_version_id != version.id
+                or version.status != "ready"):
+            raise StaleVoiceClaim()
+        validate_speech(result, job.authoritative_text, version.operation_generation)
+        existing = next((asset for asset in scope.assets.values()
+            if asset.job_id == job.id and asset.kind == "generated" and asset.state != "purged"), None)
+        if existing:
+            raise StaleVoiceClaim()
+        asset_id = str(uuid4())
+        key = (f"legarya/legacies/{version.legacy_id}/voice/{version.voice_profile_id}/"
+            f"{version.id}/generated/{asset_id}.wav")
+        byte_count = 44 + len(result.pcm_s16le)
+        asset = VoiceAsset(id=asset_id, legacy_id=version.legacy_id,
+            voice_profile_id=version.voice_profile_id, version_id=version.id,
+            job_id=job.id, kind="generated", state="dispatching",
+            storage_backend=storage.backend_name, storage_bucket=storage.bucket_name,
+            encryption_key_id=storage.encryption_key_id, object_key=key,
+            byte_count=byte_count, mime_type="audio/wav", sample_rate=24000,
+            channels=1, duration_ms=round(len(result.pcm_s16le) / 48),
+            writer_deadline=now + timedelta(seconds=WRITER_SECONDS),
+            expires_at=now + timedelta(seconds=retention_seconds), created_at=now)
+        db.add(asset)
+        db.flush()
+        return asset
+
+    def publish_generated(self, db, job_id, token, result: ClonedSpeech, *,
+                          asset_id, stored, wav_digest):
+        now = utcnow()
+        scope, version, job = self._publication_scope(db, job_id, token, now)
+        asset = scope.assets.get(asset_id)
+        if (job.kind != "synthesize" or asset is None or asset.job_id != job.id
+                or asset.kind != "generated" or asset.state != "dispatching"
+                or asset.writer_deadline is None or aware(asset.writer_deadline) <= now
+                or stored.byte_size != asset.byte_count or not HEX64.fullmatch(wav_digest)
+                or scope.legacy.deletion_requested_at is not None
+                or scope.profile is None or scope.profile.status != "active"
+                or scope.profile.current_version_id != version.id
+                or version.status != "ready"):
+            raise StaleVoiceClaim()
+        validate_speech(result, job.authoritative_text, version.operation_generation)
+        asset.object_version = stored.version
+        asset.sha256 = wav_digest
+        asset.state = "available"
+        asset.writer_deadline = None
+        self._finish(job, now)
+        return asset
+
+    def expire_generated(self, db, *, now=None):
+        now = now or utcnow()
+        legacy_ids = list(db.scalars(select(VoiceAsset.legacy_id).where(
+            VoiceAsset.kind == "generated", VoiceAsset.state == "available",
+            VoiceAsset.expires_at <= now).distinct()))
+        count = 0
+        for legacy_id in legacy_ids:
+            scope = lock_scope(db, legacy_id)
+            for asset in scope.assets.values():
+                if (asset.kind == "generated" and asset.state == "available"
+                        and asset.expires_at is not None and aware(asset.expires_at) <= now):
+                    _schedule_asset_purge(db, scope, asset, now)
+                    count += 1
+        return count
+
     def publish_purge(self, db, job_id, token):
         now = utcnow()
         scope, version, job = self._publication_scope(db, job_id, token, now)
@@ -787,10 +891,14 @@ class LegacySpeechOrchestrator:
         return version if consent else None
 
     def admit_synthesis(self, db, context: AuthorizedSpeechContext, *, authoritative_text: str,
-                        purpose: str, request_key: str):
+                        purpose: str, request_key: str, model_manifest_digest: str = "0" * 64,
+                        inference_config_digest: str = "0" * 64, conversation_id: int | None = None,
+                        message_id: int | None = None):
+        if context.mode == "rya":
+            return None
         if not isinstance(authoritative_text, str) or not authoritative_text.strip() or len(authoritative_text) > 4096:
             raise ValueError("voice_authoritative_text_invalid")
-        if purpose not in {"preview", "message", "live"}:
+        if purpose not in {"preview", "message"}:
             raise ValueError("voice_purpose_invalid")
         version = self.resolve_version(db, context)
         if version is None:
@@ -798,10 +906,18 @@ class LegacySpeechOrchestrator:
         text_digest = hashlib.sha256(authoritative_text.encode("utf-8")).hexdigest()
         request_digest = canonical_digest({"legacy_id": context.legacy_id,
             "profile_id": version.voice_profile_id, "version_id": version.id,
+            "scope_key": request_key, "language": "mr",
             "text_digest": text_digest, "binding_digest": version.binding_digest,
-            "model_digest": version.model_manifest_digest, "purpose": purpose})
-        priority = 90 if purpose == "live" else 50 if purpose == "message" else 10
+            "model_manifest_digest": model_manifest_digest,
+            "inference_config_digest": inference_config_digest, "purpose": purpose})
+        priority = 50 if purpose == "message" else 10
         return VoiceJobService().enqueue(db, legacy_id=context.legacy_id,
             profile_id=version.voice_profile_id, version_id=version.id, kind="synthesize",
-            request_key=request_key, request_digest=request_digest, priority=priority,
-            operation_generation=version.operation_generation)
+            request_key=f"synth:{purpose}:{request_digest}", request_digest=request_digest,
+            priority=priority, operation_generation=version.operation_generation,
+            purpose=purpose, authoritative_text=authoritative_text,
+            authoritative_text_digest=text_digest,
+            model_manifest_digest=model_manifest_digest,
+            inference_config_digest=inference_config_digest,
+            requested_by_user_id=context.actor_user_id,
+            conversation_id=conversation_id, message_id=message_id)

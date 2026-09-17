@@ -83,6 +83,17 @@ class Settings(BaseSettings):
     voice_whisper_model_repo: Literal["openai/whisper-large-v3-turbo"] = "openai/whisper-large-v3-turbo"
     voice_whisper_model_revision: Literal["41f01f3fe87f28c78e2fbf8b568835947dd65ed9"] = "41f01f3fe87f28c78e2fbf8b568835947dd65ed9"
     voice_whisper_local_files_only: bool = True
+    # L21.4 synthesis is a separate process and dependency environment. The
+    # web application never imports torch/IndicF5 and never downloads models.
+    voice_synthesis_provider: Literal["fake", "indicf5"] = "fake"
+    voice_synthesis_manifest_path: str = "./voice-models/indicf5-manifest.json"
+    voice_synthesis_artifact_path: str = "./voice-models"
+    voice_synthesis_manifest_digest: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    voice_synthesis_device: Literal["cuda"] = "cuda"
+    voice_synthesis_warmup_timeout_seconds: int = Field(default=180, ge=10, le=600)
+    voice_generated_retention_seconds: int = Field(default=86400, ge=300, le=86400)
+    voice_synthesis_max_seconds: int = Field(default=120, ge=5, le=120)
+    voice_synthesis_max_bytes: int = Field(default=2 * 1024 * 1024, ge=1024, le=2 * 1024 * 1024)
 
     # L16 Media & Sources. Production must explicitly select an encrypted
     # S3-compatible backend; local storage is only the debug/test adapter.
@@ -162,6 +173,15 @@ class Settings(BaseSettings):
                 raise ValueError("Production voice enrollment requires the explicit Whisper worker provider.")
             if self.media_storage_backend != "s3":
                 raise ValueError("Production voice enrollment requires private S3-compatible storage.")
+        if not self.legarya_debug and self.voice_message_playback_enabled:
+            if not self.voice_cloning_enabled or self.voice_synthesis_provider != "indicf5":
+                raise ValueError("Production preserved playback requires the explicit IndicF5 worker provider.")
+            if self.voice_live_enabled:
+                raise ValueError("L21.4 must not enable cloned Live Call.")
+            if self.media_storage_backend != "s3":
+                raise ValueError("Production preserved playback requires private S3-compatible storage.")
+            if not self.voice_synthesis_manifest_digest:
+                raise ValueError("Production preserved playback requires a verified manifest digest.")
         return self
 
 

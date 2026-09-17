@@ -54,7 +54,7 @@ def pg_voice():
     with engine.begin() as conn:
         context = MigrationContext.configure(conn)
         with Operations.context(context):
-            for old in reversed(list(ScriptDirectory(str(ROOT / "alembic")).walk_revisions(base="base", head="0024_voice_profiles"))):
+            for old in reversed(list(ScriptDirectory(str(ROOT / "alembic")).walk_revisions(base="base", head="0025_voice_synthesis_jobs"))):
                 old.module.upgrade()
         conn.execute(sa.insert(User), [
             {"id": i, "full_name": f"L21 PG user {i}", "email": f"l21-pg-{i}@example.invalid",
@@ -252,12 +252,17 @@ def test_profile_delete_vs_synthesis_publication(pg_voice):
         version = reserve(db, legacy_id=1)
         version = prepare(db, version)
         profile = activate(db, version)
+        authoritative_text = "already authoritative"
+        authoritative_digest = hashlib.sha256(authoritative_text.encode("utf-8")).hexdigest()
         synth = VoiceJobService().enqueue(db, legacy_id=1, profile_id=profile.id,
             version_id=version.id, kind="synthesize", request_key="synth-race",
-            request_digest=canonical_digest({"text": "already authoritative"}), priority=50)
+            request_digest=canonical_digest({"text": authoritative_text}), priority=50,
+            purpose="preview", authoritative_text=authoritative_text,
+            authoritative_text_digest=authoritative_digest,
+            model_manifest_digest="a" * 64, inference_config_digest="b" * 64,
+            requested_by_user_id=1)
         db.commit()
         profile_id, revision, synth_id = profile.id, profile.revision, synth.id
-        authoritative_text = "already authoritative"
         speech = asyncio.run(FakeClonedSpeechProvider().synthesize(
             authoritative_text=authoritative_text, reference_audio=b"synthetic",
             reference_text=version.reference_transcript, language="mr",
@@ -314,15 +319,18 @@ def test_postgresql_populated_migration_roundtrip_and_composite_constraints(pg_v
         reject(consents.update().where(consents.c.id == first_consent).values(copy_version="changed"))
         before_users = conn.exec_driver_sql("SELECT count(*) FROM users").scalar_one()
         before_legacies = conn.exec_driver_sql("SELECT count(*) FROM legacies").scalar_one()
-        migration = ScriptDirectory(str(ROOT / "alembic")).get_revision("0024_voice_profiles").module
+        profile_migration = ScriptDirectory(str(ROOT / "alembic")).get_revision("0024_voice_profiles").module
+        synthesis_migration = ScriptDirectory(str(ROOT / "alembic")).get_revision("0025_voice_synthesis_jobs").module
         context = MigrationContext.configure(conn)
         with Operations.context(context):
-            migration.downgrade()
+            synthesis_migration.downgrade()
+            profile_migration.downgrade()
         assert not any(name.startswith("voice_") for name in sa.inspect(conn).get_table_names())
         assert conn.exec_driver_sql("SELECT count(*) FROM users").scalar_one() == before_users
         assert conn.exec_driver_sql("SELECT count(*) FROM legacies").scalar_one() == before_legacies
         with Operations.context(context):
-            migration.upgrade()
+            profile_migration.upgrade()
+            synthesis_migration.upgrade()
         names = set(sa.inspect(conn).get_table_names())
         assert {"voice_profiles", "voice_profile_versions", "voice_consent_receipts",
             "voice_assets", "voice_jobs"} <= names
