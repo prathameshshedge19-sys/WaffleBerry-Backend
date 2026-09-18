@@ -19,6 +19,7 @@ from app.config import get_settings
 from app.database import SessionLocal
 from app.models.conversation import Conversation, Message, MessageRole
 from app.models.legacy import Legacy
+from app.models.turn import ConversationTurn
 from app.models.user import User
 from app.models.voice_profile import (
     VoiceAsset, VoiceConsentReceipt, VoiceJob, VoiceProfile, VoiceProfileVersion,
@@ -175,6 +176,20 @@ class VoiceSynthesisWorker:
                         or message.content != job.authoritative_text
                         or not can_view_legacy_as_persona(db, actor.id, legacy)):
                     raise VoiceProviderFailure("voice_authorization_changed")
+            elif job.purpose == "live":
+                turn = db.get(ConversationTurn, job.realtime_turn_id)
+                conversation = db.get(Conversation, job.conversation_id)
+                if (turn is None or conversation is None
+                        or turn.conversation_id != conversation.id
+                        or turn.legacy_id != legacy.id or turn.actor_user_id != actor.id
+                        or turn.input_mode != "realtime_voice" or turn.mode != "legacy"
+                        or turn.state != "streaming"
+                        or turn.claim_token != job.realtime_claim_token
+                        or conversation.user_id != actor.id
+                        or conversation.legacy_id != legacy.id
+                        or conversation.mode != "legacy"
+                        or not can_view_legacy_as_persona(db, actor.id, legacy)):
+                    raise VoiceProviderFailure("voice_authorization_changed")
             else:
                 raise VoiceProviderFailure("voice_authorization_changed")
             identity = (reference.sha256, reference.byte_count, reference.object_key,
@@ -267,7 +282,8 @@ def main():
     if args.poll_seconds < 0.25:
         parser.error("poll-seconds must be at least 0.25")
     settings = get_settings()
-    if not (settings.voice_cloning_enabled and settings.voice_message_playback_enabled):
+    if not (settings.voice_cloning_enabled
+            and (settings.voice_message_playback_enabled or settings.voice_live_enabled)):
         parser.error("Preserved voice playback is disabled")
     worker = VoiceSynthesisWorker(settings=settings)
     try:

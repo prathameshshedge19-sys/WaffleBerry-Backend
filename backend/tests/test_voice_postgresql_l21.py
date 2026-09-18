@@ -54,7 +54,7 @@ def pg_voice():
     with engine.begin() as conn:
         context = MigrationContext.configure(conn)
         with Operations.context(context):
-            for old in reversed(list(ScriptDirectory(str(ROOT / "alembic")).walk_revisions(base="base", head="0025_voice_synthesis_jobs"))):
+            for old in reversed(list(ScriptDirectory(str(ROOT / "alembic")).walk_revisions(base="base", head="0026_voice_live_synthesis"))):
                 old.module.upgrade()
         conn.execute(sa.insert(User), [
             {"id": i, "full_name": f"L21 PG user {i}", "email": f"l21-pg-{i}@example.invalid",
@@ -321,8 +321,10 @@ def test_postgresql_populated_migration_roundtrip_and_composite_constraints(pg_v
         before_legacies = conn.exec_driver_sql("SELECT count(*) FROM legacies").scalar_one()
         profile_migration = ScriptDirectory(str(ROOT / "alembic")).get_revision("0024_voice_profiles").module
         synthesis_migration = ScriptDirectory(str(ROOT / "alembic")).get_revision("0025_voice_synthesis_jobs").module
+        live_synthesis_migration = ScriptDirectory(str(ROOT / "alembic")).get_revision("0026_voice_live_synthesis").module
         context = MigrationContext.configure(conn)
         with Operations.context(context):
+            live_synthesis_migration.downgrade()
             synthesis_migration.downgrade()
             profile_migration.downgrade()
         assert not any(name.startswith("voice_") for name in sa.inspect(conn).get_table_names())
@@ -331,6 +333,7 @@ def test_postgresql_populated_migration_roundtrip_and_composite_constraints(pg_v
         with Operations.context(context):
             profile_migration.upgrade()
             synthesis_migration.upgrade()
+            live_synthesis_migration.upgrade()
         names = set(sa.inspect(conn).get_table_names())
         assert {"voice_profiles", "voice_profile_versions", "voice_consent_receipts",
             "voice_assets", "voice_jobs"} <= names

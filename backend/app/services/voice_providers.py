@@ -68,7 +68,7 @@ class ClonedSpeechRequest:
     reference_binding_digest: str
     language: Literal["mr"]
     model_manifest_digest: str
-    purpose: Literal["preview", "message"]
+    purpose: Literal["preview", "message", "live"]
     operation_generation: int
 
 
@@ -214,7 +214,7 @@ def validate_speech(value: ClonedSpeech, text: str, generation: int) -> None:
 def validate_synthesis_request(value: ClonedSpeechRequest) -> None:
     if (not isinstance(value, ClonedSpeechRequest) or value.legacy_id < 1
             or not value.profile_version_id or value.language != "mr"
-            or value.purpose not in {"preview", "message"}
+            or value.purpose not in {"preview", "message", "live"}
             or not value.authoritative_text.strip() or len(value.authoritative_text) > 4096
             or value.operation_generation < 1
             or hashlib.sha256(value.authoritative_text.encode("utf-8")).hexdigest() != value.authoritative_text_digest

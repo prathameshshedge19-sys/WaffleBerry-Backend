@@ -182,7 +182,7 @@ class VoiceJob(Base):
             name="ck_voice_jobs_lease_pair",
         ),
         CheckConstraint(
-            "kind <> 'synthesize' OR (purpose IN ('preview','message') AND authoritative_text IS NOT NULL "
+            "kind <> 'synthesize' OR (purpose IN ('preview','message','live') AND authoritative_text IS NOT NULL "
             "AND length(authoritative_text) BETWEEN 1 AND 4096 AND length(authoritative_text_digest) = 64 "
             "AND length(model_manifest_digest) = 64 AND length(inference_config_digest) = 64 "
             "AND requested_by_user_id IS NOT NULL)",
@@ -192,8 +192,14 @@ class VoiceJob(Base):
             "kind <> 'synthesize' OR purpose <> 'message' OR (conversation_id IS NOT NULL AND message_id IS NOT NULL)",
             name="ck_voice_jobs_message_context",
         ),
+        CheckConstraint(
+            "kind <> 'synthesize' OR purpose <> 'live' OR (conversation_id IS NOT NULL "
+            "AND realtime_turn_id IS NOT NULL AND realtime_claim_token IS NOT NULL)",
+            name="ck_voice_jobs_live_context",
+        ),
         Index("ix_voice_jobs_claim", "kind", "state", "priority", "next_attempt_at", "lease_expires_at"),
         Index("ix_voice_jobs_requester", "requested_by_user_id", "id"),
+        Index("ix_voice_jobs_realtime_turn", "realtime_turn_id", "id"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
@@ -223,6 +229,8 @@ class VoiceJob(Base):
     requested_by_user_id: Mapped[int | None] = mapped_column(Integer)
     conversation_id: Mapped[int | None] = mapped_column(Integer)
     message_id: Mapped[int | None] = mapped_column(Integer)
+    realtime_turn_id: Mapped[int | None] = mapped_column(Integer)
+    realtime_claim_token: Mapped[str | None] = mapped_column(String(36))
 
 
 class VoiceAsset(Base):

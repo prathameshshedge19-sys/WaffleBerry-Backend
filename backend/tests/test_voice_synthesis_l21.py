@@ -4,6 +4,7 @@ import asyncio
 from datetime import timedelta
 import hashlib
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 from sqlalchemy import select
@@ -14,6 +15,7 @@ from app.database import Base, build_engine
 from app.models.collaboration import LegacyCollaborator
 from app.models.conversation import Conversation, Message, MessageRole
 from app.models.legacy import Legacy
+from app.models.turn import ConversationTurn
 from app.models.user import User
 from app.models.viewer import LegacyViewerAccess
 from app.models.voice_profile import VoiceAsset, VoiceJob
@@ -175,6 +177,70 @@ def test_worker_late_result_after_revoke_is_fenced(tmp_path):
         assert db.get(VoiceJob, job.id).state == "cancelled"
         assert db.scalar(select(VoiceAsset).where(
             VoiceAsset.job_id == job.id, VoiceAsset.kind == "generated")) is None
+    engine.dispose()
+
+
+def test_live_job_is_turn_bound_and_late_cancel_cannot_publish(tmp_path):
+    engine = build_engine(f"sqlite:///{tmp_path / 'live-worker.db'}")
+    Base.metadata.create_all(engine)
+    sessions = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
+    source = b"synthetic-reference-fixture"
+    claim = str(uuid4())
+    text = "मी पुण्यात राहिलो आणि online काम केले."
+    with sessions() as db:
+        seed(db)
+        version = prepare(db, reserve(db), source)
+        activate(db, version)
+        db.add(LegacyViewerAccess(legacy_id=1, user_id=3, status="active"))
+        conversation = Conversation(user_id=3, legacy_id=1, title="Live", mode="legacy")
+        db.add(conversation); db.flush()
+        user_message = Message(conversation_id=conversation.id, role=MessageRole.USER,
+            content="कुठे राहिलात?")
+        db.add(user_message); db.flush()
+        turn = ConversationTurn(conversation_id=conversation.id, legacy_id=1,
+            actor_user_id=3, mode="legacy", client_turn_id="live:test:item",
+            request_digest="a" * 64, input_mode="realtime_voice", state="streaming",
+            claim_token=claim, user_message_id=user_message.id)
+        db.add(turn); db.flush()
+        context = AuthorizedSpeechContext(1, "legacy", 3, turn.id, 9)
+        manifest = fake_manifest()
+        job = LegacySpeechOrchestrator().admit_synthesis(db, context,
+            authoritative_text=text, purpose="live", request_key="live:test",
+            model_manifest_digest=manifest.digest,
+            inference_config_digest=inference_config_digest(),
+            conversation_id=conversation.id, realtime_claim_token=claim)
+        db.commit()
+        turn_id = turn.id
+        assert job.priority == 90 and job.authoritative_text_digest == hashlib.sha256(text.encode()).hexdigest()
+        reference = db.get(VoiceAsset, version.reference_asset_id)
+    raw = LocalSourceStorage(str(tmp_path / "live-storage"))
+    raw.put(reference.object_key, source, content_type="audio/wav")
+    settings = get_settings().model_copy(update={"voice_synthesis_provider": "fake",
+        "media_local_storage_path": str(tmp_path / "live-storage")})
+
+    class CancelTurnDuringInference(FakeClonedSpeechProvider):
+        async def synthesize(self, request=None, **legacy):
+            with sessions.begin() as db:
+                current = db.get(ConversationTurn, turn_id)
+                current.state = "interrupted"
+                current.safe_error_code = "cancelled"
+                current.finished_at = utcnow()
+            return await super().synthesize(request, **legacy)
+
+    worker = VoiceSynthesisWorker(sessions, VoiceStorage(raw), settings=settings,
+        manifest=manifest, provider=FakeClonedSpeechProvider())
+    worker.warmup(); worker.provider = CancelTurnDuringInference()
+    try:
+        assert worker.run_once() == "stale"
+    finally:
+        worker.close()
+    with sessions() as db:
+        assert db.get(VoiceJob, job.id).state == "running"
+        assert db.scalar(select(VoiceAsset).where(VoiceAsset.job_id == job.id,
+            VoiceAsset.kind == "generated")) is None
+        VoiceJobService().cancel_live(db, job.id, turn_id=turn_id, claim=claim)
+        db.commit()
+        assert db.get(VoiceJob, job.id).state == "cancelled"
     engine.dispose()
 
 

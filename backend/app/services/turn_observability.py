@@ -152,7 +152,9 @@ def emit(event, *, level=logging.DEBUG, duration_ms=None, category=None, dimensi
                      'realtime_access_revocation', 'realtime_queue_overrun', 'realtime_provider_disconnect',
                      'realtime_first_audio', 'realtime_first_playback', 'realtime_playback_progress',
                      'realtime_playback_ack', 'realtime_response_completed', 'realtime_response_interrupted',
-                     'realtime_cancel', 'realtime_cancel_dispatched', 'realtime_stale_discard'}: return
+                     'realtime_cancel', 'realtime_cancel_dispatched', 'realtime_stale_discard',
+                     'realtime_authoritative_text_final', 'realtime_speech_admitted',
+                     'realtime_synthesis_ready'}: return
     observation = _current.get()
     merged = dict(observation.dimensions) if observation else {}
     merged.update(dimensions or {})

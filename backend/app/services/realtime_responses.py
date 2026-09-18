@@ -5,6 +5,7 @@ arbitrary turns or provide assistant text. The actor lock serializes completion,
 interruption, revocation and disconnect, including across PostgreSQL workers.
 """
 import base64
+import hashlib
 import secrets
 import time
 from dataclasses import dataclass, field
@@ -48,6 +49,17 @@ class PlaybackProof:
     response_id: str
     sequence: int
     samples: int
+
+
+@dataclass(frozen=True, repr=False)
+class AuthoritativeAnswer:
+    text: str
+    text_digest: str
+    turn_id: int
+    response_generation: str
+    provider: str
+    model: str
+    completion_status: str = "completed"
 
 
 def terminate(db, session_id, owner, connection, turn_id, claim, settings, proof=None, *, current=None):
@@ -107,6 +119,13 @@ class Output:
     parts: dict = field(default_factory=dict, repr=False)
     audio_index: int = -1
     brain: object | None = field(default=None, repr=False)
+    text_first: bool = False
+    answer_model: str = ""
+    answer_delta: str = field(default="", repr=False)
+    answer_final: str | None = field(default=None, repr=False)
+    authoritative_answer: AuthoritativeAnswer | None = field(default=None, repr=False)
+    voice_delivery: str | None = None
+    preserved_job_id: str | None = field(default=None, repr=False)
 
     def binding(self):
         return dict(session_id=self.session_id, generation=self.connection, turn_id=self.turn_id,
@@ -135,12 +154,16 @@ class Output:
             if self.response_id and rid != self.response_id:
                 raise sessions.RealtimeError("realtime_provider_failed", 502)
             self.response_id = rid
-            return [{"type": "assistant_started", **self.binding()}]
+            return [] if self.text_first else [{"type": "assistant_started", **self.binding()}]
         rid = p.get("response", {}).get("id") if event.kind == "response_done" else p.get("response_id")
         if not self.response_id or rid != self.response_id:
             self.telemetry("realtime_stale_discard")
             return []
         if event.kind in {"function_delta", "function_done"}:
+            raise sessions.RealtimeError("realtime_provider_failed", 502)
+        if self.text_first:
+            return self._authoritative(event)
+        if event.kind in {"output_text_delta", "output_text_done"}:
             raise sessions.RealtimeError("realtime_provider_failed", 502)
         if event.kind in {"audio", "audio_done", "output_transcript_delta", "output_transcript_done"}:
             identity = transcripts.item_identity(p.get("item_id"))
@@ -211,6 +234,83 @@ class Output:
             result.append(dict(type="assistant_audio_end", **self.binding(), sequence=self.sequence,
                                samples=self.samples, seal=self.seal))
         return result
+
+    def _authoritative(self, event):
+        """Freeze one completed text response before any speech renderer runs."""
+        p = event.payload
+        if event.kind in {"audio", "audio_done", "output_transcript_delta", "output_transcript_done"}:
+            raise sessions.RealtimeError("realtime_provider_failed", 502)
+        if event.kind in {"output_text_delta", "output_text_done"}:
+            identity = transcripts.item_identity(p.get("item_id"))
+            index = p.get("output_index", 0)
+            if (p.get("content_index") != 0 or type(index) is not int or index != 0
+                    or (self.item is not None and self.item != (identity, 0))):
+                raise sessions.RealtimeError("realtime_provider_failed", 502)
+            self.item = (identity, 0)
+        if event.kind == "output_text_delta":
+            delta = p.get("delta")
+            if (not isinstance(delta, str) or self.answer_final is not None
+                    or len(self.answer_delta) + len(delta) > transcripts.MAX_TRANSCRIPT):
+                raise sessions.RealtimeError("realtime_provider_failed", 502)
+            self.answer_delta += delta
+            return []
+        if event.kind == "output_text_done":
+            final = transcripts.normalize(p.get("text"))
+            if (not final or (self.answer_final is not None and self.answer_final != final)):
+                raise sessions.RealtimeError("realtime_provider_failed", 502)
+            self.answer_final = final
+            return []
+        if event.kind != "response_done":
+            raise sessions.RealtimeError("realtime_provider_failed", 502)
+        if p.get("response", {}).get("status") != "completed":
+            return [{"type": "generation_failed"}]
+        if not self.answer_final or self.authoritative_answer is not None:
+            return [] if self.authoritative_answer is not None else [{"type": "generation_failed"}]
+        self.provider_done = True
+        self.final = self.answer_final
+        digest = hashlib.sha256(self.final.encode("utf-8")).hexdigest()
+        self.authoritative_answer = AuthoritativeAnswer(self.final, digest, self.turn_id,
+            self.claim, "openai_realtime", self.answer_model, "completed")
+        self.telemetry("realtime_authoritative_text_final")
+        return [{"type": "authoritative_answer_ready"}]
+
+    def start_speech(self, delivery: str):
+        if (not self.text_first or self.authoritative_answer is None
+                or self.retired or self.voice_delivery is not None
+                or delivery not in {"preserved", "standard"} or self.sequence != -1):
+            raise sessions.RealtimeError("realtime_provider_failed", 502)
+        self.voice_delivery = delivery
+        return {"type": "assistant_started", **self.binding(),
+            "voice_delivery": delivery,
+            "authoritative_text_digest": self.authoritative_answer.text_digest}
+
+    def speech_frame(self, pcm: bytes):
+        if (not self.text_first or self.authoritative_answer is None
+                or self.voice_delivery is None or self.audio_done or not self.provider_done
+                or not isinstance(pcm, bytes) or not pcm or len(pcm) % 2
+                or len(pcm) > MAX_FRAME_BYTES):
+            raise sessions.RealtimeError("realtime_provider_failed", 502)
+        self.samples += len(pcm) // 2
+        self.sequence += 1
+        if (self.samples - self.played > MAX_BUFFER_SAMPLES or self.samples > MAX_RESPONSE_SAMPLES
+                or len(self.outstanding) >= 512):
+            self.telemetry("realtime_queue_overrun")
+            raise sessions.RealtimeError("realtime_queue_overrun", 429)
+        self.outstanding[self.sequence] = self.samples
+        if self.sequence == 0:
+            self.telemetry("realtime_first_audio", duration_ms=(time.monotonic() - self.created_at) * 1000)
+        return {"type": "assistant_audio", **self.binding(), "sequence": self.sequence,
+            "pcm": base64.b64encode(pcm).decode("ascii")}
+
+    def finish_speech(self):
+        if (not self.text_first or self.authoritative_answer is None
+                or self.voice_delivery is None or self.audio_done or self.sequence < 0
+                or not self.samples):
+            raise sessions.RealtimeError("realtime_provider_failed", 502)
+        self.audio_done = True
+        self.seal = secrets.token_urlsafe(32)
+        return {"type": "assistant_audio_end", **self.binding(), "sequence": self.sequence,
+            "samples": self.samples, "seal": self.seal}
 
     def acknowledge(self, value):
         if not self.matches(value):

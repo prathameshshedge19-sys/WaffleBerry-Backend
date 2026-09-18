@@ -24,6 +24,7 @@ class VoiceProviderError(RuntimeError):
 class VoiceProvider(Protocol):
     async def transcribe(self, audio: bytes, filename: str, content_type: str) -> str: ...
     async def synthesize(self, text: str, voice: str) -> bytes: ...
+    async def synthesize_pcm(self, text: str, voice: str) -> bytes: ...
 
 
 class OpenAIVoiceProvider:
@@ -73,6 +74,23 @@ class OpenAIVoiceProvider:
             raise self._error(exc) from exc
         audio = response.content
         if not audio:
+            raise VoiceProviderError("voice_synthesis_empty")
+        return audio
+
+    async def synthesize_pcm(self, text: str, voice: str) -> bytes:
+        """Render exact supplied text as raw mono 24 kHz signed-16 PCM."""
+        try:
+            response = await self.client.audio.speech.create(
+                model=self.settings.voice_tts_model,
+                voice=voice,
+                input=text,
+                instructions=VOICE_INSTRUCTIONS,
+                response_format="pcm",
+            )
+        except OpenAIError as exc:
+            raise self._error(exc) from exc
+        audio = response.content
+        if not audio or len(audio) % 2:
             raise VoiceProviderError("voice_synthesis_empty")
         return audio
 

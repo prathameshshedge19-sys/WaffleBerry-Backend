@@ -67,6 +67,8 @@ EVENTS = {
     "response.output_audio.delta": "audio", "response.output_audio.done": "audio_done",
     "response.output_audio_transcript.delta": "output_transcript_delta",
     "response.output_audio_transcript.done": "output_transcript_done",
+    "response.output_text.delta": "output_text_delta",
+    "response.output_text.done": "output_text_done",
     "response.function_call_arguments.delta": "function_delta",
     "response.function_call_arguments.done": "function_done", "error": "error",
 }
@@ -80,7 +82,7 @@ def parse_event(raw, generation):
         return None
     # Internal payload only; never serialized to the browser or telemetry.
     fields = {"session", "response", "item_id", "previous_item_id", "response_id", "call_id",
-              "delta", "transcript", "arguments", "name", "content_index", "output_index", "audio_start_ms", "audio_end_ms"}
+              "delta", "text", "transcript", "arguments", "name", "content_index", "output_index", "audio_start_ms", "audio_end_ms"}
     return ProviderEvent(kind, generation, {k: v for k, v in raw.items() if k in fields})
 
 
@@ -107,6 +109,7 @@ class RealtimeProvider(Protocol):
     async def append_audio(self, pcm: bytes) -> None: ...
     async def plan_response(self, brain, generation_id, *, turn_id=None, session_id=None) -> None: ...
     async def create_response(self, prepared, generation_id, *, turn_id=None, session_id=None, continuation=()) -> None: ...
+    async def generate_authoritative_answer(self, prepared, generation_id, *, turn_id=None, session_id=None, continuation=()) -> None: ...
     async def cancel(self, response_id=None) -> None: ...
     async def drain_cancelled(self) -> None: ...
     async def close(self) -> None: ...
@@ -237,6 +240,12 @@ class RealOpenAIRealtimeProvider:
     async def create_response(self, prepared, generation_id, *, turn_id=None, session_id=None, continuation=()):
         await self._response(prepared, generation_id, turn_id, session_id, continuation=continuation)
 
+    async def generate_authoritative_answer(self, prepared, generation_id, *, turn_id=None,
+                                            session_id=None, continuation=()):
+        """Use the same realtime model/context, but complete authoritative text first."""
+        await self._response(prepared, generation_id, turn_id, session_id,
+            phase="answer", continuation=continuation)
+
     async def _response(self, prepared, generation_id, turn_id, session_id, *, phase="audio", tools=(),
                         tool_choice="none", continuation=(), extra=""):
         """Explicit L14 context; interrupted/unadmitted provider history is excluded."""
@@ -266,15 +275,16 @@ class RealOpenAIRealtimeProvider:
                           "content": [{"type": "output_text" if turn.role == "assistant" else "input_text",
                                        "text": turn.content}]})
         await self._send({"type": "response.create", "response": {
-            "conversation": "none", "metadata": {"generation_id": generation_id, **({"phase": "tools"} if phase == "tools" else {})},
+            "conversation": "none", "metadata": {"generation_id": generation_id,
+                **({"phase": phase} if phase in {"tools", "answer"} else {})},
             "input": items + list(continuation),
             "instructions": "\n\n".join(policy)
                             + ' Use concise spoken phrasing and a natural conversational rhythm; tolerate interruptions. '
                             + extra
-                            + ("\n\n" + RYA_AUDIO_PRONUNCIATION if phase == "audio" else "")
+                            + ("\n\n" + RYA_AUDIO_PRONUNCIATION if phase in {"audio", "answer"} else "")
                             + ("\n\n" + RYA_AUDIO_INTRODUCTION
                                if phase == "audio" and prepared.actor.mode == "rya" else ""),
-            "output_modalities": ["text"] if phase == "tools" else ["audio"],
+            "output_modalities": ["text"] if phase in {"tools", "answer"} else ["audio"],
             "reasoning": {"effort": "medium" if phase == "tools" else "high"},
             "parallel_tool_calls": True if phase == "tools" else False,
             "tools": list(tools), "tool_choice": tool_choice, "max_output_tokens": 2048}})

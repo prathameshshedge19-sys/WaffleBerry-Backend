@@ -26,6 +26,7 @@ def revision(name):
 
 migration = revision("0024_voice_profiles")
 synthesis_migration = revision("0025_voice_synthesis_jobs")
+live_synthesis_migration = revision("0026_voice_live_synthesis")
 tables = [item.__table__ for item in (VoiceProfile, VoiceConsentReceipt, VoiceProfileVersion, VoiceJob, VoiceAsset)]
 
 
@@ -76,6 +77,7 @@ def test_0023_upgrade_0024_downgrade_reupgrade_and_constraints():
         with Operations.context(context):
             migration.upgrade()
             synthesis_migration.upgrade()
+            live_synthesis_migration.upgrade()
         metadata = sa.MetaData()
         metadata.reflect(conn)
         for expected in tables:
@@ -143,6 +145,7 @@ def test_0023_upgrade_0024_downgrade_reupgrade_and_constraints():
         assert conn.exec_driver_sql("PRAGMA foreign_key_check").all() == []
 
         with Operations.context(context):
+            live_synthesis_migration.downgrade()
             synthesis_migration.downgrade()
             migration.downgrade()
         assert not any(name.startswith("voice_") for name in sa.inspect(conn).get_table_names())
@@ -151,6 +154,7 @@ def test_0023_upgrade_0024_downgrade_reupgrade_and_constraints():
         with Operations.context(context):
             migration.upgrade()
             synthesis_migration.upgrade()
+            live_synthesis_migration.upgrade()
         assert {item.name for item in tables} <= set(sa.inspect(conn).get_table_names())
         tx.rollback()
     engine.dispose()

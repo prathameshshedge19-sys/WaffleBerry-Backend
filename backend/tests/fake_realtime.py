@@ -14,6 +14,7 @@ class FakeRealtimeProvider:
         self.generation = 0
         self.voice = None
         self.requests = []
+        self.answer_requests = []
         self.cancelled_responses = []
         self.plans = []
         self.continuations = []
@@ -48,6 +49,12 @@ class FakeRealtimeProvider:
 
     async def create_response(self, prepared, generation_id, *, turn_id=None, session_id=None, continuation=()):
         self.requests.append((prepared, generation_id))
+        self.continuations.append(list(continuation))
+
+    async def generate_authoritative_answer(self, prepared, generation_id, *, turn_id=None,
+                                            session_id=None, continuation=()):
+        self.requests.append((prepared, generation_id))
+        self.answer_requests.append((prepared, generation_id))
         self.continuations.append(list(continuation))
 
     async def cancel(self, response_id=None):

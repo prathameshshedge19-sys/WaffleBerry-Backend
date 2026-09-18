@@ -27,6 +27,7 @@ from app.services.memory import get_memory_provider
 from app.services import realtime_transcripts as transcripts
 from app.services import realtime_sessions as sessions, turn_observability as obs
 from app.services.realtime_provider import get_realtime_provider
+from app.services.realtime_speech import get_live_speech_renderer, PreservedSpeechUnavailable
 from app.services.security import decode_token
 
 router = APIRouter(prefix="/realtime", tags=["realtime foundation"])
@@ -113,16 +114,20 @@ async def database_call(function, *args, **kwargs):
             raise
 
 
-async def bridge(websocket, provider, db, session_id, owner, generation, settings, memory_provider, web_provider):
+async def bridge(websocket, provider, db, session_id, owner, generation, settings, memory_provider,
+                 web_provider, speech_renderer):
     """One bounded mailbox, one DB owner. Readers never mutate session state."""
     inbox = asyncio.Queue(maxsize=settings.realtime_queue_depth)
     preparation = None
+    rendering = None
+    published_speech = None
     active = None
     retired = {}  # bounded by the existing 256 admitted provider input identities
 
     async def interrupt():
-        nonlocal active, preparation
+        nonlocal active, preparation, rendering, published_speech
         output, active = active, None  # fence before cancellation or database I/O
+        published_speech = None
         if output is None:
             return
         output.retired = True
@@ -131,6 +136,11 @@ async def bridge(websocket, provider, db, session_id, owner, generation, setting
             preparation.cancel()
             await asyncio.gather(preparation, return_exceptions=True)
             preparation = None
+        if rendering:
+            rendering.cancel()
+            await asyncio.gather(rendering, return_exceptions=True)
+            rendering = None
+        await speech_renderer.cancel_current(output)
         result = await database_call(responses.terminate, db, session_id, owner, generation,
                                      output.turn_id, output.claim, settings)
         if result:
@@ -166,6 +176,38 @@ async def bridge(websocket, provider, db, session_id, owner, generation, setting
             await enqueue_wait(("tool_error", (output, error)))
         except Exception:
             await enqueue_wait(("preparation_failed", output))
+
+    async def render_speech(output):
+        try:
+            answer = output.authoritative_answer
+            rendered = await speech_renderer.render(output, answer, owner, settings)
+            while True:
+                if output.retired:
+                    raise asyncio.CancelledError()
+                try:
+                    await speech_renderer.ensure_current(output, answer, rendered, owner, settings)
+                    admitted = asyncio.get_running_loop().create_future()
+                    await enqueue_wait(("speech_start", (output, rendered, admitted)))
+                    await admitted  # controller revalidation owns first publication
+                    break
+                except PreservedSpeechUnavailable:
+                    rendered = await speech_renderer.fallback_before_start(
+                        output, answer, rendered, owner, settings)
+            for offset in range(0, len(rendered.pcm_s16le), responses.MAX_FRAME_BYTES):
+                frame = rendered.pcm_s16le[offset:offset + responses.MAX_FRAME_BYTES]
+                while (not output.retired
+                        and (offset + len(frame)) // 2 - output.played > responses.MAX_BUFFER_SAMPLES):
+                    await speech_renderer.ensure_current(output, answer, rendered, owner, settings)
+                    await asyncio.sleep(.05)
+                if output.retired:
+                    raise asyncio.CancelledError()
+                await speech_renderer.ensure_current(output, answer, rendered, owner, settings)
+                await enqueue_wait(("speech_frame", (output, rendered, frame)))
+            await enqueue_wait(("speech_done", (output, rendered)))
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            await enqueue_wait(("speech_failed", output))
 
     def enqueue(value):
         try:
@@ -217,13 +259,16 @@ async def bridge(websocket, provider, db, session_id, owner, generation, setting
                 await enqueue_wait(("provider", event))
 
     async def controller():
-        nonlocal active, preparation
+        nonlocal active, preparation, rendering, published_speech
         order = transcripts.TranscriptOrder(generation, settings.realtime_queue_depth)
         ending = None
         checked_at = 0
         while True:
             if preparation and preparation.done() and not preparation.cancelled():
                 preparation.result()  # surface a failed bounded handoff promptly
+            if rendering and rendering.done() and not rendering.cancelled():
+                task, rendering = rendering, None
+                task.result()
             if ending is not None and time.monotonic() >= ending:
                 if order.unfinished:
                     await send(websocket, settings, {"type": "utterance_failed", "code": "realtime_unfinished_speech",
@@ -233,6 +278,12 @@ async def bridge(websocket, provider, db, session_id, owner, generation, setting
             if time.monotonic() - checked_at >= 1:
                 await database_call(sessions.owned, db, session_id, owner, generation, settings)
                 checked_at = time.monotonic()
+                if active is not None and published_speech is not None:
+                    try:
+                        await speech_renderer.ensure_current(active, active.authoritative_answer,
+                            published_speech, owner, settings)
+                    except Exception:
+                        await interrupt()
                 remaining = db.info.get("plan_voice_remaining_ms")
                 if remaining is not None and remaining <= 20_000:
                     await send(websocket, settings, {"type": "quota_warning", "remaining_ms": remaining,
@@ -255,9 +306,11 @@ async def bridge(websocket, provider, db, session_id, owner, generation, setting
             if source == "tools_ready":
                 output = event
                 if active is output and not output.retired and ending is None:
-                    await asyncio.wait_for(provider.create_response(output.brain.prepared, output.claim,
-                        turn_id=output.turn_id, session_id=session_id, continuation=output.brain.continuation),
-                        settings.realtime_io_timeout_seconds)
+                    create = (provider.generate_authoritative_answer if output.text_first
+                              else provider.create_response)
+                    await asyncio.wait_for(create(output.brain.prepared, output.claim,
+                        turn_id=output.turn_id, session_id=session_id,
+                        continuation=output.brain.continuation), settings.realtime_io_timeout_seconds)
                 continue
             if source == "tool_error":
                 output, error = event
@@ -267,6 +320,51 @@ async def bridge(websocket, provider, db, session_id, owner, generation, setting
                 continue
             if source == "preparation_failed":
                 if active is event:
+                    await interrupt()
+                continue
+            if source in {"speech_start", "speech_frame", "speech_done", "speech_failed"}:
+                output = event[0] if source != "speech_failed" else event
+                if active is not output or output.retired:
+                    obs.emit("realtime_stale_discard")
+                    continue
+                if source == "speech_start":
+                    rendered = event[1]
+                    admitted = event[2]
+                    if rendered.text_digest != output.authoritative_answer.text_digest:
+                        raise sessions.RealtimeError("realtime_provider_failed", 502)
+                    try:
+                        await speech_renderer.ensure_current(output, output.authoritative_answer,
+                                                             rendered, owner, settings)
+                    except PreservedSpeechUnavailable as error:
+                        if not admitted.done():
+                            admitted.set_exception(error)
+                        continue
+                    except Exception:
+                        await interrupt()
+                        continue
+                    await send(websocket, settings, output.start_speech(rendered.delivery))
+                    published_speech = rendered
+                    if not admitted.done():
+                        admitted.set_result(None)
+                elif source == "speech_frame":
+                    rendered, frame = event[1], event[2]
+                    try:
+                        await speech_renderer.ensure_current(output, output.authoritative_answer,
+                                                             rendered, owner, settings)
+                    except Exception:
+                        await interrupt()
+                        continue
+                    await send(websocket, settings, output.speech_frame(frame))
+                elif source == "speech_done":
+                    rendered = event[1]
+                    try:
+                        await speech_renderer.ensure_current(output, output.authoritative_answer,
+                                                             rendered, owner, settings)
+                    except Exception:
+                        await interrupt()
+                        continue
+                    await send(websocket, settings, output.finish_speech())
+                else:
                     await interrupt()
                 continue
             if source == "playback":
@@ -282,12 +380,20 @@ async def bridge(websocket, provider, db, session_id, owner, generation, setting
                     proof = active.acknowledge(event)
                     if proof:
                         output = active
+                        if published_speech is not None:
+                            try:
+                                await speech_renderer.ensure_current(output, output.authoritative_answer,
+                                    published_speech, owner, settings)
+                            except Exception:
+                                await interrupt()
+                                continue
                         result = await database_call(responses.terminate, db, session_id, owner, generation,
                                                      output.turn_id, output.claim, settings, proof,
                                                      current=output.brain.current)
                         output.retired = True
                         retired[output.claim] = output.response_id
                         active = None
+                        published_speech = None
                         if result:
                             await database_call(brain.finalize, db.get_bind(), output, owner, settings)
                             output.telemetry("realtime_response_completed")
@@ -310,7 +416,8 @@ async def bridge(websocket, provider, db, session_id, owner, generation, setting
                 if event.kind == "speech_started" and active:
                     await interrupt()
                 if event.kind in {"response_created", "response_done", "audio", "audio_done",
-                                  "output_transcript_delta", "output_transcript_done", "function_delta", "function_done"}:
+                                  "output_transcript_delta", "output_transcript_done",
+                                  "output_text_delta", "output_text_done", "function_delta", "function_done"}:
                     if event.kind == "response_created":
                         response = event.payload.get("response", {})
                         claim = response.get("metadata", {}).get("generation_id")
@@ -336,13 +443,18 @@ async def bridge(websocket, provider, db, session_id, owner, generation, setting
                         if event.kind == "response_done":
                             active.brain.accept_calls(event.payload["response"])
                             preparation = asyncio.create_task(tools(active))
-                        elif event.kind not in {"function_delta", "function_done"}:
+                        elif event.kind not in {"function_delta", "function_done",
+                                               "output_text_delta", "output_text_done"}:
                             raise sessions.RealtimeError("realtime_provider_failed", 502)
                         continue
                     if active:
                         for outgoing in active.provider(event):
                             if outgoing["type"] == "generation_failed":
                                 await interrupt()
+                            elif outgoing["type"] == "authoritative_answer_ready":
+                                if rendering is not None:
+                                    raise sessions.RealtimeError("realtime_provider_failed", 502)
+                                rendering = asyncio.create_task(render_speech(active))
                             else:
                                 await send(websocket, settings, outgoing)
                     else:
@@ -367,7 +479,9 @@ async def bridge(websocket, provider, db, session_id, owner, generation, setting
                         await send(websocket, settings, {**result, "item_id": identity})
                         if not result["replayed"] and ending is None:
                             turn = db.get(ConversationTurn, result["turn_id"])
-                            active = responses.Output(session_id, generation, turn.id, turn.claim_token)
+                            text_first = bool(settings.voice_live_enabled and turn.mode == "legacy")
+                            active = responses.Output(session_id, generation, turn.id, turn.claim_token,
+                                text_first=text_first, answer_model=settings.realtime_model)
                             db.rollback()
                             await send(websocket, settings, dict(type="assistant_thinking", **active.binding()))
                             preparation = asyncio.create_task(prepare(active))
@@ -382,17 +496,26 @@ async def bridge(websocket, provider, db, session_id, owner, generation, setting
         results = [task.result() for task in done]
         return next((value for value in results if value), "browser_disconnect")
     finally:
+        if active is not None:
+            active.retired = True
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         if preparation:
             preparation.cancel()
             await asyncio.gather(preparation, return_exceptions=True)
+        if rendering:
+            rendering.cancel()
+            await asyncio.gather(rendering, return_exceptions=True)
+        if active is not None:
+            with suppress(Exception):
+                await speech_renderer.cancel_current(active)
 
 
 @router.websocket("/connect")
 async def connect(websocket: WebSocket, db: Session = Depends(get_db), provider=Depends(get_realtime_provider),
-                  memory_provider=Depends(get_memory_provider), web_provider=Depends(get_web_search_provider)):
+                  memory_provider=Depends(get_memory_provider), web_provider=Depends(get_web_search_provider),
+                  speech_renderer=Depends(get_live_speech_renderer)):
     settings = get_settings()
     session_id = None
     generation = None
@@ -424,7 +547,8 @@ async def connect(websocket: WebSocket, db: Session = Depends(get_db), provider=
             for result in await database_call(transcripts.reconcile, db, session_id, owner, generation, settings):
                 await send(websocket, settings, result)
             obs.emit("realtime_session_ready", level=logging.INFO)
-            reason = await bridge(websocket, provider, db, session_id, owner, generation, settings, memory_provider, web_provider)
+            reason = await bridge(websocket, provider, db, session_id, owner, generation, settings,
+                                  memory_provider, web_provider, speech_renderer)
     except WebSocketDisconnect:
         reason = "browser_disconnect"
     except HTTPException as error:

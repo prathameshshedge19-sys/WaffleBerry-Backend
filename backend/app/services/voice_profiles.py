@@ -17,6 +17,7 @@ from fastapi import HTTPException
 from sqlalchemy import or_, select
 
 from app.models.legacy import Legacy
+from app.models.turn import ConversationTurn
 from app.models.voice_profile import (
     VoiceAsset, VoiceConsentReceipt, VoiceJob, VoiceProfile, VoiceProfileVersion,
 )
@@ -315,19 +316,24 @@ class VoiceJobService:
                 request_digest, priority=0, operation_generation=None,
                 purpose=None, authoritative_text=None, authoritative_text_digest=None,
                 model_manifest_digest=None, inference_config_digest=None,
-                requested_by_user_id=None, conversation_id=None, message_id=None):
+                requested_by_user_id=None, conversation_id=None, message_id=None,
+                realtime_turn_id=None, realtime_claim_token=None):
         if (kind not in {"prepare", "synthesize", "purge"}
                 or not isinstance(request_key, str) or not request_key.strip() or len(request_key) > 128
                 or not HEX64.fullmatch(request_digest)):
             raise ValueError("voice_job_request_invalid")
-        if kind == "synthesize" and (purpose not in {"preview", "message"}
+        if kind == "synthesize" and (purpose not in {"preview", "message", "live"}
                 or not isinstance(authoritative_text, str) or not authoritative_text.strip()
                 or len(authoritative_text) > 4096
                 or hashlib.sha256(authoritative_text.encode("utf-8")).hexdigest() != authoritative_text_digest
                 or not HEX64.fullmatch(model_manifest_digest or "")
                 or not HEX64.fullmatch(inference_config_digest or "")
                 or type(requested_by_user_id) is not int
-                or (purpose == "message" and (type(conversation_id) is not int or type(message_id) is not int))):
+                or (purpose == "message" and (type(conversation_id) is not int or type(message_id) is not int))
+                or (purpose == "live" and (type(conversation_id) is not int
+                    or type(realtime_turn_id) is not int
+                    or not isinstance(realtime_claim_token, str)
+                    or len(realtime_claim_token) != 36))):
             raise ValueError("voice_synthesis_request_invalid")
         scope = lock_scope(db, legacy_id)
         profile = scope.profile
@@ -366,9 +372,23 @@ class VoiceJobService:
             model_manifest_digest=model_manifest_digest,
             inference_config_digest=inference_config_digest,
             requested_by_user_id=requested_by_user_id,
-            conversation_id=conversation_id, message_id=message_id)
+            conversation_id=conversation_id, message_id=message_id,
+            realtime_turn_id=realtime_turn_id,
+            realtime_claim_token=realtime_claim_token)
         db.add(job)
         return job
+
+    @staticmethod
+    def _live_current(db, job):
+        if job.purpose != "live":
+            return True
+        turn = db.get(ConversationTurn, job.realtime_turn_id)
+        return bool(turn is not None and turn.state == "streaming"
+            and turn.input_mode == "realtime_voice" and turn.mode == "legacy"
+            and turn.claim_token == job.realtime_claim_token
+            and turn.conversation_id == job.conversation_id
+            and turn.legacy_id == job.legacy_id
+            and turn.actor_user_id == job.requested_by_user_id)
 
     def claim(self, db, kind: str, *, now=None, lease_seconds=LEASE_SECONDS):
         now = now or utcnow()
@@ -408,7 +428,8 @@ class VoiceJobService:
             job.state = "cancelled"
             job.finished_at = now
             return None
-        if kind == "synthesize" and (profile.status != "active" or profile.current_version_id != version.id or version.status != "ready"):
+        if kind == "synthesize" and (profile.status != "active" or profile.current_version_id != version.id
+                or version.status != "ready" or not self._live_current(db, job)):
             job.state = "cancelled"
             job.finished_at = now
             return None
@@ -476,9 +497,30 @@ class VoiceJobService:
         version = scope.versions.get(job.version_id) if job else None
         if (job is None or version is None or job.state != "running" or job.lease_token != token
                 or job.lease_expires_at is None or aware(job.lease_expires_at) <= now
-                or job.operation_generation != version.operation_generation):
+                or job.operation_generation != version.operation_generation
+                or not self._live_current(db, job)):
             raise StaleVoiceClaim()
         return scope, version, job
+
+    def cancel_live(self, db, job_id, *, turn_id, claim):
+        identity = db.execute(select(VoiceJob.legacy_id).where(VoiceJob.id == job_id)).scalar_one_or_none()
+        if identity is None:
+            return None
+        scope = lock_scope(db, identity)
+        job = scope.jobs.get(job_id)
+        if (job is None or job.purpose != "live" or job.realtime_turn_id != turn_id
+                or job.realtime_claim_token != claim):
+            return None
+        now = utcnow()
+        if job.state not in {"failed", "cancelled"}:
+            job.state = "cancelled"
+            job.finished_at = job.finished_at or now
+        job.lease_token = job.lease_expires_at = job.writer_deadline = None
+        for asset in scope.assets.values():
+            if asset.job_id == job.id and asset.kind == "generated" and asset.state != "purged":
+                _schedule_asset_purge(db, scope, asset, now,
+                    not_before=asset.writer_deadline or now)
+        return job
 
     @staticmethod
     def _finish(job, now):
@@ -893,13 +935,16 @@ class LegacySpeechOrchestrator:
     def admit_synthesis(self, db, context: AuthorizedSpeechContext, *, authoritative_text: str,
                         purpose: str, request_key: str, model_manifest_digest: str = "0" * 64,
                         inference_config_digest: str = "0" * 64, conversation_id: int | None = None,
-                        message_id: int | None = None):
+                        message_id: int | None = None,
+                        realtime_claim_token: str | None = None):
         if context.mode == "rya":
             return None
         if not isinstance(authoritative_text, str) or not authoritative_text.strip() or len(authoritative_text) > 4096:
             raise ValueError("voice_authoritative_text_invalid")
-        if purpose not in {"preview", "message"}:
+        if purpose not in {"preview", "message", "live"}:
             raise ValueError("voice_purpose_invalid")
+        if purpose == "live" and (context.turn_id is None or not realtime_claim_token):
+            raise ValueError("voice_live_context_invalid")
         version = self.resolve_version(db, context)
         if version is None:
             return None
@@ -910,7 +955,7 @@ class LegacySpeechOrchestrator:
             "text_digest": text_digest, "binding_digest": version.binding_digest,
             "model_manifest_digest": model_manifest_digest,
             "inference_config_digest": inference_config_digest, "purpose": purpose})
-        priority = 50 if purpose == "message" else 10
+        priority = 90 if purpose == "live" else 50 if purpose == "message" else 10
         return VoiceJobService().enqueue(db, legacy_id=context.legacy_id,
             profile_id=version.voice_profile_id, version_id=version.id, kind="synthesize",
             request_key=f"synth:{purpose}:{request_digest}", request_digest=request_digest,
@@ -920,4 +965,6 @@ class LegacySpeechOrchestrator:
             model_manifest_digest=model_manifest_digest,
             inference_config_digest=inference_config_digest,
             requested_by_user_id=context.actor_user_id,
-            conversation_id=conversation_id, message_id=message_id)
+            conversation_id=conversation_id, message_id=message_id,
+            realtime_turn_id=context.turn_id if purpose == "live" else None,
+            realtime_claim_token=realtime_claim_token if purpose == "live" else None)

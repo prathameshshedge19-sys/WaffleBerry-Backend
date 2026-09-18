@@ -94,6 +94,9 @@ class Settings(BaseSettings):
     voice_generated_retention_seconds: int = Field(default=86400, ge=300, le=86400)
     voice_synthesis_max_seconds: int = Field(default=120, ge=5, le=120)
     voice_synthesis_max_bytes: int = Field(default=2 * 1024 * 1024, ge=1024, le=2 * 1024 * 1024)
+    # Must leave room inside the accepted 150-second realtime turn lifetime for
+    # same-text standard fallback and clean terminal handling.
+    voice_live_synthesis_timeout_seconds: int = Field(default=90, ge=10, le=120)
 
     # L16 Media & Sources. Production must explicitly select an encrypted
     # S3-compatible backend; local storage is only the debug/test adapter.
@@ -176,12 +179,17 @@ class Settings(BaseSettings):
         if not self.legarya_debug and self.voice_message_playback_enabled:
             if not self.voice_cloning_enabled or self.voice_synthesis_provider != "indicf5":
                 raise ValueError("Production preserved playback requires the explicit IndicF5 worker provider.")
-            if self.voice_live_enabled:
-                raise ValueError("L21.4 must not enable cloned Live Call.")
             if self.media_storage_backend != "s3":
                 raise ValueError("Production preserved playback requires private S3-compatible storage.")
             if not self.voice_synthesis_manifest_digest:
                 raise ValueError("Production preserved playback requires a verified manifest digest.")
+        if not self.legarya_debug and self.voice_live_enabled:
+            if not self.voice_cloning_enabled or self.voice_synthesis_provider != "indicf5":
+                raise ValueError("Production preserved Live speech requires the explicit IndicF5 worker provider.")
+            if self.media_storage_backend != "s3":
+                raise ValueError("Production preserved Live speech requires private S3-compatible storage.")
+            if not self.voice_synthesis_manifest_digest:
+                raise ValueError("Production preserved Live speech requires a verified manifest digest.")
         return self
 
 
