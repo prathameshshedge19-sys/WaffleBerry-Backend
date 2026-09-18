@@ -29,6 +29,7 @@ from app.services.media_storage import StorageError
 from app.services.voice import VoiceProviderError, get_voice_provider
 from app.services.voice_profiles import AuthorizedSpeechContext, LegacySpeechOrchestrator, VoiceJobService, utcnow
 from app.services.voice_storage import VoiceStorage
+from app.services.voice_observability import emit as voice_event
 from app.services.voice_synthesis_manifest import inference_config_digest, test_manifest
 
 
@@ -232,6 +233,7 @@ class LiveSpeechRenderer:
                     raise PreservedSpeechUnavailable("preserved_speech_timeout")
                 except PreservedSpeechUnavailable:
                     await asyncio.to_thread(self._cancel, job_id, output)
+                    voice_event("fallback", reason="unavailable")
             return await self._standard(output, answer, owner, settings, voice, started)
         except sessions.RealtimeError as exc:
             raise SpeechRenderCancelled("realtime_access_changed") from exc
@@ -257,6 +259,7 @@ class LiveSpeechRenderer:
         return await self._standard(output, answer, owner, settings, voice, time.monotonic())
 
     async def ensure_current(self, output, answer, rendered, owner, settings):
+        self._verify_answer(answer, output)
         if rendered.delivery == "preserved":
             state, asset_id = await asyncio.to_thread(self._snapshot, output, answer,
                 owner, settings, rendered.preserved_job_id)

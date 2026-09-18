@@ -11,3 +11,12 @@ test.db
 server.pid
 server.stdout.log
 server.stderr.log
+# Voice artifacts are staged externally; only the reviewed identity manifest is source.
+/voice-models/**
+!/voice-models/indicf5-manifest.json
+/voice-worker-tmp/
+/voice-synthesis-tmp/
+*.safetensors
+*.ckpt
+*.pt
+*.pth

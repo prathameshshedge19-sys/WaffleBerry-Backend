@@ -7,7 +7,7 @@ The accepted L14/L15 brain remains authoritative, one completed answer is
 frozen and digested, and speech renders that exact value through either the
 active preserved voice or the existing standard TTS adapter. L21.5 does not
 claim latency qualification; the measured full-answer-first delay is explicit
-L21.6 work.
+L22 work under the final L21 roadmap decision.
 
 ## Baseline and scope
 
@@ -204,8 +204,8 @@ effects and exercise the actual controller/renderer/worker/receipt chain with
 deterministic providers. Read-only inspection of saved successful WAVs verified
 their stored SHA-256 and byte counts; every saved live job's text digest matches.
 Both QA WAVs are mono 24 kHz signed-16 PCM. A real end-to-end latency campaign is
-explicitly L21.6 scope. The observed ~31–33 second preserved delay is therefore
-an L21.6 latency blocker/optimization requirement, not an L21.5 correctness
+explicitly L22 scope. The observed ~31–33 second preserved delay is therefore
+an L22 rollout qualification requirement, not an L21 correctness
 failure.
 
 The accepted L21.4 listening verdict and exact quality settings remain
@@ -284,9 +284,11 @@ and manifest/config modules are unchanged.
 No brain rewrite, provider fork, model setting change, latency optimization or
 unrelated refactor was made. Synthetic fixtures only; no customer data used.
 
-## L21.6 remaining scope
+## L22 deferred scope (updated at final L21 closure)
 
-L21.6 owns full end-to-end latency qualification, sentence/semantic chunking
+L22 owns full end-to-end latency qualification, sentence/semantic chunking
 only if justified, safe synthesis pipelining, cancellation efficiency, GPU
-throughput/OOM/restart stress, concurrent capacity, and production hardware
-sizing. None is claimed by L21.5.
+throughput, concurrent capacity, and production hardware sizing. Independent
+cancellation/OOM/restart safety is covered by final L21 hardening; no performance
+qualification is claimed. See L21_FINAL_ACCEPTANCE.md and
+L22_VOICE_PERFORMANCE_HANDOFF.md. Preserved Live remains production OFF.

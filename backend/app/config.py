@@ -91,6 +91,7 @@ class Settings(BaseSettings):
     voice_synthesis_manifest_digest: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     voice_synthesis_device: Literal["cuda"] = "cuda"
     voice_synthesis_warmup_timeout_seconds: int = Field(default=180, ge=10, le=600)
+    voice_synthesis_job_timeout_seconds: int = Field(default=300, ge=30, le=600)
     voice_generated_retention_seconds: int = Field(default=86400, ge=300, le=86400)
     voice_synthesis_max_seconds: int = Field(default=120, ge=5, le=120)
     voice_synthesis_max_bytes: int = Field(default=2 * 1024 * 1024, ge=1024, le=2 * 1024 * 1024)

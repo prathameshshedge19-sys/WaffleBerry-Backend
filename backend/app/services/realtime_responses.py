@@ -271,7 +271,7 @@ class Output:
         digest = hashlib.sha256(self.final.encode("utf-8")).hexdigest()
         self.authoritative_answer = AuthoritativeAnswer(self.final, digest, self.turn_id,
             self.claim, "openai_realtime", self.answer_model, "completed")
-        self.telemetry("realtime_authoritative_text_final")
+        self.telemetry("realtime_authoritative_text_final", duration_ms=(time.monotonic() - self.created_at) * 1000)
         return [{"type": "authoritative_answer_ready"}]
 
     def start_speech(self, delivery: str):

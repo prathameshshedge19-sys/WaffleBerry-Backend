@@ -9,6 +9,7 @@ import hashlib
 import io
 import json
 import math
+import logging
 import struct
 import time
 import wave
@@ -27,12 +28,15 @@ from app.models.voice_profile import (
 from app.services.authorization import can_view_legacy_as_persona
 from app.services.indicf5_provider import IndicF5Provider
 from app.services.media_storage import StorageError
+from app.services import turn_observability as obs
 from app.services.voice_profiles import StaleVoiceClaim, VoiceJobService, aware, utcnow
 from app.services.voice_providers import (
     ClonedSpeechRequest, FakeClonedSpeechProvider, VoiceProviderFailure,
     reference_binding_digest, validate_speech, validate_synthesis_request,
 )
 from app.services.voice_storage import VoiceStorage
+from app.services.voice_observability import emit as voice_event
+from app.services.voice_worker_lifecycle import WorkerLifecycle
 from app.services.voice_synthesis_manifest import (
     inference_config_digest, load_and_verify_manifest, test_manifest,
 )
@@ -81,23 +85,39 @@ class VoiceSynthesisWorker:
         self.jobs = VoiceJobService()
         self.runner = asyncio.Runner()
         self.readiness: WorkerReadiness | None = None
+        self.lifecycle = WorkerLifecycle()
 
     async def _synthesize_with_heartbeat(self, job_id, token, request):
         task = asyncio.create_task(self.provider.synthesize(request))
         interval = max(5, self.settings.voice_worker_lease_seconds // 3)
+        renewed = time.monotonic()
+        deadline = renewed + self.settings.voice_synthesis_job_timeout_seconds
         try:
             while True:
-                done, _ = await asyncio.wait({task}, timeout=interval)
+                if self.lifecycle.stopping.is_set():
+                    raise VoiceProviderFailure("voice_worker_shutdown")
+                if time.monotonic() >= deadline:
+                    raise VoiceProviderFailure("voice_synthesis_timeout")
+                self.lifecycle.notify("WATCHDOG=1")
+                done, _ = await asyncio.wait({task}, timeout=min(interval, .25))
                 if task in done:
                     return await task
-                with self.sessions.begin() as db:
-                    self.jobs.heartbeat(db, job_id, token,
-                        lease_seconds=self.settings.voice_worker_lease_seconds)
+                # Fresh authorization/lifecycle/claim check while the GPU runs.
+                # Session is independent of the controller; no transaction spans
+                # an await. Also checks revoke/delete/replacement and turn loss.
+                await asyncio.to_thread(self._input, job_id, token, reference_required=False)
+                if time.monotonic() - renewed >= interval:
+                    with self.sessions.begin() as db:
+                        self.jobs.heartbeat(db, job_id, token,
+                            lease_seconds=self.settings.voice_worker_lease_seconds)
+                    renewed = time.monotonic()
         except BaseException:
             task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
             raise
 
     def warmup(self):
+        self.readiness = None
         started = time.monotonic()
         reference = _warm_reference()
         text = "नमस्कार."
@@ -115,18 +135,22 @@ class VoiceSynthesisWorker:
             self.provider.synthesize(request),
             timeout=self.settings.voice_synthesis_warmup_timeout_seconds))
         validate_speech(result, text, 1)
+        if self.lifecycle.stopping.is_set():
+            raise VoiceProviderFailure("voice_worker_shutdown")
         self.readiness = WorkerReadiness(self.provider.provider_name,
             self.settings.voice_synthesis_device, self.manifest.digest,
             round((time.monotonic() - started) * 1000))
         return self.readiness
 
     def claim(self):
+        if self.lifecycle.stopping.is_set():
+            return None
         with self.sessions.begin() as db:
             job = self.jobs.claim(db, "synthesize",
                 lease_seconds=self.settings.voice_worker_lease_seconds)
             return (job.id, job.lease_token) if job else None
 
-    def _input(self, job_id, token):
+    def _input(self, job_id, token, *, reference_required=True):
         with self.sessions() as db:
             job = db.get(VoiceJob, job_id)
             version = db.get(VoiceProfileVersion, job.version_id) if job else None
@@ -192,6 +216,8 @@ class VoiceSynthesisWorker:
                     raise VoiceProviderFailure("voice_authorization_changed")
             else:
                 raise VoiceProviderFailure("voice_authorization_changed")
+            if not reference_required:
+                return None
             identity = (reference.sha256, reference.byte_count, reference.object_key,
                 reference.object_version)
             audio = self.storage.read_private(reference)
@@ -212,10 +238,18 @@ class VoiceSynthesisWorker:
             return request
 
     def run_job(self, job_id, token):
+        started = time.monotonic()
+        timings = {}
         try:
             request = self._input(job_id, token)
+            timings["voice_input_ms"] = (time.monotonic() - started) * 1000
+            inference_started = time.monotonic()
             result = self.runner.run(self._synthesize_with_heartbeat(job_id, token, request))
+            timings["voice_inference_ms"] = (time.monotonic() - inference_started) * 1000
+            storage_started = time.monotonic()
             validate_speech(result, request.authoritative_text, request.operation_generation)
+            if len(result.pcm_s16le) > self.settings.voice_synthesis_max_seconds * 48000:
+                raise VoiceProviderFailure("voice_synthesis_output_too_large")
             wav = pcm_wav(result.pcm_s16le)
             if len(wav) > self.settings.voice_synthesis_max_bytes:
                 raise VoiceProviderFailure("voice_synthesis_output_too_large")
@@ -234,14 +268,18 @@ class VoiceSynthesisWorker:
             with self.sessions.begin() as db:
                 self.jobs.publish_generated(db, job_id, token, result,
                     asset_id=asset_id, stored=stored, wav_digest=digest)
+            voice_event("job_completed")
+            timings["voice_storage_ms"] = (time.monotonic() - storage_started) * 1000
             return "ready"
         except StaleVoiceClaim:
+            voice_event("stale_publication_blocked", reason="stale")
             if "asset_id" in locals():
                 with self.sessions.begin() as db:
                     self.jobs.schedule_asset_purge(db, legacy_id=request.legacy_id,
                         asset_id=asset_id, not_before=deadline)
             return "stale"
         except (VoiceProviderFailure, StorageError, OSError) as exc:
+            voice_event("job_failed", reason="provider")
             code = getattr(exc, "code", "voice_synthesis_failed")
             try:
                 with self.sessions.begin() as db:
@@ -254,6 +292,7 @@ class VoiceSynthesisWorker:
                 return "stale"
             return "retry_wait" if code in {"voice_storage_unavailable", "voice_worker_busy"} else "failed"
         except RuntimeError as exc:
+            voice_event("job_failed", reason="provider")
             code = "voice_gpu_out_of_memory" if "out of memory" in str(exc).lower() else "voice_synthesis_failed"
             try:
                 with self.sessions.begin() as db:
@@ -261,16 +300,23 @@ class VoiceSynthesisWorker:
             except StaleVoiceClaim:
                 return "stale"
             return "failed"
+        finally:
+            timings["voice_cycle_ms"] = (time.monotonic() - started) * 1000
+            obs.emit("voice_worker_stage", values=timings)
 
     def run_once(self):
         if self.readiness is None:
             raise RuntimeError("voice_worker_not_ready")
         with self.sessions.begin() as db:
-            self.jobs.expire_generated(db)
+            self.jobs.reconcile_interrupted_assets(db)
+        started = time.monotonic()
         claim = self.claim()
+        obs.emit("voice_worker_stage", values={"voice_claim_ms": (time.monotonic() - started) * 1000})
         return self.run_job(*claim) if claim else "idle"
 
     def close(self):
+        self.readiness = None
+        self.lifecycle.request_stop()
         self.runner.close()
 
 
@@ -285,23 +331,38 @@ def main():
     if not (settings.voice_cloning_enabled
             and (settings.voice_message_playback_enabled or settings.voice_live_enabled)):
         parser.error("Preserved voice playback is disabled")
-    worker = VoiceSynthesisWorker(settings=settings)
+    logging.basicConfig(level=logging.INFO)
+    voice_event("worker_starting")
+    worker = None
     try:
-        ready = worker.warmup()
-        print(json.dumps({"event": "voice_synthesis_worker_ready",
-            "provider": ready.provider, "device": ready.device,
-            "manifest_digest": ready.manifest_digest,
-            "warmup_ms": ready.warmup_ms}), flush=True)
-        while True:
-            outcome = worker.run_once()
-            print(json.dumps({"event": "voice_synthesis_worker_cycle",
-                "outcome": outcome}), flush=True)
-            if args.once:
-                return
-            if outcome != "ready":
-                time.sleep(args.poll_seconds)
+        worker = VoiceSynthesisWorker(settings=settings)
+        with worker.lifecycle.signals():
+            ready = worker.warmup()
+            worker.lifecycle.notify("READY=1")
+            voice_event("worker_ready")
+            print(json.dumps({"event": "voice_synthesis_worker_ready",
+                "provider": ready.provider, "device": ready.device,
+                "manifest_digest": ready.manifest_digest,
+                "warmup_ms": ready.warmup_ms}), flush=True)
+            while not worker.lifecycle.stopping.is_set():
+                worker.lifecycle.notify("WATCHDOG=1")
+                outcome = worker.run_once()
+                print(json.dumps({"event": "voice_synthesis_worker_cycle",
+                    "outcome": outcome}), flush=True)
+                if args.once:
+                    return
+                if outcome != "ready":
+                    worker.lifecycle.stopping.wait(args.poll_seconds)
+    except Exception:
+        # Never print arbitrary dependency exceptions, DSNs, paths or payloads.
+        voice_event("worker_not_ready", reason="unavailable")
+        if worker is None:
+            voice_event("manifest_failure", reason="manifest")
+        raise SystemExit(1) from None
     finally:
-        worker.close()
+        voice_event("worker_stopping", reason="shutdown")
+        if worker is not None:
+            worker.close()
 
 
 if __name__ == "__main__":

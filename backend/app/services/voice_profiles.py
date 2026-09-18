@@ -25,6 +25,8 @@ from app.services.voice_providers import (
     REFERENCE_RECIPE, ClonedSpeech, PreparedReference, validate_prepared,
     validate_speech,
 )
+from app.services.voice_limits import capacity_available
+from app.services.voice_observability import emit as voice_event
 
 CONSENT_COPY = "l21-voice-consent-v1"
 CONSENT_POLICY = "l21-voice-policy-v1"
@@ -128,6 +130,7 @@ def _schedule_purge(db, scope: VoiceScope, version: VoiceProfileVersion, now) ->
         request_key=key, request_digest=request_digest, created_at=now)
     db.add(job)
     scope.jobs[job.id] = job
+    voice_event("purge_queued")
     return job
 
 
@@ -156,6 +159,7 @@ def _schedule_asset_purge(db, scope: VoiceScope, asset: VoiceAsset, now,
         request_digest=request_digest, created_at=now)
     db.add(job)
     scope.jobs[job.id] = job
+    voice_event("purge_queued")
     return job
 
 
@@ -183,6 +187,10 @@ class VoiceEnrollmentService:
         current_revision = scope.profile.revision if scope.profile else 0
         if payload.expected_revision != current_revision:
             conflict()
+        if not capacity_available(db, scope, "enrollment"):
+            voice_event("admission_rejected", reason="capacity")
+            raise HTTPException(429, detail={"code": "voice_capacity_exceeded",
+                "message": "Preserved voice is temporarily unavailable."})
         now = utcnow()
         profile = scope.profile
         if profile is None:
@@ -355,6 +363,9 @@ class VoiceJobService:
                 and aware(asset.expires_at) > now for asset in generated)
             if reusable:
                 return existing
+            if not capacity_available(db, scope, "synthesize"):
+                voice_event("admission_rejected", reason="capacity")
+                return None
             # A terminal job without live audio is history, not a reusable
             # cache hit. Archive its uniqueness key and fence every leftover
             # object so the same full digest can be explicitly retried.
@@ -362,6 +373,9 @@ class VoiceJobService:
             for asset in generated:
                 if asset.state != "purged":
                     _schedule_asset_purge(db, scope, asset, now)
+        elif kind == "synthesize" and not capacity_available(db, scope, "synthesize"):
+            voice_event("admission_rejected", reason="capacity")
+            return None
         generation = operation_generation or version.operation_generation
         job = VoiceJob(id=str(uuid4()), legacy_id=legacy_id, voice_profile_id=profile_id,
             version_id=version_id, kind=kind, state="queued", priority=priority, attempts=0,
@@ -376,6 +390,7 @@ class VoiceJobService:
             realtime_turn_id=realtime_turn_id,
             realtime_claim_token=realtime_claim_token)
         db.add(job)
+        voice_event("job_admitted")
         return job
 
     @staticmethod
@@ -416,6 +431,15 @@ class VoiceJobService:
             or (job.state == "running" and job.lease_expires_at is not None and aware(job.lease_expires_at) <= now))
         if not still_eligible:
             return None
+        if kind != "purge" and job.attempts >= 3:
+            job.state, job.finished_at = "failed", now
+            job.safe_error_code = "voice_worker_attempts_exhausted"
+            job.lease_token = job.lease_expires_at = job.writer_deadline = None
+            if kind == "prepare" and version is not None and version.status == "preparing":
+                version.status = "failed"
+                version.safe_failure_code = job.safe_error_code
+            voice_event("job_failed", reason="recovery")
+            return None
         if (legacy is None or (legacy.deletion_requested_at is not None and kind != "purge") or profile is None
                 or profile.status in {"revoked", "deleting", "deleted"} and kind != "purge"
                 or version is None or version.operation_generation != job.operation_generation
@@ -451,6 +475,8 @@ class VoiceJobService:
                 job.next_attempt_at = max(pending_deadlines)
                 job.lease_token = job.lease_expires_at = job.writer_deadline = None
                 return None
+        if job.state == "running":
+            voice_event("lease_recovered", reason="recovery")
         job.state = "running"
         job.attempts += 1
         job.lease_token = str(uuid4())
@@ -488,6 +514,43 @@ class VoiceJobService:
                 reconciled += 1
         return reconciled
 
+    def reconcile_interrupted_assets(self, db, *, now=None):
+        """Fence expired reference/generated reservations after worker death.
+
+        Never reuse a key that an old process could still write. A partial
+        synthesis becomes failed; an explicit client retry owns a fresh key.
+        Original retention and generated expiry are serviced even with flags OFF.
+        """
+        now = now or utcnow()
+        ids = list(db.scalars(select(VoiceAsset.legacy_id).where(
+            ((VoiceAsset.state == "dispatching") & (VoiceAsset.writer_deadline <= now))
+            | ((VoiceAsset.kind == "original") & (VoiceAsset.state == "available")
+                & (VoiceAsset.expires_at <= now))).distinct().order_by(VoiceAsset.legacy_id)))
+        for legacy_id in ids:
+            scope = lock_scope(db, legacy_id)
+            for asset in scope.assets.values():
+                expired_write = (asset.state == "dispatching" and asset.writer_deadline is not None
+                    and aware(asset.writer_deadline) <= now)
+                expired_original = (asset.kind == "original" and asset.state == "available"
+                    and asset.expires_at is not None and aware(asset.expires_at) <= now)
+                if not (expired_write or expired_original):
+                    continue
+                _schedule_asset_purge(db, scope, asset, now)
+                version = scope.versions[asset.version_id]
+                for job in scope.jobs.values():
+                    if (job.version_id == version.id and job.kind != "purge"
+                            and job.state in {"queued", "running", "retry_wait"}
+                            and (job.id == asset.job_id or
+                                asset.kind == "original" and job.kind == "prepare")):
+                        job.state, job.finished_at = "failed", now
+                        job.safe_error_code = "voice_worker_write_interrupted"
+                        job.lease_token = job.lease_expires_at = job.writer_deadline = None
+                if asset.kind != "generated" and version.status in {"uploading", "queued", "preparing"}:
+                    version.status = "failed"
+                    version.safe_failure_code = "voice_worker_write_interrupted"
+                    version.updated_at = now
+        self.expire_generated(db, now=now)
+
     def _publication_scope(self, db, job_id, token, now):
         identity = db.execute(select(VoiceJob.legacy_id).where(VoiceJob.id == job_id)).scalar_one_or_none()
         if identity is None:
@@ -520,6 +583,7 @@ class VoiceJobService:
             if asset.job_id == job.id and asset.kind == "generated" and asset.state != "purged":
                 _schedule_asset_purge(db, scope, asset, now,
                     not_before=asset.writer_deadline or now)
+        voice_event("job_cancelled")
         return job
 
     @staticmethod
@@ -742,6 +806,11 @@ class VoiceJobService:
         version.reference_asset_id = None
         version.reference_transcript = None
         version.model_manifest_json = version.asr_manifest_json = version.inference_config_json = None
+        for item in scope.jobs.values():
+            if item.version_id == version.id and item.kind == "synthesize":
+                # Retain only bounded lifecycle/digest evidence, not a duplicate
+                # private answer after voice deletion. Purged jobs cannot render.
+                item.authoritative_text = "[purged]"
         version.updated_at = now
         self._finish(job, now)
         profile = scope.profile
@@ -766,7 +835,7 @@ class VoiceJobService:
         job.lease_token = job.lease_expires_at = job.writer_deadline = None
         if job.kind == "purge" or (retryable and job.attempts < 3):
             job.state = "retry_wait"
-            job.next_attempt_at = now + timedelta(seconds=min(60, 2 ** job.attempts))
+            job.next_attempt_at = now + timedelta(seconds=min(60, 2 ** min(job.attempts, 6)))
         else:
             job.state = "failed"
             job.finished_at = now

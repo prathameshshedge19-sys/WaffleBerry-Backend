@@ -7,6 +7,7 @@ from sqlalchemy import select
 from app.models.voice_profile import VoiceAsset
 from app.services.media_storage import get_source_storage
 from app.services.visual_storage import VisualStorage
+from app.services.voice_observability import emit as voice_event
 
 
 def utcnow():
@@ -74,4 +75,5 @@ class VoiceStorage:
             asset.absence_checks += 1
             asset.state = "purged"
             asset.purged_at = now
+            voice_event("purge_completed")
             return True

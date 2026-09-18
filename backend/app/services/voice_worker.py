@@ -19,19 +19,25 @@ from app.services.voice_reference import (
     sweep_voice_temp_root,
 )
 from app.services.voice_storage import VoiceStorage
+from app.services.voice_worker_lifecycle import WorkerLifecycle
+from app.services.voice_observability import emit as voice_event
 
 
 class VoiceWorker:
     def __init__(self, sessions=SessionLocal, storage=None, *, provider=None,
-                 settings=None):
+                 settings=None, purge_only=False):
         self.sessions = sessions
         self.settings = settings or get_settings()
         self.storage = storage if isinstance(storage, VoiceStorage) else VoiceStorage(storage)
-        self.provider = provider or get_reference_preparation_provider(self.settings)
+        self.purge_only = purge_only
+        self.provider = None if purge_only else (provider or get_reference_preparation_provider(self.settings))
         self.jobs = VoiceJobService()
         self.runner = asyncio.Runner()
+        self.lifecycle = WorkerLifecycle()
 
     def claim(self, kind):
+        if self.lifecycle.stopping.is_set():
+            return None
         with self.sessions.begin() as db:
             job = self.jobs.claim(db, kind,
                 lease_seconds=self.settings.voice_worker_lease_seconds)
@@ -50,6 +56,7 @@ class VoiceWorker:
                         lease_seconds=self.settings.voice_worker_lease_seconds)
         except BaseException:
             task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
             raise
 
     def _run_prepare(self, job_id, token):
@@ -173,15 +180,17 @@ class VoiceWorker:
     def run_once(self):
         with self.sessions.begin() as db:
             self.jobs.reconcile_expired_original_writes(db)
+            self.jobs.reconcile_interrupted_assets(db)
         purge = self.claim("purge")
         if purge:
             return self._run_purge(*purge)
-        prepare = self.claim("prepare")
+        prepare = None if self.purge_only else self.claim("prepare")
         if prepare:
             return self._run_prepare(*prepare)
         return "idle"
 
     def close(self):
+        self.lifecycle.request_stop()
         self.runner.close()
 
 
@@ -189,31 +198,37 @@ def main():
     import argparse
     parser = argparse.ArgumentParser(description="Prepare private preserved-voice references")
     parser.add_argument("--once", action="store_true")
+    parser.add_argument("--purge-only", action="store_true",
+        help="Run mandatory cleanup without enrollment, models or feature flags")
     parser.add_argument("--poll-seconds", type=float, default=5)
     args = parser.parse_args()
     if args.poll_seconds < 1:
         parser.error("poll-seconds must be at least 1")
     settings = get_settings()
-    if not (settings.voice_cloning_enabled and settings.voice_enrollment_enabled):
+    if not args.purge_only and not (settings.voice_cloning_enabled and settings.voice_enrollment_enabled):
         parser.error("Voice enrollment is disabled")
-    sweep_voice_temp_root(settings)
-    worker = VoiceWorker(settings=settings)
+    if not args.purge_only:
+        sweep_voice_temp_root(settings)
+    worker = VoiceWorker(settings=settings, purge_only=args.purge_only)
     print(json.dumps({"event": "voice_worker_ready",
-        "provider": worker.provider.provider_name}), flush=True)
+        "provider": worker.provider.provider_name if worker.provider else "purge-only"}), flush=True)
     try:
-        while True:
-            started = time.monotonic()
-            try:
-                outcome = worker.run_once()
-            except Exception:
-                outcome = "worker_unavailable"
-            print(json.dumps({"event": "voice_worker_cycle", "outcome": outcome,
-                "duration_ms": round((time.monotonic() - started) * 1000)}),
-                flush=True)
-            if args.once:
-                return
-            if outcome in {"idle", "worker_unavailable", "failed", "retry_wait"}:
-                time.sleep(args.poll_seconds)
+        with worker.lifecycle.signals():
+            worker.lifecycle.notify("READY=1")
+            while not worker.lifecycle.stopping.is_set():
+                worker.lifecycle.notify("WATCHDOG=1")
+                started = time.monotonic()
+                try:
+                    outcome = worker.run_once()
+                except Exception:
+                    outcome = "worker_unavailable"
+                print(json.dumps({"event": "voice_worker_cycle", "outcome": outcome,
+                    "duration_ms": round((time.monotonic() - started) * 1000)}),
+                    flush=True)
+                if args.once:
+                    return
+                if outcome in {"idle", "worker_unavailable", "failed", "retry_wait"}:
+                    worker.lifecycle.stopping.wait(args.poll_seconds)
     finally:
         worker.close()
 

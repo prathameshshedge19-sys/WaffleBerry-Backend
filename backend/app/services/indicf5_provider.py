@@ -8,11 +8,14 @@ tokens, memory, prompts, tools, object keys, or user credentials.
 from __future__ import annotations
 
 import asyncio
+import anyio
+from contextlib import suppress
 import gc
 import importlib.util
 import os
 from pathlib import Path
 import tempfile
+import threading
 
 from app.services.voice_providers import (
     ClonedSpeech, ClonedSpeechRequest, VoiceProviderFailure,
@@ -29,6 +32,8 @@ class IndicF5Provider:
             raise VoiceProviderFailure("voice_cuda_required")
         self.manifest = manifest
         self.device = device
+        self._inference_lock = threading.Lock()
+        self._recover_cuda = False
         loaded = (loader or self._load_once)(manifest)
         self._model, self._vocoder, self._infer = loaded[:3]
         self._preprocess = loaded[3] if len(loaded) > 3 else None
@@ -114,7 +119,56 @@ class IndicF5Provider:
 
     async def synthesize(self, request: ClonedSpeechRequest) -> ClonedSpeech:
         validate_synthesis_request(request)
-        return await asyncio.to_thread(self._synthesize_sync, request)
+        stop = threading.Event()
+        task = asyncio.create_task(asyncio.to_thread(self._serialized_synthesis, request, stop))
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            stop.set()
+            # A cancelled to_thread continues running. Join it before allowing
+            # the single-GPU worker to start a successor or close its process.
+            with anyio.CancelScope(shield=True):
+                while not task.done():
+                    with suppress(asyncio.CancelledError, Exception):
+                        await asyncio.shield(task)
+                if not task.cancelled():
+                    with suppress(Exception): task.result()
+            raise
+
+    def _serialized_synthesis(self, request, stop):
+        from app.services.indicf5_runtime import inference_runtime
+        while not self._inference_lock.acquire(timeout=.05):
+            if stop.is_set(): raise VoiceProviderFailure("voice_synthesis_cancelled")
+        try:
+            if self._recover_cuda:
+                # The previous exception/traceback has left the worker cycle.
+                # Reclaim only unused allocator blocks, never change precision.
+                import torch
+                gc.collect()
+                torch.cuda.empty_cache()
+                self._recover_cuda = False
+            with inference_runtime(self._model, stop):
+                return self._synthesize_sync(request)
+        except VoiceProviderFailure:
+            if stop.is_set():
+                # The caller already owns CancelledError. Do not return a CUDA
+                # traceback through Future: its frames retain activations until
+                # cyclic GC and can accumulate across rapid retirements.
+                return None
+            raise
+        except RuntimeError as exc:
+            if "out of memory" in str(exc).lower():
+                self._recover_cuda = True
+                exc.__traceback__ = None
+                raise VoiceProviderFailure("voice_gpu_out_of_memory") from None
+            raise
+        finally:
+            try:
+                if stop.is_set() and self.load_report is not None:
+                    import torch
+                    torch.cuda.synchronize()
+            finally:
+                self._inference_lock.release()
 
     def _synthesize_sync(self, request):
         try:

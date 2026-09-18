@@ -124,6 +124,9 @@ def preview(legacy_id: int, payload: _NoVoiceSelection | None = Body(default=Non
         request_key=PREVIEW_TEXT_VERSION, model_manifest_digest=_manifest_digest(settings),
         inference_config_digest=inference_config_digest())
     db.commit()
+    if job is None:
+        raise HTTPException(503, detail={"code": "voice_capacity_exceeded",
+            "message": "Preserved voice is temporarily unavailable."})
     return _json({**_job_payload(job), "preview_text_version": PREVIEW_TEXT_VERSION},
         200 if job.state == "succeeded" else 202)
 
@@ -150,6 +153,9 @@ async def message_speech(conversation_id: int, message_id: int,
     if job is not None:
         db.commit()
         return _json(_job_payload(job), 200 if job.state == "succeeded" else 202)
+    db.commit()  # release admission locks before calling standard speech
+    from app.services.voice_observability import emit as voice_event
+    voice_event("fallback", reason="unavailable")
     if len(message.content) > settings.voice_max_tts_characters:
         raise HTTPException(413, detail={"code": "speech_too_long",
             "message": "That response is too long for voice playback."})
