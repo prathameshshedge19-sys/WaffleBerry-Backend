@@ -1,6 +1,53 @@
 # Account deletion: storage and retention hardening
 
-2026-09-24. Application changes are uncommitted and **not activated**. The known
+## Production release — 2026-09-24
+
+**DEPLOYED AND VERIFIED.** The operator explicitly authorized release. The
+backend implementation is `1e5cf0696151ce40f570e12d3c7dc7178c98160d`; the web
+implementation is `1e2262f9b11527be4a2ceda39d3c8df1321234af`, based on the live
+saved-chat/enrollment UI rather than replacing it with an older branch.
+
+- All four old writers/API services were stopped and their PIDs verified zero.
+  A new protected, validated pre-migration PostgreSQL dump was added to the
+  enforced backup catalog. The managed root then contained 40 backup files.
+- Additive migrations through `0027_account_deletion` completed. The journal
+  on the pinned independent volume was initialized and bound to the SQL lineage;
+  the restore gate passed before application traffic resumed.
+- API/media/personality/visual services and the new model-free account purge
+  worker are active. Deletion health, backup expiry and privacy-monitor timers
+  are enabled. `DELETION_MONITOR_ACCOUNT_UNITS=true`; real health/monitor runs
+  returned success. Voice feature flags remain disabled.
+- All five service mount namespaces expose the same pinned host/scratch inode.
+  A held cleanup lock excluded competing locks inside every namespace, including
+  those with PrivateTmp. Scratch remains separate from models and Git.
+- Real public-API acceptance: two newly created synthetic accounts, password
+  login, rejected wrong-password and cross-account proofs, exact confirmation,
+  real S3 source upload with a confirmed durable write, accepted deletion, old
+  access/refresh rejection and preservation of the control account. Completion
+  was observed in **14.3 seconds** after acceptance; the account, owned Legacy,
+  source registry, exact object versions/delete markers and MPU handles were
+  absent. The external obligation remained present. All synthetic accounts were
+  erased through the orchestrator. An earlier test-only reserved-domain login
+  fixture was rejected and both of those dummy accounts were also cleaned up.
+- Public deletion URL now returns **200**, with LegaRya/WaffleBerry identification,
+  monitored email initiation without reinstalling, in-product account settings,
+  deletion scope and managed-backup retention copy. Thirteen deployed product
+  assets matched release Git blobs; six private/developer paths returned 404.
+  Frontend regression suite: **440 passed** on the live-compatible release.
+
+The accepted exceptions remain **unverified cloud/offsite backup coverage** and
+**one historical unjournaled visual PUT**, still `dispatching`. No terminal proof
+or deletion receipt was fabricated for it. Operator acceptance is not independent
+technical closure or Google Play approval. SMTP accepted the setup email;
+operator inbox receipt has not been independently observed. Web deployment does
+not update already-installed Android bundles or submit a Play release.
+
+## Historical pre-rollout evidence
+
+The sections below describe the earlier stages and their then-pending gates;
+the production release record above supersedes those activation statements.
+
+2026-09-24, before cutover. Application changes were uncommitted and **not activated**. The known
 host's standalone backup expiry control is now installed and active following
 the user's deployment authorization. This is not a full production-closure
 certificate. No current live LegaRya customer object/row, app service or feature

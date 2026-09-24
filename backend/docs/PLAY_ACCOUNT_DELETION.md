@@ -1,6 +1,26 @@
 # Play account deletion — implementation audit and runbook
 
-Status: application implemented in source; **application rollout pending**.
+Status: **DEPLOYED AND VERIFIED — 2026-09-24**. Application implementation
+`1e5cf0696151ce40f570e12d3c7dc7178c98160d` is live on the existing backend.
+Migration `0027_account_deletion`, the independent journal binding, purge worker,
+deadline checks and monitored SMTP alerts are active. The public page now returns
+200 after its canonical-host redirect:
+<https://waffleberry.app/legarya/delete-account>.
+
+Production acceptance used only freshly created synthetic identities. A real
+HTTP login/upload/reauthentication/deletion through the public API completed in
+14.3 seconds after acceptance. Old access and refresh credentials were rejected;
+the second account remained usable until separately cleaned up. Owned product
+rows, exact S3 versions/delete markers and multipart uploads were confirmed
+absent. All synthetic accounts were subsequently erased by the orchestrator.
+Shared scratch identity and cross-namespace cleanup locks were verified in the
+API, media, personality, visual and account-deletion services. Voice flags remain
+off. Existing refresh rotation, Android origin and plan settings were preserved.
+See the storage hardening record for the rollout and outstanding exceptions.
+
+## Historical pre-rollout status (superseded by the deployment above)
+
+Before the authorized application cutover, application rollout was pending.
 The operator accepted cloud/offsite inventory and one historical unjournaled
 visual PUT as release exceptions, not independently verified resolutions. The
 follow-up [storage hardening record](PLAY_DELETION_STORAGE_HARDENING.md) defines
