@@ -123,11 +123,9 @@ class S3SourceStorage:
         )
 
     def put(self, object_key: str, data: bytes, *, content_type: str) -> StoredObject:
-        try:
-            response = self.client.put_object(Bucket=self.bucket, Key=_safe_key(object_key), Body=data, ContentType=content_type, **self._sse)
-        except Exception as exc:
-            raise StorageError("storage_put_failed") from exc
-        return StoredObject(len(data), response.get("ETag"), response.get("VersionId"))
+        from app.services.visual_storage import VisualStorage, _key
+        _key(object_key)
+        return VisualStorage(self)._run("put", object_key, data, content_type)
 
     def open(self, object_key: str) -> BinaryIO:
         try:

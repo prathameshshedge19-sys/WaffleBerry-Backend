@@ -175,7 +175,8 @@ class IndicF5Provider:
             import numpy as np
         except ImportError as exc:
             raise VoiceProviderFailure("voice_synthesis_dependency_missing") from exc
-        with tempfile.TemporaryDirectory(prefix="legarya-synthesis-") as directory:
+        from app.services.voice_runtime_cleanup import private_voice_directory
+        with private_voice_directory("synthesis-", redirect_library_temp=True) as directory:
             reference = Path(directory) / "reference.wav"
             reference.write_bytes(request.reference_audio)
             processed = str(reference)

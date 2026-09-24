@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.models.auth_challenge import AuthChallenge
+from app.models.user import User
 from app.services.security import normalize_email
 
 
@@ -25,6 +26,14 @@ def _aware(value: datetime) -> datetime:
 
 def create_challenge(db: Session, *, email: str, purpose: str, full_name: str | None = None) -> str:
     normalized = normalize_email(email)
+    if purpose == "password_reset":
+        # Serialize challenge admission with deletion; otherwise a pre-deletion
+        # forgot-password request could recreate an email artifact after erasure.
+        from fastapi import HTTPException
+        user = db.scalar(select(User).where(User.email == normalized)
+                         .execution_options(populate_existing=True).with_for_update())
+        if user is None or user.deletion_requested_at is not None:
+            raise HTTPException(400, detail="This reset request is no longer available.")
     existing = db.scalars(select(AuthChallenge).where(AuthChallenge.email == normalized, AuthChallenge.purpose == purpose, AuthChallenge.is_consumed.is_(False))).all()
     for challenge in existing:
         challenge.is_consumed = True

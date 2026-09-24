@@ -81,7 +81,7 @@ def test_voice_preference_defaults_persists_and_rejects_unknown_voice(test_conte
     assert client.put("/api/v1/voice/settings", json={"voice": "alloy"}, headers=headers(auth)).status_code == 422
 
 
-def test_speech_requires_owned_assistant_message_normalizes_rya_and_caches(test_context):
+def test_private_speech_requires_ownership_normalizes_rya_and_is_not_cached(test_context):
     client, _sessions, codes, provider = test_context
     auth = register_user(client, codes, email="voice-tts@example.com")
     conversation = client.post("/api/v1/conversations", json={"title": "Voice"}, headers=headers(auth)).json()
@@ -95,9 +95,9 @@ def test_speech_requires_owned_assistant_message_normalizes_rya_and_caches(test_
     second = client.post("/api/v1/voice/synthesize", json={"message_id": message_id, "voice": "marin"}, headers=headers(auth))
     cedar = client.post("/api/v1/voice/synthesize", json={"message_id": message_id, "voice": "cedar"}, headers=headers(auth))
     assert first.status_code == second.status_code == cedar.status_code == 200
-    assert first.headers["x-voice-cache"] == "miss"
-    assert second.headers["x-voice-cache"] == "hit"
-    assert len(provider.voice_provider.synthesis_calls) == 2
+    assert first.headers["x-voice-cache"] == second.headers["x-voice-cache"] == "disabled"
+    assert first.headers["cache-control"] == second.headers["cache-control"] == "no-store"
+    assert len(provider.voice_provider.synthesis_calls) == 3
     assert provider.voice_provider.synthesis_calls[0] == ("I am Riya. I can help you think this through.", "marin")
     other = register_user(client, codes, email="voice-other@example.com")
     assert client.post("/api/v1/voice/synthesize", json={"message_id": message_id}, headers=headers(other)).status_code == 404

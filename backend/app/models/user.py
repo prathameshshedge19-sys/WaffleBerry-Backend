@@ -8,7 +8,7 @@ from app.database import Base
 
 class User(Base):
     __tablename__ = "users"
-    __table_args__ = (CheckConstraint("voice_preference IN ('marin', 'cedar')", name="ck_users_voice_preference"),)
+    __table_args__ = (CheckConstraint("voice_preference IN ('marin', 'cedar')", name="ck_users_voice_preference"), {"sqlite_autoincrement": True})
 
     id: Mapped[int] = mapped_column(primary_key=True)
     full_name: Mapped[str] = mapped_column(String(255))
@@ -16,6 +16,7 @@ class User(Base):
     password_hash: Mapped[str] = mapped_column(String(255))
     is_verified: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     google_sub: Mapped[str | None] = mapped_column(String(255), unique=True, index=True)
+    deletion_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     active_legacy_id: Mapped[int | None] = mapped_column(ForeignKey("legacies.id", use_alter=True, name="fk_users_active_legacy_id"), index=True)
     voice_preference: Mapped[str] = mapped_column(String(16), nullable=False, default="marin", server_default="marin")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

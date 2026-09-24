@@ -44,7 +44,7 @@ def preview(db, owner_id, legacy_id):
             "status": "deleting" if legacy.deletion_requested_at else "available"}
 
 
-def request_deletion(db, user, legacy_id, confirmation, *, source_service=None):
+def request_deletion(db, user, legacy_id, confirmation, *, source_service=None, commit=True):
     # Source admission and canonical writers use the same Legacy fence.
     legacy = db.scalar(select(Legacy).where(Legacy.id == legacy_id)
                        .execution_options(populate_existing=True).with_for_update())
@@ -78,7 +78,10 @@ def request_deletion(db, user, legacy_id, confirmation, *, source_service=None):
     legacy.collaborator_code_enabled = legacy.viewer_code_enabled = False
     legacy.collaborator_code_digest = legacy.collaborator_code_ciphertext = legacy.collaborator_code_hint = None
     legacy.viewer_code_digest = legacy.viewer_code_ciphertext = legacy.viewer_code_hint = None
-    db.commit()
+    if commit:
+        db.commit()
+    else:
+        db.flush()
     return {"legacy_id": legacy_id, "status": "deleting"}
 
 
@@ -112,6 +115,7 @@ def _finalize_id(sessions, storage, legacy_id):
 Unconfirmed historical S3 uploads stay fail-closed with their cleanup metadata;
 absence alone cannot prove that a previously accepted remote PUT won't arrive.
 """
+    eraser = VisualStorage(storage, sessions=sessions)
     with sessions() as db:
         legacy = db.get(Legacy, legacy_id)
         if legacy is None or legacy.deletion_requested_at is None:
@@ -125,10 +129,10 @@ absence alone cannot prove that a previously accepted remote PUT won't arrive.
                     or artifact.encryption_key_id != storage.encryption_key_id
                     or not artifact.object_key.startswith(f"legarya/legacies/{legacy_id}/sources/{artifact.source_id}/")):
                 return "legacy_cleanup_pending"
-            if storage.backend_name == "s3" and not artifact.sha256:
+            if (storage.backend_name == "s3" and not artifact.sha256
+                    and not eraser.writes.known(artifact.object_key)):
                 return "legacy_cleanup_pending"
     try:
-        eraser = VisualStorage(storage)
         for _, key, _ in registry:
             eraser.erase(key)  # exact key and its versions only; errors retain registry
     except (StorageError, OSError):

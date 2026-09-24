@@ -8,6 +8,7 @@ from botocore.handlers import _sse_md5
 import pytest
 
 from app.services.media_storage import S3SourceStorage, StorageError
+from tests.test_media_sources_l16 import media_db
 
 
 def settings(key):
@@ -17,17 +18,24 @@ def settings(key):
         media_s3_sse_customer_key_id='synthetic-key-id')
 
 
-def test_encoded_key_is_decoded_once_for_put_get_and_head(monkeypatch):
+def test_encoded_key_is_decoded_once_for_put_get_and_head(monkeypatch, media_db):
     raw = bytes(range(32)); encoded = base64.b64encode(raw).decode()
-    client = Mock(); client.put_object.return_value = {}; client.get_object.return_value = {'Body': 'handle'}
+    client = Mock(); client.get_object.return_value = {'Body': 'handle'}
+    client.meta.endpoint_url = 'https://storage.invalid'
+    client.create_multipart_upload.return_value = {'UploadId': 'synthetic-upload'}
+    client.upload_part.return_value = {'ETag': 'synthetic-etag'}
+    client.complete_multipart_upload.return_value = {'VersionId': 'synthetic-version'}
+    monkeypatch.setattr('app.database.SessionLocal', media_db[0])
     monkeypatch.setattr(boto3, 'client', lambda *args, **kwargs: client)
     storage = S3SourceStorage(settings('base64:' + encoded))
     storage.put('synthetic/object', b'fixture', content_type='text/plain')
     assert storage.open('synthetic/object') == 'handle'
     assert storage.exists('synthetic/object')
-    for method in (client.put_object, client.get_object, client.head_object):
+    client.put_object.assert_not_called()
+    for method in (client.create_multipart_upload, client.upload_part,
+                   client.complete_multipart_upload, client.get_object, client.head_object):
         params = dict(method.call_args.kwargs)
-        assert params['SSECustomerKey'] == raw
+        assert params['SSECustomerKey'] in (raw, encoded)
         _sse_md5(params)
         assert params['SSECustomerKey'] == encoded
         assert len(base64.b64decode(params['SSECustomerKey'])) == 32

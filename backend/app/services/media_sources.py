@@ -152,7 +152,15 @@ def serialize_source(source: MediaSource, job: MediaProcessingJob | None = None)
 
 class MediaSourceService:
     def __init__(self, storage: SourceStorage | None = None, settings: Settings | None = None):
-        self.settings = settings or get_settings(); self.storage = storage or get_source_storage(self.settings)
+        self.settings = settings or get_settings(); self._storage = storage
+
+    @property
+    def storage(self):
+        # Deletion admission only changes durable state; it must not initialize
+        # storage clients or fail merely because storage is unavailable.
+        if self._storage is None:
+            self._storage = get_source_storage(self.settings)
+        return self._storage
 
     def create(self, db: Session, user: User, legacy_id: int, *, kind: str, filename: str, mime_type: str, size_bytes: int, upload_request_key: str, processing_purpose: str = "source_review") -> MediaSource:
         from app.services.plan_enforcement import admission, check_capacity
@@ -193,6 +201,10 @@ class MediaSourceService:
             safety_state=SourceSafetyState.PENDING.value, generation=1, metadata_json={}, upload_request_key=request_key,
             upload_request_digest=digest, upload_expires_at=now + timedelta(seconds=self.settings.media_upload_expire_seconds))
         object_key = f"legarya/legacies/{legacy.id}/sources/{source_id}/{artifact_id}"
+        if self.storage.backend_name == "s3":
+            from sqlalchemy.orm import sessionmaker
+            from app.services.visual_storage import VisualStorage
+            VisualStorage(self.storage, sessions=sessionmaker(bind=db.get_bind())).writes.reserve(db, object_key)
         db.add(source); db.add(MediaArtifact(id=artifact_id, legacy_id=legacy.id, source_id=source_id, generation=1,
             kind=ArtifactKind.ORIGINAL.value, logical_key="original", storage_backend=self.storage.backend_name,
             object_key=object_key, encryption_key_id=self.storage.encryption_key_id, state=ArtifactState.RESERVED.value, mime_type=mime_type))
@@ -223,8 +235,25 @@ class MediaSourceService:
         detected = validate_source_bytes(source.kind, source.declared_mime_type, data, self.settings)
         artifact = db.scalar(select(MediaArtifact).where(MediaArtifact.legacy_id == legacy_id, MediaArtifact.source_id == source.id, MediaArtifact.logical_key == "original", MediaArtifact.generation == source.generation))
         if artifact is None: raise HTTPException(500, detail="Source artifact unavailable.")
-        try: stored = self.storage.put(artifact.object_key, data, content_type=detected)
+        key, generation, artifact_id, actor_id = artifact.object_key, source.generation, artifact.id, user.id
+        if self.storage.backend_name == "s3":
+            from sqlalchemy.orm import sessionmaker
+            from app.services.visual_storage import VisualStorage
+            boundary = VisualStorage(self.storage, sessions=sessionmaker(bind=db.get_bind(), expire_on_commit=False))
+            db.commit()  # No source/User/Legacy lock spans remote storage I/O.
+        else:
+            boundary = None
+        try:
+            stored = (boundary._run("put", key, data, detected) if boundary else
+                      self.storage.put(key, data, content_type=detected))
         except StorageError as exc: raise HTTPException(503, detail={"code": exc.code, "message": "The source could not be stored. Try again."}) from None
+        if boundary is not None:
+            db.expire_all()
+            source = _load_source(db, source_id, legacy_id, lock=True)
+            _authorize(db, source, actor_id, uploader_only=True)
+            if source.state != SourceState.UPLOADING.value or source.generation != generation:
+                raise HTTPException(409, detail={"code": "source_not_uploading"})
+            artifact = db.get(MediaArtifact, artifact_id)
         now = utcnow(); source.detected_mime_type = detected; source.size_bytes = stored.byte_size; source.sha256 = hashlib.sha256(data).hexdigest()
         source.state = SourceState.QUEUED.value; source.safety_state = SourceSafetyState.CLEAN.value; source.uploaded_at = now; source.updated_at = now
         if source.processing_purpose == ProcessingPurpose.VISUAL_REFERENCE.value:
@@ -250,11 +279,29 @@ class MediaSourceService:
         source = _load_source(db, source_id, legacy_id); _authorize(db, source, user.id); return source
 
     def delete(self, db: Session, user: User, legacy_id: int, source_id: str, *, commit: bool = True) -> MediaSource:
-        from app.models.media_intelligence import CandidateReviewState, MemorySourceLink, SourceEvidence, SourceMemoryCandidate, SupportState
         db.scalar(select(Legacy).where(Legacy.id == legacy_id).with_for_update())
         source = _load_source(db, source_id, legacy_id, lock=True); _authorize(db, source, user.id, owner_only=True)
+        return self._stage_delete(db, source, user.id, commit=commit)
+
+    def request_account_purge(self, db: Session, user_id: int, source: MediaSource) -> MediaSource:
+        """Internal parent only; cannot delete another contributor's upload."""
+        if source.uploader_user_id != user_id:
+            raise ValueError("account_source_scope")
+        source = self._stage_delete(db, source, user_id, commit=False)
+        # An expired upload can already be marked deleting without a purge job.
+        if source.state == SourceState.DELETING.value and db.scalar(select(MediaProcessingJob.id).where(
+                MediaProcessingJob.source_id == source.id, MediaProcessingJob.generation == source.generation,
+                MediaProcessingJob.kind == "purge", MediaProcessingJob.state.in_(("queued", "running", "retry_wait")))) is None:
+            db.add(MediaProcessingJob(id=str(uuid4()), legacy_id=source.legacy_id, source_id=source.id,
+                generation=source.generation, kind="purge", pipeline_version=PIPELINE_VERSION,
+                state="queued", stage="awaiting_purge", checkpoint_json={}))
+            db.flush()
+        return source
+
+    def _stage_delete(self, db, source, actor_id, *, commit):
+        from app.models.media_intelligence import CandidateReviewState, MemorySourceLink, SourceEvidence, SourceMemoryCandidate, SupportState
         if source.state in {SourceState.DELETING.value, SourceState.DELETED.value}: return source
-        now = utcnow(); source.generation += 1; source.state = SourceState.DELETING.value; source.deleted_at = now; source.deleted_by_user_id = user.id
+        now = utcnow(); source.generation += 1; source.state = SourceState.DELETING.value; source.deleted_at = now; source.deleted_by_user_id = actor_id
         db.execute(update(MediaProcessingJob).where(MediaProcessingJob.source_id == source.id, MediaProcessingJob.state.in_(("queued", "running", "retry_wait"))).values(state="cancelled", lease_token=None, lease_expires_at=None, finished_at=now, last_error_code="source_deleted"))
         db.execute(update(SourceMemoryCandidate).where(SourceMemoryCandidate.legacy_id == source.legacy_id, SourceMemoryCandidate.source_id == source.id, SourceMemoryCandidate.review_state == CandidateReviewState.PENDING.value).values(review_state=CandidateReviewState.CANCELLED.value, removed_at=now, proposal_json={}, review_draft_json=None))
         # Preserve terminal receipts, but erase private proposal/draft content
@@ -265,7 +312,7 @@ class MediaSourceService:
         if source.processing_purpose == ProcessingPurpose.SOURCE_REVIEW.value:
             from app.services.personality_invalidation import invalidate_in_transaction
             invalidate_in_transaction(db.connection(), [source.legacy_id])
-        db.add(MediaProcessingJob(id=str(uuid4()), legacy_id=legacy_id, source_id=source.id, generation=source.generation, kind=ProcessingJobKind.PURGE.value, pipeline_version=PIPELINE_VERSION, state=ProcessingJobState.QUEUED.value, stage="awaiting_purge", checkpoint_json={}))
+        db.add(MediaProcessingJob(id=str(uuid4()), legacy_id=source.legacy_id, source_id=source.id, generation=source.generation, kind=ProcessingJobKind.PURGE.value, pipeline_version=PIPELINE_VERSION, state=ProcessingJobState.QUEUED.value, stage="awaiting_purge", checkpoint_json={}))
         from app.services.visual_companions import source_deleted_in_transaction
         source_deleted_in_transaction(db, source)
         if commit:

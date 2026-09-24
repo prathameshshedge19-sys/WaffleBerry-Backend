@@ -1,0 +1,16 @@
+[Unit]
+Description=Explicit operator-requested privacy alert delivery test (not a deletion)
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+EnvironmentFile=/home/waffleberry/WaffleBerry-Backend/backend/.env
+EnvironmentFile=/etc/legarya-privacy-monitor.env
+ExecStart=/usr/bin/python3 -B /opt/legarya-privacy/deletion_alerts.py test
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+TimeoutStartSec=75

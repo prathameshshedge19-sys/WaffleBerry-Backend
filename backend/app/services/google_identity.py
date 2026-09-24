@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import time
 
 from google.auth.exceptions import GoogleAuthError
 from google.auth.transport.requests import Request
@@ -23,12 +24,16 @@ class GoogleIdentity:
     name: str
 
 
-def verify_google_credential(credential: str) -> GoogleIdentity:
+def verify_google_credential(credential: str, *, fresh_seconds: int | None = None) -> GoogleIdentity:
     client_id = (get_settings().google_web_client_id or "").strip()
     if not client_id:
         raise GoogleIdentityConfigurationError
     try:
         claims = id_token.verify_oauth2_token(credential, Request(), client_id)
+        if fresh_seconds is not None:
+            issued = int(claims["iat"])
+            if not 0 <= time.time() - issued <= fresh_seconds:
+                raise ValueError
         if claims.get("iss") not in {"accounts.google.com", "https://accounts.google.com"} or claims.get("email_verified") is not True:
             raise ValueError
         sub = str(claims["sub"]).strip()

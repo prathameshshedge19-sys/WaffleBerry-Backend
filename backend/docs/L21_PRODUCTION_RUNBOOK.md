@@ -121,17 +121,24 @@ WantedBy=multi-user.target
 Do not enable PrivateDevices for a CUDA worker. Confirm required NVIDIA device
 permissions and driver compatibility in staging. Add host memory/PID/tmp-volume
 quotas from host capacity validation; GPU throughput qualification is L22.
-Run enrollment and purge with distinct runtime directories/accounts. Enrollment
-VOICE_TEMP_PATH belongs to its own private runtime directory. A purge service
-must not sweep another live process's preparation directory.
+For account-deletion-capable releases, the earlier per-service scratch topology
+is superseded: reference, synthesis and purge must share one dedicated persistent
+`VOICE_TEMP_PATH=/var/lib/legarya-voice-scratch`, outside these RuntimeDirectory
+and PrivateTmp namespaces. Pin the same `VOICE_RUNTIME_HOST_ID`,
+`VOICE_RUNTIME_ROOT_ID` (device:inode) and restricted
+service UID for all three; add that exact root to their ReadWritePaths. Separate
+model environments/caches remain appropriate. Cross-service locks, not private
+namespace invisibility, protect live scratch. See
+[the deployment audit and enforced contract](PLAY_DELETION_STORAGE_HARDENING.md).
 
 READY=1 is emitted only after verified artifacts, successful CUDA acoustic/Vocos
 load and validated warm output. WATCHDOG=1 is refreshed during the service loop
 and active synthesis checks; SIGTERM/SIGINT stop admission and request cooperative
 join. A native CUDA hang cannot be forcibly interrupted in Python: stop/watchdog
 timeouts kill the entire cgroup; leases and registered assets recover on restart.
-RuntimeDirectory cleanup removes crash remnants, including pinned preprocessing
-tempfiles that could survive an exception before returning their filename.
+RuntimeDirectory cleanup covers non-content process runtime. Private preparation
+and pinned preprocessing tempfiles are scoped under the shared persistent voice
+root and cleaned through the process-crash-safe preparation/synthesis locks.
 Normal returned preprocessing files are removed in finally. Keep runtime storage
 private/quota-bounded; alert on unexpected file accumulation and restart safely.
 

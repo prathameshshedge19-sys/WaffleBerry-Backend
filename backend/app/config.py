@@ -79,6 +79,13 @@ class Settings(BaseSettings):
     voice_ffmpeg_path: str = "ffmpeg"
     voice_ffprobe_path: str = "ffprobe"
     voice_temp_path: str = "./voice-worker-tmp"
+    # Account deletion requires a single explicitly pinned host + shared root.
+    # Multi-host voice workers are refused until a per-host erasure protocol exists.
+    voice_runtime_host_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{32}$")
+    voice_runtime_root_id: str | None = Field(default=None, pattern=r"^\d+:\d+$")
+    deletion_journal_path: str | None = None
+    deletion_lineage: str | None = None
+    deletion_journal_volume_uuid: str | None = None
     voice_worker_lease_seconds: int = Field(default=300, ge=30, le=600)
     voice_whisper_model_repo: Literal["openai/whisper-large-v3-turbo"] = "openai/whisper-large-v3-turbo"
     voice_whisper_model_revision: Literal["41f01f3fe87f28c78e2fbf8b568835947dd65ed9"] = "41f01f3fe87f28c78e2fbf8b568835947dd65ed9"

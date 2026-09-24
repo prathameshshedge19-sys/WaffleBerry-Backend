@@ -10,7 +10,9 @@ arrive later. The caller owns leases, writer admission and durable cleanup.
 Real S3 operations use a fresh client in a terminable spawned process: 3s connect,
 5s socket read, one SDK attempt, 30s whole-operation deadline (including reads and
 pagination), plus at most 2s process shutdown. No abandoned writer threads.
-Already accepted remote PUTs still require post-window reconciliation. These are
+Real production writes now use a durable multipart cancellation journal instead
+of single PUT. Historical accepted remote PUTs still require positive terminal
+reconciliation. These are
 client execution bounds, not a promise about a remote server's commit latency.
 
 Local storage and injected in-memory SourceStorage/S3 fakes run synchronously;
@@ -22,12 +24,14 @@ discovery, bucket changes or L16 client mutation happens here.
 from __future__ import annotations
 
 import hashlib
+import base64
 import hmac
 import multiprocessing
 import re
 import stat
 import time
 from pathlib import PurePosixPath, PureWindowsPath
+from urllib.parse import urlparse
 
 from app.services.media_storage import LocalSourceStorage, SourceStorage, StorageError, StoredObject
 
@@ -120,6 +124,19 @@ class _S3Operations:
     def __init__(self, client, bucket: str, sse: dict, deadline: float):
         self.client, self.bucket, self.sse, self.deadline = client, bucket, sse, deadline
 
+    def _multipart_sse(self):
+        # Not every SDK operation installs the automatic SSE-C encoder (notably
+        # ListParts). Supply all three headers explicitly; MD5 presence prevents
+        # SDK double-encoding on operations that do install the handler.
+        raw = self.sse["SSECustomerKey"]
+        if isinstance(raw, str):
+            raw = raw.encode("utf-8")
+        if not isinstance(raw, bytes) or len(raw) != 32:
+            raise StorageError("storage_encryption_configuration")
+        return {"SSECustomerAlgorithm": "AES256",
+                "SSECustomerKey": base64.b64encode(raw).decode("ascii"),
+                "SSECustomerKeyMD5": base64.b64encode(hashlib.md5(raw, usedforsecurity=False).digest()).decode("ascii")}
+
     def call(self, method: str, **kwargs):
         _check_deadline(self.deadline)
         result = getattr(self.client, method)(Bucket=self.bucket, **kwargs)
@@ -135,6 +152,87 @@ class _S3Operations:
         result = self.call("put_object", Key=key, Body=data, ContentType=mime,
                            IfNoneMatch="*", **self.sse)
         return StoredObject(len(data), result.get("ETag"), result.get("VersionId"))
+
+    def multipart_begin(self, key, mime):
+        result = self.call("create_multipart_upload", Key=key, ContentType=mime, **self._multipart_sse())
+        upload_id = result.get("UploadId")
+        if not isinstance(upload_id, str) or not 0 < len(upload_id) <= 2048:
+            raise StorageError("storage_upload_handle_invalid")
+        return upload_id
+
+    def multipart_part(self, key, data, upload_id, number):
+        result = self.call("upload_part", Key=key, Body=data, UploadId=upload_id,
+                           PartNumber=number, **self._multipart_sse())
+        etag = result.get("ETag")
+        if not isinstance(etag, str) or not 0 < len(etag) <= 512:
+            raise StorageError("storage_part_unconfirmed")
+        return etag
+
+    def multipart_complete(self, key, upload_id, parts):
+        return self.call("complete_multipart_upload", Key=key, UploadId=upload_id,
+                         MultipartUpload={"Parts": parts}, **self._multipart_sse())
+
+    def _upload_missing(self, exc):
+        response = getattr(exc, "response", {})
+        if response.get("ResponseMetadata", {}).get("HTTPStatusCode") != 404:
+            return False
+        code = response.get("Error", {}).get("Code")
+        endpoint = getattr(getattr(self.client, "meta", None), "endpoint_url", "")
+        host = urlparse(endpoint).hostname if isinstance(endpoint, str) else None
+        # Verified Hetzner RGW reports NoSuchKey for a cancelled multipart ID.
+        # Do not generalize this provider exception to generic HTTP/key 404s.
+        return code == "NoSuchUpload" or (code == "NoSuchKey" and host is not None
+            and host.endswith(".your-objectstorage.com"))
+
+    def _abort(self, key, upload_id):
+        try:
+            self.call("abort_multipart_upload", Key=key, UploadId=upload_id)
+        except Exception as exc:
+            if not self._upload_missing(exc):
+                raise
+        # An abort acknowledgement alone is not proof: in-flight parts require
+        # repeated cancellation. Only typed NoSuchUpload terminates the handle.
+        try:
+            self.call("list_parts", Key=key, UploadId=upload_id, MaxParts=1, **self._multipart_sse())
+        except Exception as exc:
+            if self._upload_missing(exc):
+                if upload_id in self._uploads(key):
+                    raise StorageError("storage_multipart_cancel_pending") from None
+                return
+            raise
+        raise StorageError("storage_multipart_cancel_pending")
+
+    def _uploads(self, key):
+        markers, seen, result = {}, set(), []
+        for _ in range(MAX_VERSION_PAGES):
+            page = self.call("list_multipart_uploads", Prefix=key,
+                             MaxUploads=VERSION_PAGE_SIZE, **markers)
+            entries = page.get("Uploads", [])
+            if type(page.get("IsTruncated")) is not bool or not isinstance(entries, list) or len(entries) > VERSION_PAGE_SIZE:
+                raise StorageError("storage_upload_listing_invalid")
+            for item in entries:
+                if not isinstance(item, dict) or not isinstance(item.get("Key"), str):
+                    raise StorageError("storage_upload_listing_invalid")
+                if item["Key"] == key:
+                    if not isinstance(item.get("UploadId"), str) or not item["UploadId"]:
+                        raise StorageError("storage_upload_listing_invalid")
+                    result.append(item["UploadId"])
+            if not page["IsTruncated"]:
+                return result
+            cursor = (page.get("NextKeyMarker"), page.get("NextUploadIdMarker"))
+            if any(not isinstance(v, str) or not v for v in cursor) or cursor in seen:
+                raise StorageError("storage_upload_listing_invalid")
+            seen.add(cursor)
+            markers = {"KeyMarker": cursor[0], "UploadIdMarker": cursor[1]}
+        raise StorageError("storage_upload_listing_limit")
+
+    def multipart_cancel(self, key, upload_id):
+        if upload_id is not None:
+            self._abort(key, upload_id)
+        for other_id in self._uploads(key):
+            self._abort(key, other_id)
+        if self._uploads(key):
+            raise StorageError("storage_multipart_cancel_pending")
 
     def read(self, key: str, version: str | None) -> bytes:
         return self._read(key, version, MAX_ASSET_BYTES)
@@ -276,6 +374,9 @@ def _s3_child(connection, output, client_args: dict, bucket: str, sse: dict,
         if operation == "put":
             key, size, mime = args
             args = (key, bytes(output[:size]), mime)
+        elif operation == "multipart_part":
+            key, size, upload_id, number = args
+            args = (key, bytes(output[:size]), upload_id, number)
         result = getattr(_S3Operations(client, bucket, sse, deadline), operation)(*args)
         if isinstance(result, bytes):
             output[:len(result)] = result
@@ -305,13 +406,30 @@ class VisualStorage:
     max_operation_seconds = MAX_OPERATION_SECONDS
     max_asset_bytes = MAX_ASSET_BYTES
 
-    def __init__(self, storage: SourceStorage):
+    def __init__(self, storage: SourceStorage, sessions=None):
         self.storage = storage
         self.backend_name = storage.backend_name
         self.encryption_key_id = storage.encryption_key_id
         self.bucket_name = getattr(storage, 'bucket', None)
+        self.writes = None
+        if self.backend_name == "s3":
+            from app.services.media_storage import S3SourceStorage
+            if sessions is None and isinstance(storage, S3SourceStorage):
+                from app.database import SessionLocal
+                sessions = SessionLocal
+            if sessions is not None:
+                from app.services.storage_writes import DurableWrites
+                self.writes = DurableWrites(self, sessions)
 
     def _run(self, operation: str, *args):
+        if self.writes is not None:
+            if operation == "put":
+                return self.writes.put(*args)
+            if operation == "erase":
+                return self.writes.erase(*args)
+        return self._raw_run(operation, *args)
+
+    def _raw_run(self, operation: str, *args):
         deadline = time.monotonic() + OPERATION_TIMEOUT_SECONDS
         try:
             if isinstance(self.storage, LocalSourceStorage):
@@ -385,13 +503,17 @@ class VisualStorage:
         # Transfer large inputs/results in shared memory, keeping spawn's input
         # pipe and recv() control messages small even for a 2 MiB object.
         capacity = (MAX_ORIGINAL_BYTES if operation == "read_original"
-            else max(MAX_ASSET_BYTES, len(args[1])) if operation == "put"
+            else max(MAX_ASSET_BYTES, len(args[1])) if operation in ("put", "multipart_part")
             else MAX_ASSET_BYTES if operation == "read" else 0)
         output = context.RawArray("B", capacity)
         if operation == "put":
             key, data, mime = args
             output[:len(data)] = data
             args = (key, len(data), mime)
+        elif operation == "multipart_part":
+            key, data, upload_id, number = args
+            output[:len(data)] = data
+            args = (key, len(data), upload_id, number)
         process = context.Process(target=_s3_child, args=(
             sender, output, client_args, self.storage.bucket, dict(self.storage._sse),
             operation, args, deadline), daemon=True)

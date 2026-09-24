@@ -1,0 +1,20 @@
+[Unit]
+Description=LegaRya restricted backup expiry (maximum 30 days)
+OnFailure=legarya-deletion-alert.service
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+UMask=0077
+WorkingDirectory=/opt/legarya-privacy
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/bin/python3 /opt/legarya-privacy/backup_retention.py --root /var/backups/legarya --state /var/lib/legarya-backup-policy --apply --confirm-root /var/backups/legarya
+StateDirectory=legarya-backup-policy
+StateDirectoryMode=0700
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/backups/legarya /var/lib/legarya-backup-policy
+PrivateTmp=yes
+NoNewPrivileges=yes
+TimeoutStartSec=30min

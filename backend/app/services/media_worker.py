@@ -18,10 +18,11 @@ from app.services.media_storage import SourceStorage, StorageError, get_source_s
 
 
 class MediaWorker:
-    def __init__(self, sessions=SessionLocal, storage: SourceStorage | None = None, *, lease_seconds: int = 120):
+    def __init__(self, sessions=SessionLocal, storage: SourceStorage | None = None, *, lease_seconds: int = 120, purge_only=False):
         self.sessions = sessions
         self.storage = storage or get_source_storage()
         self.lease_seconds = lease_seconds
+        self.purge_only = purge_only
 
     def claim(self):
         now = utcnow()
@@ -33,6 +34,7 @@ class MediaWorker:
                 MediaSource.state != SourceState.DELETED.value,
                 exists(select(MediaProcessingJob.id).where(
                     MediaProcessingJob.source_id == MediaSource.id,
+                    or_(not self.purge_only, MediaProcessingJob.kind == "purge"),
                     MediaProcessingJob.legacy_id == MediaSource.legacy_id,
                     MediaProcessingJob.state.in_(("queued", "retry_wait", "running")),
                     or_(MediaProcessingJob.next_attempt_at.is_(None), MediaProcessingJob.next_attempt_at <= now),
@@ -43,6 +45,7 @@ class MediaWorker:
                 return None
             job = db.scalar(select(MediaProcessingJob).where(
                 MediaProcessingJob.source_id == source.id,
+                or_(not self.purge_only, MediaProcessingJob.kind == "purge"),
                 MediaProcessingJob.legacy_id == source.legacy_id,
                 MediaProcessingJob.state.in_(("queued", "retry_wait", "running")),
                 or_(MediaProcessingJob.next_attempt_at.is_(None), MediaProcessingJob.next_attempt_at <= now),
@@ -166,8 +169,16 @@ class MediaWorker:
                 return "stale"
             artifacts = list(db.scalars(select(MediaArtifact).where(MediaArtifact.source_id == job.source_id, MediaArtifact.legacy_id == job.legacy_id, MediaArtifact.state != ArtifactState.PURGED.value)).all())
         try:
+            from app.services.visual_storage import VisualStorage
+            eraser = VisualStorage(self.storage, sessions=self.sessions)
             for artifact in artifacts:
-                self.storage.delete(artifact.object_key, version=artifact.object_version)
+                if (artifact.storage_backend != self.storage.backend_name
+                        or artifact.encryption_key_id != self.storage.encryption_key_id
+                        or not artifact.object_key.startswith(f"legarya/legacies/{artifact.legacy_id}/sources/{artifact.source_id}/")
+                        or (self.storage.backend_name == "s3" and not artifact.sha256
+                            and not eraser.writes.known(artifact.object_key))):
+                    raise StorageError("storage_registration_unconfirmed")
+                eraser.erase(artifact.object_key)
         except StorageError:
             with self.sessions.begin() as db:
                 db.execute(update(MediaProcessingJob).where(MediaProcessingJob.id == job_id, MediaProcessingJob.lease_token == token).values(state=ProcessingJobState.RETRY_WAIT.value, next_attempt_at=utcnow() + timedelta(seconds=30), lease_token=None, lease_expires_at=None, last_error_code="storage_delete_failed"))
@@ -178,7 +189,12 @@ class MediaWorker:
             source = db.scalar(select(MediaSource).where(MediaSource.id == job.source_id, MediaSource.legacy_id == job.legacy_id)) if job else None
             if job is None or job.lease_token != token or source is None or source.state != SourceState.DELETING.value or source.generation != job.generation:
                 return "stale"
-            db.execute(update(MediaArtifact).where(MediaArtifact.source_id == source.id, MediaArtifact.legacy_id == source.legacy_id).values(state=ArtifactState.PURGED.value, purged_at=now))
+            # A new/changed registration must be erased in another cycle.
+            current = list(db.scalars(select(MediaArtifact).where(MediaArtifact.source_id == source.id,
+                MediaArtifact.state != ArtifactState.PURGED.value)))
+            if {(a.id, a.object_key, a.object_version) for a in current} != {(a.id, a.object_key, a.object_version) for a in artifacts}:
+                return "stale"
+            db.execute(update(MediaArtifact).where(MediaArtifact.id.in_([a.id for a in artifacts])).values(state=ArtifactState.PURGED.value, purged_at=now))
             job.state = ProcessingJobState.SUCCEEDED.value; job.stage = "purged"; job.finished_at = now; job.lease_token = job.lease_expires_at = None
             source.state = SourceState.DELETED.value; source.purged_at = now; source.processing_finished_at = source.processing_finished_at or now
             return "purged"

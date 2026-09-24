@@ -187,6 +187,8 @@ def apply_setup_message(legacy: Legacy, content: str, default_self_name: str | N
 
 
 def create_collecting_legacy(db: Session, user: User) -> Legacy:
+    from app.services.account_fence import require_active
+    require_active(db, user.id, lock=True)
     from app.services.plan_enforcement import admission, check_capacity, enabled
     if enabled():
         # Match bootstrap's existing user-first lock order before changing selection.
@@ -202,6 +204,8 @@ def create_collecting_legacy(db: Session, user: User) -> Legacy:
 
 
 def pending_or_new_legacy(db: Session, user: User) -> Legacy:
+    from app.services.account_fence import require_active
+    require_active(db, user.id, lock=True)
     active = owned_legacy(db, user.id, user.active_legacy_id) if user.active_legacy_id else None
     if active is not None and active.setup_status == LegacySetupStatus.COLLECTING_IDENTITY.value:
         return active

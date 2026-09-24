@@ -27,7 +27,7 @@ def test_fresh_and_0014_preserve_all_existing_rows(tmp_path, existing):
     if existing:
         alembic(path, "upgrade", "0014_legacy_personality")
         with sessionmaker(bind=engine).begin() as db:
-            db.add(User(id=1, full_name="Historical owner", email="old@example.com", password_hash="test"))
+            db.execute(sa.text("INSERT INTO users (id, full_name, email, password_hash) VALUES (1, 'Historical owner', 'old@example.com', 'test')"))
             db.flush()
             # Seed the historical schema without newer model columns.
             db.execute(sa.text("INSERT INTO legacies (id, owner_user_id, subject_name, setup_status) VALUES (1, 1, 'Historical subject', 'active')"))

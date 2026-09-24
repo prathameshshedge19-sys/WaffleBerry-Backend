@@ -61,7 +61,7 @@ def _get(db, session_id):
 def resolve_scope(db, actor_id, *, conversation_id=None, legacy_id=None, mode=None):
     db.expire_all()  # Includes membership rows retained by an earlier caller.
     user = db.get(User, actor_id, populate_existing=True)
-    if not user or not user.is_verified:
+    if not user or not user.is_verified or user.deletion_requested_at is not None:
         raise RealtimeError("realtime_not_authorized")
     if conversation_id is not None:
         conversation = db.get(Conversation, conversation_id, populate_existing=True)

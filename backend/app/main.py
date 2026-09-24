@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routes.auth import router as auth_router
+from app.api.routes.account import router as account_router
 from app.api.routes.access_management import router as access_management_router
 from app.api.routes.collaborations import router as collaboration_router
 from app.api.routes.conversations import router as conversation_router
@@ -41,6 +42,7 @@ app.add_middleware(
 )
 app.add_middleware(AuxiliaryUsageMiddleware)
 app.include_router(auth_router, prefix="/api/v1")
+app.include_router(account_router, prefix="/api/v1")
 app.include_router(access_management_router, prefix="/api/v1")
 app.include_router(conversation_router, prefix="/api/v1")
 app.include_router(legacy_router, prefix="/api/v1")

@@ -9,10 +9,12 @@ def test_additive_shadow_migration_preserves_existing_rows(tmp_path):
     engine = sa.create_engine("sqlite:///" + path.as_posix())
     with engine.begin() as db:
         db.exec_driver_sql("INSERT INTO users(id,full_name,email,password_hash) VALUES(1,'Synthetic','synthetic@example.com','test')")
+        columns = ','.join('"' + column['name'] + '"' for column in sa.inspect(db).get_columns('users'))
         before = db.exec_driver_sql("SELECT * FROM users").fetchall()
     alembic(path, "upgrade", "head")
     with engine.connect() as db:
-        assert db.exec_driver_sql("SELECT * FROM users").fetchall() == before
+        assert db.exec_driver_sql("SELECT " + columns + " FROM users").fetchall() == before
+        assert db.exec_driver_sql("SELECT deletion_requested_at FROM users").scalar() is None
         assert db.exec_driver_sql("SELECT count(*) FROM plan_usage").scalar() == 0
         assert db.exec_driver_sql("SELECT count(*) FROM plan_entitlements").scalar() == 0
         assert db.exec_driver_sql("SELECT count(*) FROM plan_tracking_state").scalar() == 1

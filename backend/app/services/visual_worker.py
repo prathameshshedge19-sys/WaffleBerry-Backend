@@ -8,12 +8,9 @@ Providers may be explicitly injected for tests. The CLI has no fake-provider
 fallback: real preparation remains disabled until the licensed, isolated local
 adapter is available. Purge is usable with both visual feature flags disabled.
 
-RELEASE BLOCKERS: S3 client exit is not a bound on remote PUT commit latency.
-S3 sweeps therefore retain purge_pending registrations and retry indefinitely;
-they never report final erasure. A storage-level commit bound or a reviewed
-durable post-purge audit is required before remote-erasure release acceptance.
-Original S3 reads also remain disabled here until the source adapter provides
-a process-bounded 20 MiB read. A byte-count limit alone is not a time limit.
+New production writes use the durable multipart cancellation journal. Historical
+untracked PUTs still require positive completion or provider terminal evidence;
+elapsed time and empty listings do not invent proof for those old operations.
 """
 
 from __future__ import annotations
@@ -358,6 +355,8 @@ class VisualWorker:
                         raise StorageError('visual_storage_scope_mismatch')
                     if asset.write_state != 'reserved' or (aware(asset.writer_deadline)-now).total_seconds() <= 32:
                         raise StaleClaim()
+                    if getattr(self.storage, "writes", None) is not None:
+                        self.storage.writes.reserve(db, asset.object_key)
                     asset.write_state = 'dispatching'
                     return
             raise StaleClaim()
@@ -586,7 +585,7 @@ class VisualWorker:
             return "purged"
 
     def _remote_erasure(self, job_id, token, keys):
-        """Positive completion proof, then two absent sweeps >=60s apart.
+        """Terminal write/cancellation proof, then two absent sweeps >=60s apart.
 
         Reserved means never dispatched; confirmed means the sole PUT returned
         or exact expected bytes were observed. Dispatching+absent is ambiguous
@@ -607,15 +606,20 @@ class VisualWorker:
                 uncertain = asset.write_state == 'dispatching'
                 checksum, size = asset.sha256, asset.byte_size
             if uncertain:
-                if self.storage.reconcile_write(key, checksum, size) is not True:
+                journal = getattr(self.storage, "writes", None)
+                cancelled = journal is not None and journal.known(key)
+                if cancelled:
+                    journal.erase(key)
+                elif self.storage.reconcile_write(key, checksum, size) is not True:
                     complete = False
                     continue
                 # Record proof BEFORE deletion. Crash cannot forget a known
                 # committed object and mistakenly turn it into unknown absence.
-                with self.sessions.begin() as db:
-                    scope = self._scope(db, job_id)
-                    asset = next(a for a in self._assets(db, scope[2]) if a.id == asset_id)
-                    asset.write_state, asset.write_confirmed_at = 'confirmed', self._now()
+                if not cancelled:
+                    with self.sessions.begin() as db:
+                        scope = self._scope(db, job_id)
+                        asset = next(a for a in self._assets(db, scope[2]) if a.id == asset_id)
+                        asset.write_state, asset.write_confirmed_at = 'confirmed', self._now()
             self.storage.erase(key)
             with self.sessions.begin() as db:
                 scope = self._scope(db, job_id)

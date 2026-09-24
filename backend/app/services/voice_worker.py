@@ -44,7 +44,14 @@ class VoiceWorker:
             return (job.id, job.lease_token) if job else None
 
     async def _prepare_with_heartbeat(self, job_id, token, **arguments):
-        task = asyncio.create_task(self.provider.prepare(**arguments))
+        from app.services.voice_runtime_cleanup import runtime_admission
+        def current():
+            with self.sessions() as db:
+                job = db.get(VoiceJob, job_id)
+                if job is None or job.state != "running" or job.lease_token != token:
+                    raise StaleVoiceClaim()
+        with runtime_admission(current):
+            task = asyncio.create_task(self.provider.prepare(**arguments))
         interval = max(5, self.settings.voice_worker_lease_seconds // 3)
         try:
             while True:
@@ -106,7 +113,7 @@ class VoiceWorker:
             return "ready"
         except (VoicePreparationError, VoiceProviderFailure) as exc:
             retryable = exc.code in {"voice_media_timeout", "voice_asr_failed",
-                "voice_media_tool_unavailable", "voice_asr_model_unavailable"}
+                "voice_media_tool_unavailable", "voice_asr_model_unavailable", "voice_worker_busy"}
             try:
                 with self.sessions.begin() as db:
                     self.jobs.fail(db, job_id, token, exc.code,

@@ -88,7 +88,9 @@ class VoiceSynthesisWorker:
         self.lifecycle = WorkerLifecycle()
 
     async def _synthesize_with_heartbeat(self, job_id, token, request):
-        task = asyncio.create_task(self.provider.synthesize(request))
+        from app.services.voice_runtime_cleanup import runtime_admission
+        with runtime_admission(lambda: self._input(job_id, token, reference_required=False)):
+            task = asyncio.create_task(self.provider.synthesize(request))
         interval = max(5, self.settings.voice_worker_lease_seconds // 3)
         renewed = time.monotonic()
         deadline = renewed + self.settings.voice_synthesis_job_timeout_seconds
@@ -172,6 +174,7 @@ class VoiceSynthesisWorker:
                     or reference.version_id != version.id
                     or reference.state != "available" or not job.authoritative_text
                     or legacy is None or legacy.deletion_requested_at is not None or actor is None
+                    or actor.deletion_requested_at is not None
                     or consent is None or consent.revoked_at is not None
                     or job.model_manifest_digest != self.manifest.digest
                     or job.inference_config_digest != inference_config_digest()):

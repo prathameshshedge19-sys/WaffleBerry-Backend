@@ -18,6 +18,7 @@ from app.schemas.auth import (
     UserResponse,
 )
 from app.services.challenges import consume_authorization, create_challenge, verify_challenge
+from app.services.account_fence import new_account_id
 from app.services.email import EmailDeliveryError, email_sender
 from app.services.google_identity import (
     GoogleIdentityConfigurationError, GoogleIdentityError, verify_google_credential,
@@ -37,6 +38,8 @@ def _refresh_cookie_samesite() -> str:
 
 
 def _set_session(response: Response, user: User, *, remember_me: bool = False) -> LoginResponse:
+    if user.deletion_requested_at is not None:
+        raise HTTPException(401, detail="This account is no longer available.")
     settings = get_settings()
     max_age = settings.remembered_refresh_token_expire_days * 86400 if remember_me else None
     expires = datetime.now(timezone.utc) + timedelta(seconds=max_age) if max_age else None
@@ -88,7 +91,7 @@ def complete_registration(payload: CompleteRegistration, response: Response, db:
     if not challenge or not challenge.full_name:
         db.rollback()
         raise HTTPException(status_code=400, detail="Invalid or expired verification authorization.")
-    user = User(full_name=challenge.full_name, email=challenge.email, password_hash=hash_password(payload.password), is_verified=True)
+    user = User(id=new_account_id(db), full_name=challenge.full_name, email=challenge.email, password_hash=hash_password(payload.password), is_verified=True)
     db.add(user)
     try:
         db.commit()
@@ -102,7 +105,7 @@ def complete_registration(payload: CompleteRegistration, response: Response, db:
 @router.post("/login", response_model=LoginResponse)
 def login(payload: LoginRequest, response: Response, db: Session = Depends(get_db)):
     user = db.scalar(select(User).where(User.email == normalize_email(str(payload.email))))
-    if not user or not verify_password(payload.password, user.password_hash):
+    if not user or user.deletion_requested_at is not None or not verify_password(payload.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Invalid email or password.")
     if not user.is_verified:
         raise HTTPException(status_code=403, detail="Email address is not verified.")
@@ -117,7 +120,7 @@ def refresh(request: Request, response: Response, db: Session = Depends(get_db))
     except TokenValidationError:
         raise HTTPException(status_code=401, detail="Invalid or expired session.") from None
     user = db.get(User, payload["user_id"])
-    if not user or not refresh_token_matches(user.id, user.password_hash, payload.get("fingerprint", "")):
+    if not user or user.deletion_requested_at is not None or not refresh_token_matches(user.id, user.password_hash, payload.get("fingerprint", "")):
         raise HTTPException(status_code=401, detail="Invalid or expired session.")
     return _set_session(response, user, remember_me=payload.get("remember_me") is True)
 
@@ -163,7 +166,7 @@ def me(user: User = Depends(get_current_user)):
 def forgot_password(payload: ForgotPasswordRequest, db: Session = Depends(get_db)):
     email = normalize_email(str(payload.email))
     user = db.scalar(select(User).where(User.email == email))
-    if user:
+    if user and user.deletion_requested_at is None:
         code = create_challenge(db, email=email, purpose="password_reset")
         try:
             email_sender.send_code(recipient=email, code=code, purpose="password_reset")
@@ -192,8 +195,8 @@ def reset_password(payload: ResetPasswordRequest, db: Session = Depends(get_db))
     if not challenge:
         db.rollback()
         raise HTTPException(status_code=400, detail="Invalid or expired reset authorization.")
-    user = db.scalar(select(User).where(User.email == challenge.email))
-    if not user:
+    user = db.scalar(select(User).where(User.email == challenge.email).with_for_update())
+    if not user or user.deletion_requested_at is not None:
         db.rollback()
         raise HTTPException(status_code=400, detail="Invalid or expired reset authorization.")
     user.password_hash = hash_password(payload.password)
@@ -207,7 +210,7 @@ def resend_otp(payload: ResendRequest, db: Session = Depends(get_db)):
     user = db.scalar(select(User).where(User.email == email))
     if payload.purpose == "registration" and user:
         raise HTTPException(status_code=409, detail="Email already registered.")
-    if payload.purpose == "password_reset" and not user:
+    if payload.purpose == "password_reset" and (not user or user.deletion_requested_at is not None):
         return {"message": "If that account exists, a reset code has been sent."}
     full_name = None
     if payload.purpose == "registration":
@@ -256,6 +259,9 @@ def google_login(payload: GoogleLoginRequest, response: Response, db: Session = 
         )
     user = user or email_user
     if user:
+        user = db.scalar(select(User).where(User.id == user.id).execution_options(populate_existing=True).with_for_update())
+        if user is None or user.deletion_requested_at is not None:
+            raise HTTPException(401, detail="This account is no longer available.")
         if user.google_sub not in (None, identity.sub):
             raise HTTPException(
                 status_code=409,
@@ -269,7 +275,7 @@ def google_login(payload: GoogleLoginRequest, response: Response, db: Session = 
                 status_code=403,
                 detail={"code": "terms_required", "message": "Terms must be accepted."},
             )
-        user = User(full_name=identity.name, email=identity.email, google_sub=identity.sub, password_hash=hash_password(secrets.token_urlsafe(48)), is_verified=True)
+        user = User(id=new_account_id(db), full_name=identity.name, email=identity.email, google_sub=identity.sub, password_hash=hash_password(secrets.token_urlsafe(48)), is_verified=True)
         db.add(user)
     try:
         db.commit()

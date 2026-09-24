@@ -54,7 +54,7 @@ def pg_voice():
     with engine.begin() as conn:
         context = MigrationContext.configure(conn)
         with Operations.context(context):
-            for old in reversed(list(ScriptDirectory(str(ROOT / "alembic")).walk_revisions(base="base", head="0026_voice_live_synthesis"))):
+            for old in reversed(list(ScriptDirectory(str(ROOT / "alembic")).walk_revisions(base="base", head="0027_account_deletion"))):
                 old.module.upgrade()
         conn.execute(sa.insert(User), [
             {"id": i, "full_name": f"L21 PG user {i}", "email": f"l21-pg-{i}@example.invalid",

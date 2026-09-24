@@ -42,6 +42,8 @@ def media_db(tmp_path, monkeypatch):
     try:
         yield factory, storage, settings
     finally:
+        with engine.connect() as connection:
+            connection.exec_driver_sql("PRAGMA foreign_keys=OFF")
         Base.metadata.drop_all(engine)
         engine.dispose()
 

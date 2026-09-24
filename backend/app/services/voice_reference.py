@@ -435,9 +435,11 @@ class RealReferencePreparationProvider:
             raise VoicePreparationError("voice_language_unsupported")
         if not isinstance(source, bytes) or not 0 < len(source) <= self.settings.voice_enrollment_max_bytes:
             raise VoicePreparationError("voice_media_size_invalid")
-        root = Path(self.settings.voice_temp_path).resolve()
-        root.mkdir(parents=True, exist_ok=True)
-        work = Path(tempfile.mkdtemp(prefix="prepare-", dir=root))
+        from app.services.voice_runtime_cleanup import private_voice_directory
+        with private_voice_directory("prepare-", settings=self.settings) as work:
+            return self._prepare_in_directory(source, language, operation_generation, declared_mime, work)
+
+    def _prepare_in_directory(self, source, language, operation_generation, declared_mime, work):
         try:
             try:
                 work.chmod(0o700)
@@ -474,16 +476,8 @@ class RealReferencePreparationProvider:
 
 
 def sweep_voice_temp_root(settings: Settings | None = None) -> int:
-    settings = settings or get_settings()
-    root = Path(settings.voice_temp_path).resolve()
-    if not root.exists():
-        return 0
-    removed = 0
-    for child in root.iterdir():
-        if child.is_dir() and not child.is_symlink() and child.name.startswith("prepare-"):
-            shutil.rmtree(child, ignore_errors=True)
-            removed += 1
-    return removed
+    from app.services.voice_runtime_cleanup import cleanup_voice_runtime
+    return cleanup_voice_runtime(settings) or 0
 
 
 def get_reference_preparation_provider(settings: Settings | None = None):

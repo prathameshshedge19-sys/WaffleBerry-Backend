@@ -344,6 +344,9 @@ class VoiceJobService:
                     or len(realtime_claim_token) != 36))):
             raise ValueError("voice_synthesis_request_invalid")
         scope = lock_scope(db, legacy_id)
+        if kind == "synthesize":
+            from app.services.account_fence import require_active
+            require_active(db, requested_by_user_id, lock=True)
         profile = scope.profile
         version = scope.versions.get(version_id)
         if profile is None or profile.id != profile_id or version is None or version.voice_profile_id != profile_id:
@@ -955,11 +958,32 @@ class VoiceProfileService:
 
 
 def request_account_voice_purge(db, owner_user_id: int):
-    """Internal hook for a future account-deletion parent; owns no commit."""
+    """Internal parent hook; includes actor-private speech in shared Legacies.
+
+    The caller holds the actor and related Legacy fences. No flags, no I/O,
+    no commits. Another owner's selected profile/reference is never purged.
+    """
     legacies = list(db.scalars(select(Legacy).where(Legacy.owner_user_id == owner_user_id)
         .order_by(Legacy.id).with_for_update()))
     service = VoiceProfileService()
-    return [service.request_legacy_purge(db, legacy) for legacy in legacies]
+    profiles = [service.request_legacy_purge(db, legacy) for legacy in legacies]
+    owned_ids = {legacy.id for legacy in legacies}
+    shared_ids = set(db.scalars(select(VoiceJob.legacy_id).where(
+        VoiceJob.requested_by_user_id == owner_user_id))) - owned_ids
+    for legacy_id in sorted(shared_ids):
+        scope = lock_scope(db, legacy_id)
+        now = utcnow()
+        for job in list(scope.jobs.values()):
+            if job.kind != "synthesize" or job.requested_by_user_id != owner_user_id:
+                continue
+            job.state = "cancelled"
+            job.lease_token = job.lease_expires_at = None
+            job.finished_at = now
+            job.safe_error_code = "voice_access_revoked"
+            for asset in list(scope.assets.values()):
+                if asset.job_id == job.id:
+                    _schedule_asset_purge(db, scope, asset, now, not_before=asset.writer_deadline)
+    return profiles
 
 
 @dataclass(frozen=True)

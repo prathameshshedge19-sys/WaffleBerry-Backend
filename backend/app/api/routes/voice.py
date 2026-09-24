@@ -105,16 +105,15 @@ async def _synthesize(text: str, voice: str, provider: VoiceProvider) -> bytes:
 async def synthesize_message(payload: SpeechRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db), provider: VoiceProvider = Depends(get_voice_provider)):
     message = _owned_assistant_message(db, payload.message_id, user.id)
     voice = payload.voice or user.voice_preference or "marin"
-    key = speech_cache.key(message.id, voice, message.content)
-    audio = speech_cache.get(key)
-    cache_status = "hit"
-    if audio is None:
-        audio = await _synthesize(message.content, voice, provider)
-        speech_cache.put(key, audio)
-        cache_status = "miss"
-    else:
-        usage.cache_hit()
-    return Response(audio, media_type="audio/mpeg", headers={"Cache-Control": "private, max-age=3600", "X-Voice-Cache": cache_status})
+    # Private speech must not survive account deletion in untracked process or
+    # browser caches. Only the fixed, non-personal preview remains cacheable.
+    actor_id, content = user.id, message.content
+    db.commit()
+    audio = await _synthesize(content, voice, provider)
+    from app.services.account_fence import require_active
+    require_active(db, actor_id)
+    _owned_assistant_message(db, payload.message_id, actor_id)
+    return Response(audio, media_type="audio/mpeg", headers={"Cache-Control": "no-store", "X-Voice-Cache": "disabled"})
 
 
 @router.post("/preview")

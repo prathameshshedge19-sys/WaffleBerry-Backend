@@ -1,0 +1,28 @@
+[Unit]
+Description=LegaRya account and private-storage erasure
+After=network-online.target postgresql.service
+RequiresMountsFor=/var/lib/legarya-deletion-journal
+OnFailure=legarya-deletion-alert.service
+
+[Service]
+Type=simple
+User=waffleberry
+Group=waffleberry
+WorkingDirectory=/home/waffleberry/WaffleBerry-Backend/backend
+EnvironmentFile=/home/waffleberry/WaffleBerry-Backend/backend/.env
+EnvironmentFile=/etc/legarya-privacy-monitor.env
+Environment=VOICE_TEMP_PATH=/var/lib/legarya-voice-scratch
+ExecStart=/home/waffleberry/WaffleBerry-Backend/backend/.venv/bin/python -m app.services.account_deletion_worker run
+Restart=on-failure
+RestartSec=5
+KillMode=control-group
+TimeoutStopSec=45
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/legarya-voice-scratch /var/lib/legarya-deletion-journal
+
+[Install]
+WantedBy=multi-user.target

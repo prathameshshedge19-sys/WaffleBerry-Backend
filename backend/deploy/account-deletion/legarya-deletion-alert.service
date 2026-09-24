@@ -1,0 +1,19 @@
+[Unit]
+Description=Queue and email privacy-safe deletion/retention alert
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+EnvironmentFile=/home/waffleberry/WaffleBerry-Backend/backend/.env
+EnvironmentFile=/etc/legarya-privacy-monitor.env
+ExecStartPre=/usr/bin/logger --priority authpriv.crit --tag legarya-deletion Privacy-control-failure-observed
+ExecStart=/usr/bin/python3 -B /opt/legarya-privacy/deletion_alerts.py failure
+StateDirectory=legarya-deletion-alerts
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+TimeoutStartSec=75
